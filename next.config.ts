@@ -1,10 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Vercel routes all /api/* requests to the same region as the deployment.
-  // The analyze route makes a Claude Vision API call that can take up to 30s —
-  // increase the function timeout to 60s to give headroom.
-  // See: https://vercel.com/docs/functions/configuring-functions/duration
+  // Keep Anthropic and Stripe SDKs server-side only — prevents Vercel from
+  // attempting to bundle them into the edge runtime.
   serverExternalPackages: ["@anthropic-ai/sdk", "stripe"],
 };
 
