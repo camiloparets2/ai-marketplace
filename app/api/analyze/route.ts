@@ -1,3 +1,7 @@
+// Route segment config — sets the Vercel serverless function timeout for App Router.
+// Claude Vision calls can take 15-20s on complex images; 60s gives safe headroom.
+export const maxDuration = 60;
+
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic, {
   APIConnectionTimeoutError,
