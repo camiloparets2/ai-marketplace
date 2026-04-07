@@ -17,7 +17,7 @@ interface Listing {
   category: string;
   suggested_price: number | null;
   suggested_shipping_service: string;
-  is_published: boolean;
+  is_published?: boolean;
   created_at: string;
 }
 
@@ -94,7 +94,8 @@ export default function DashboardPage() {
             l.id === id ? { ...l, is_published: currentState } : l
           )
         );
-        toast.error("Could not update listing status.");
+        const body = await res.json().catch(() => null);
+        toast.error(body?.error ?? "Could not update listing status.");
       } else {
         toast.success(newState ? "Listing published!" : "Listing unpublished.");
       }
@@ -334,7 +335,7 @@ export default function DashboardPage() {
                       <td className="px-4 py-3 text-center">
                         <button
                           onClick={() =>
-                            void handleTogglePublish(l.id, l.is_published)
+                            void handleTogglePublish(l.id, l.is_published ?? false)
                           }
                           disabled={togglingIds.has(l.id)}
                           className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-colors disabled:opacity-50 ${
