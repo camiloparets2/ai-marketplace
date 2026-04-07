@@ -33,13 +33,32 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Fetch the listing from DB — must be published
-  const { data: listing, error: dbError } = await supabaseAdmin
+  // Fetch the listing from DB — must be published.
+  // Falls back to query without is_published if column doesn't exist yet (42703).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let listing: any = null;
+  let dbError: { code?: string; message: string } | null = null;
+
+  const primary = await supabaseAdmin
     .from("listings_log")
     .select("id, title, suggested_price, condition, category")
     .eq("id", itemId)
     .eq("is_published", true)
     .single();
+
+  if (primary.error?.code === "42703") {
+    console.warn("[checkout] is_published column missing — querying without it");
+    const fallback = await supabaseAdmin
+      .from("listings_log")
+      .select("id, title, suggested_price, condition, category")
+      .eq("id", itemId)
+      .single();
+    listing = fallback.data;
+    dbError = fallback.error;
+  } else {
+    listing = primary.data;
+    dbError = primary.error;
+  }
 
   if (dbError || !listing) {
     return NextResponse.json(

@@ -66,10 +66,10 @@ function errorResponse(
 
 // ─── Route ────────────────────────────────────────────────────────────────────
 
-// Expected request body:
-//   { image: string (base64), mimeType: AcceptedMimeType }
+// Expected request body (Phase 3 multi-image):
+//   { images: [{ data: string (base64), mimeType: AcceptedMimeType }], condition: string }
 //
-// Image must be pre-processed client-side:
+// Images must be pre-processed client-side:
 //   1. HEIC → JPEG conversion via heic2any
 //   2. Resize to max 2048px on longest edge
 //   3. JPEG re-encode at quality 0.85  ← see lib/image-validation.ts JPEG_QUALITY

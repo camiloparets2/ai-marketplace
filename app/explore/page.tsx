@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Search, Tag, Package, ShoppingCart, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -89,7 +90,7 @@ export default function ExplorePage() {
           setCategories(data.categories ?? []);
         }
       } catch {
-        // Silent fail for public explore
+        toast.error("Failed to load listings. Please try again.");
       } finally {
         setLoading(false);
       }
@@ -104,12 +105,12 @@ export default function ExplorePage() {
 
   // Debounced search + category filter
   useEffect(() => {
-    if (!search && !selectedCategory) return;
     const timer = setTimeout(() => {
       void fetchListings(search, selectedCategory);
     }, 300);
     return () => clearTimeout(timer);
-  }, [search, selectedCategory, fetchListings]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, selectedCategory]);
 
   // ── Buy Now handler ────────────────────────────────────────────────────────
   async function handleBuyNow(itemId: string) {
@@ -124,14 +125,14 @@ export default function ExplorePage() {
       const data = await res.json();
 
       if (!res.ok || !data.url) {
-        alert(data.error ?? "Could not start checkout. Please try again.");
+        toast.error(data.error ?? "Could not start checkout. Please try again.");
         return;
       }
 
       // Redirect to Stripe Checkout
       window.location.href = data.url;
     } catch {
-      alert("Network error. Please try again.");
+      toast.error("Network error. Please try again.");
     } finally {
       setBuyingId(null);
     }

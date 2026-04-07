@@ -9,24 +9,43 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const search = searchParams.get("search") ?? "";
   const category = searchParams.get("category") ?? "";
 
-  let query = supabaseAdmin
-    .from("listings_log")
-    .select(
-      "id, title, brand, model, condition, category, suggested_price, suggested_shipping_service, created_at"
-    )
-    .eq("is_published", true)
-    .order("created_at", { ascending: false })
-    .limit(100);
+  // Build the base query — try with is_published filter first; fall back
+  // without it if the column doesn't exist yet (PostgreSQL error 42703).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let data: any[] | null = null;
+  let error: { code?: string; message: string } | null = null;
 
-  if (search) {
-    query = query.ilike("title", `%${search}%`);
+  async function runQuery(includePublishedFilter: boolean) {
+    let q = supabaseAdmin
+      .from("listings_log")
+      .select(
+        "id, title, brand, model, condition, category, suggested_price, suggested_shipping_service, created_at"
+      )
+      .order("created_at", { ascending: false })
+      .limit(100);
+
+    if (includePublishedFilter) {
+      q = q.eq("is_published", true);
+    }
+    if (search) {
+      q = q.ilike("title", `%${search}%`);
+    }
+    if (category) {
+      q = q.ilike("category", `%${category}%`);
+    }
+    return q;
   }
 
-  if (category) {
-    query = query.ilike("category", `%${category}%`);
+  const primary = await runQuery(true);
+  if (primary.error?.code === "42703") {
+    console.warn("[explore] is_published column missing — querying without it");
+    const fallback = await runQuery(false);
+    data = fallback.data;
+    error = fallback.error;
+  } else {
+    data = primary.data;
+    error = primary.error;
   }
-
-  const { data, error } = await query;
 
   if (error) {
     console.error("[explore] Supabase query failed", error);
