@@ -37,7 +37,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const primary = await supabaseAdmin
     .from("listings_log")
     .select(
-      "id, title, brand, model, condition, category, suggested_price, suggested_shipping_service, is_published, created_at"
+      "id, title, brand, model, condition, category, suggested_price, suggested_shipping_service, is_published, status, created_at"
     )
     .eq("seller_id", user.id)
     .order("created_at", { ascending: false });
@@ -111,6 +111,23 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     publish = body.is_published;
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  // Block publishing sold items — they should stay off the marketplace.
+  if (publish) {
+    const { data: item } = await supabaseAdmin
+      .from("listings_log")
+      .select("status")
+      .eq("id", itemId)
+      .eq("seller_id", user.id)
+      .single();
+
+    if (item?.status === "sold") {
+      return NextResponse.json(
+        { error: "Sold items cannot be republished." },
+        { status: 400 }
+      );
+    }
   }
 
   // Only allow toggling items that belong to this seller

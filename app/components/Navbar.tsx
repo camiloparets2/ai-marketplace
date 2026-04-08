@@ -56,25 +56,25 @@ export default function Navbar() {
             {/* Explore — always visible (public) */}
             <Link href="/explore" className={linkClass("/explore")}>
               <Compass className="w-4 h-4" />
-              Explore
+              <span className="hidden sm:inline">Explore</span>
             </Link>
 
             {email ? (
               <>
                 <Link href="/" className={linkClass("/")}>
                   <Camera className="w-4 h-4" />
-                  Scanner
+                  <span className="hidden sm:inline">Scanner</span>
                 </Link>
                 <Link href="/dashboard" className={linkClass("/dashboard")}>
                   <LayoutDashboard className="w-4 h-4" />
-                  Dashboard
+                  <span className="hidden sm:inline">Dashboard</span>
                 </Link>
                 <button
                   onClick={() => void handleSignOut()}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-gray-600 hover:bg-red-50 hover:text-red-700 transition-colors ml-2"
                 >
                   <LogOut className="w-4 h-4" />
-                  Sign Out
+                  <span className="hidden sm:inline">Sign Out</span>
                 </button>
               </>
             ) : (
@@ -83,7 +83,7 @@ export default function Navbar() {
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 hover:text-gray-900 transition-colors"
               >
                 <LogIn className="w-4 h-4" />
-                Sign In
+                <span className="hidden sm:inline">Sign In</span>
               </Link>
             )}
           </div>

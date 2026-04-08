@@ -21,6 +21,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .select(
         "id, title, brand, model, condition, category, suggested_price, suggested_shipping_service, created_at"
       )
+      .eq("status", "available")
       .order("created_at", { ascending: false })
       .limit(100);
 

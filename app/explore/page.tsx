@@ -83,7 +83,10 @@ export default function ExplorePage() {
         if (categoryFilter) params.set("category", categoryFilter);
 
         const res = await fetch(`/api/explore?${params.toString()}`);
-        if (!res.ok) return;
+        if (!res.ok) {
+          toast.error("Failed to load listings.");
+          return;
+        }
         const data = await res.json();
         setListings(data.listings ?? []);
         if (!categoryFilter && !searchQuery) {

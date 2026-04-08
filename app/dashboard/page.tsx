@@ -2,7 +2,17 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Trash2, Download, Package, DollarSign, Eye, EyeOff } from "lucide-react";
+import {
+  Trash2,
+  Download,
+  Package,
+  DollarSign,
+  Eye,
+  EyeOff,
+  CheckCircle,
+  Landmark,
+  Loader2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { createClient } from "@/utils/supabase/client";
 
@@ -18,6 +28,7 @@ interface Listing {
   suggested_price: number | null;
   suggested_shipping_service: string;
   is_published?: boolean;
+  status?: string; // "available" | "sold"
   created_at: string;
 }
 
@@ -39,6 +50,12 @@ export default function DashboardPage() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [loading, setLoading] = useState(true);
   const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set());
+  const [connectStatus, setConnectStatus] = useState<{
+    connected: boolean;
+    charges_enabled: boolean;
+  } | null>(null);
+  const [connectLoading, setConnectLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   // ── Auth gate ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -56,7 +73,10 @@ export default function DashboardPage() {
   const fetchListings = useCallback(async () => {
     try {
       const res = await fetch("/api/dashboard");
-      if (!res.ok) return;
+      if (!res.ok) {
+        toast.error("Failed to load your listings.");
+        return;
+      }
       const data = await res.json();
       setListings(data.listings ?? []);
     } catch {
@@ -66,9 +86,52 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const fetchConnectStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/connect");
+      if (res.ok) {
+        const data = await res.json();
+        setConnectStatus(data);
+      }
+    } catch {
+      // Non-critical — badge just won't show.
+    }
+  }, []);
+
   useEffect(() => {
-    if (authChecked) void fetchListings();
-  }, [authChecked, fetchListings]);
+    if (authChecked) {
+      void fetchListings();
+      void fetchConnectStatus();
+    }
+  }, [authChecked, fetchListings, fetchConnectStatus]);
+
+  // Refresh Connect status when returning from Stripe onboarding
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("connect") === "complete") {
+      void fetchConnectStatus();
+      // Clean URL without reload
+      window.history.replaceState({}, "", "/dashboard");
+    }
+  }, [fetchConnectStatus]);
+
+  // ── Start Stripe Connect onboarding ─────────────────────────────────────────
+  async function handleConnectOnboarding() {
+    setConnectLoading(true);
+    try {
+      const res = await fetch("/api/connect", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || !data.url) {
+        toast.error(data.error ?? "Could not start onboarding. Please try again.");
+        return;
+      }
+      window.location.href = data.url;
+    } catch {
+      toast.error("Network error. Please try again.");
+    } finally {
+      setConnectLoading(false);
+    }
+  }
 
   // ── Toggle publish (optimistic) ────────────────────────────────────────────
   async function handleTogglePublish(id: string, currentState: boolean) {
@@ -117,6 +180,8 @@ export default function DashboardPage() {
 
   // ── Delete listing (optimistic) ────────────────────────────────────────────
   async function handleDelete(id: string) {
+    if (deletingId) return; // prevent double-click
+    setDeletingId(id);
     const prev = listings;
     setListings((l) => l.filter((item) => item.id !== id));
 
@@ -136,6 +201,8 @@ export default function DashboardPage() {
     } catch {
       setListings(prev);
       toast.error("Network error. Please try again.");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -166,7 +233,7 @@ export default function DashboardPage() {
       l.category,
       l.suggested_price?.toFixed(2) ?? "",
       l.suggested_shipping_service,
-      l.is_published ? "Published" : "Draft",
+      l.status === "sold" ? "Sold" : l.is_published ? "Published" : "Draft",
       new Date(l.created_at).toLocaleDateString(),
     ]);
 
@@ -193,6 +260,7 @@ export default function DashboardPage() {
     0
   );
   const publishedCount = listings.filter((l) => l.is_published).length;
+  const soldCount = listings.filter((l) => l.status === "sold").length;
 
   // ── Auth loading spinner ───────────────────────────────────────────────────
   if (!authChecked) {
@@ -207,20 +275,42 @@ export default function DashboardPage() {
     <main className="flex-1 bg-gray-50 px-4 py-8">
       <div className="max-w-5xl mx-auto flex flex-col gap-6">
         {/* ── Header + Export ──────────────────────────────────────────────── */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-3">
           <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-          <button
-            onClick={exportCsv}
-            disabled={listings.length === 0}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-white border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            <Download className="w-4 h-4" />
-            Export CSV
-          </button>
+          <div className="flex items-center gap-2">
+            {/* Stripe Connect badge / button */}
+            {connectStatus?.charges_enabled ? (
+              <span className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-green-50 border border-green-200 text-sm font-medium text-green-700">
+                <CheckCircle className="w-4 h-4" />
+                Payouts Active
+              </span>
+            ) : (
+              <button
+                onClick={() => void handleConnectOnboarding()}
+                disabled={connectLoading}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+              >
+                {connectLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Landmark className="w-4 h-4" />
+                )}
+                Connect Bank Account
+              </button>
+            )}
+            <button
+              onClick={exportCsv}
+              disabled={listings.length === 0}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-white border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Export CSV
+            </button>
+          </div>
         </div>
 
         {/* ── Metric cards ────────────────────────────────────────────────── */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 flex items-center gap-4">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
               <Package className="w-5 h-5 text-blue-600" />
@@ -262,6 +352,21 @@ export default function DashboardPage() {
               ) : (
                 <p className="text-2xl font-bold text-gray-900">
                   {publishedCount}
+                </p>
+              )}
+            </div>
+          </div>
+          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 flex items-center gap-4">
+            <div className="w-10 h-10 bg-red-50 rounded-lg flex items-center justify-center">
+              <CheckCircle className="w-5 h-5 text-red-600" />
+            </div>
+            <div>
+              <p className="text-sm text-gray-500">Sold</p>
+              {loading ? (
+                <Skeleton className="h-7 w-12 mt-0.5" />
+              ) : (
+                <p className="text-2xl font-bold text-gray-900">
+                  {soldCount}
                 </p>
               )}
             </div>
@@ -333,29 +438,35 @@ export default function DashboardPage() {
                           : "---"}
                       </td>
                       <td className="px-4 py-3 text-center">
-                        <button
-                          onClick={() =>
-                            void handleTogglePublish(l.id, l.is_published ?? false)
-                          }
-                          disabled={togglingIds.has(l.id)}
-                          className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-colors disabled:opacity-50 ${
-                            l.is_published
-                              ? "bg-green-100 text-green-700 hover:bg-green-200"
-                              : "bg-gray-100 text-gray-500 hover:bg-gray-200"
-                          }`}
-                        >
-                          {l.is_published ? (
-                            <>
-                              <Eye className="w-3 h-3" />
-                              Published
-                            </>
-                          ) : (
-                            <>
-                              <EyeOff className="w-3 h-3" />
-                              Draft
-                            </>
-                          )}
-                        </button>
+                        {l.status === "sold" ? (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700">
+                            Sold
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() =>
+                              void handleTogglePublish(l.id, l.is_published ?? false)
+                            }
+                            disabled={togglingIds.has(l.id)}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-colors disabled:opacity-50 ${
+                              l.is_published
+                                ? "bg-green-100 text-green-700 hover:bg-green-200"
+                                : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                            }`}
+                          >
+                            {l.is_published ? (
+                              <>
+                                <Eye className="w-3 h-3" />
+                                Published
+                              </>
+                            ) : (
+                              <>
+                                <EyeOff className="w-3 h-3" />
+                                Draft
+                              </>
+                            )}
+                          </button>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right text-gray-500 hidden sm:table-cell">
                         {new Date(l.created_at).toLocaleDateString()}
@@ -363,8 +474,9 @@ export default function DashboardPage() {
                       <td className="px-2 py-3">
                         <button
                           onClick={() => void handleDelete(l.id)}
+                          disabled={deletingId === l.id}
                           title="Delete listing"
-                          className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                          className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>

@@ -33,24 +33,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Fetch the listing from DB — must be published.
-  // Falls back to query without is_published if column doesn't exist yet (42703).
+  // Fetch the listing from DB — must be published and available.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let listing: any = null;
   let dbError: { code?: string; message: string } | null = null;
 
   const primary = await supabaseAdmin
     .from("listings_log")
-    .select("id, title, suggested_price, condition, category")
+    .select("id, title, suggested_price, condition, category, seller_id")
     .eq("id", itemId)
     .eq("is_published", true)
+    .eq("status", "available")
     .single();
 
   if (primary.error?.code === "42703") {
-    console.warn("[checkout] is_published column missing — querying without it");
+    console.warn("[checkout] is_published/status column missing — querying without it");
     const fallback = await supabaseAdmin
       .from("listings_log")
-      .select("id, title, suggested_price, condition, category")
+      .select("id, title, suggested_price, condition, category, seller_id")
       .eq("id", itemId)
       .single();
     listing = fallback.data;
@@ -77,8 +77,32 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // ── Look up seller's Stripe Connect account ────────────────────────────────
+  let sellerStripeAccountId: string | null = null;
+
+  if (listing.seller_id) {
+    const { data: sellerProfile } = await supabaseAdmin
+      .from("seller_profiles")
+      .select("stripe_account_id, charges_enabled")
+      .eq("id", listing.seller_id)
+      .single();
+
+    if (sellerProfile?.charges_enabled && sellerProfile.stripe_account_id) {
+      sellerStripeAccountId = sellerProfile.stripe_account_id;
+    }
+  }
+
+  if (!sellerStripeAccountId) {
+    return NextResponse.json(
+      { error: "This seller hasn't set up payouts yet. Please try again later." },
+      { status: 400 }
+    );
+  }
+
   // Convert dollars to cents for Stripe (e.g. $10.00 → 1000)
   const priceInCents = Math.round(listing.suggested_price * 100);
+  // Platform takes 10% fee
+  const applicationFee = Math.round(priceInCents * 0.1);
 
   const origin = req.headers.get("origin") ?? req.nextUrl.origin;
 
@@ -103,6 +127,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           quantity: 1,
         },
       ],
+      payment_intent_data: {
+        application_fee_amount: applicationFee,
+        transfer_data: {
+          destination: sellerStripeAccountId,
+        },
+      },
       success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin}/explore`,
       metadata: {

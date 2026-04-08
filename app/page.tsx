@@ -479,7 +479,7 @@ export default function Page() {
                         Clear all
                       </button>
                     </div>
-                    <div className="grid grid-cols-5 gap-2">
+                    <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
                       {selectedFiles.map((sf, i) => (
                         <div key={i} className="relative aspect-square">
                           {/* eslint-disable-next-line @next/next/no-img-element */}
