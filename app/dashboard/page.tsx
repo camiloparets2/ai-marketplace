@@ -164,7 +164,11 @@ export default function DashboardPage() {
       } else {
         toast.success(newState ? "Listing published!" : "Listing unpublished.");
         if (newState) {
-          posthog.capture("item_published", { item_id: id });
+          try {
+            posthog?.capture("item_published", { item_id: id });
+          } catch {
+            // Analytics blocked — non-critical
+          }
         }
       }
     } catch {

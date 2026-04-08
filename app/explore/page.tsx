@@ -72,13 +72,14 @@ export default function ExplorePage() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [filtering, setFiltering] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
   const [buyingId, setBuyingId] = useState<string | null>(null);
 
   const fetchListings = useCallback(
     async (searchQuery: string, categoryFilter: string) => {
-      setLoading(true);
+      setFiltering(true);
       try {
         const params = new URLSearchParams();
         if (searchQuery) params.set("search", searchQuery);
@@ -98,6 +99,7 @@ export default function ExplorePage() {
         toast.error("Failed to load listings. Please try again.");
       } finally {
         setLoading(false);
+        setFiltering(false);
       }
     },
     []
@@ -113,7 +115,11 @@ export default function ExplorePage() {
     const timer = setTimeout(() => {
       void fetchListings(search, selectedCategory);
       if (search.trim()) {
-        posthog.capture("search_performed", { query: search.trim() });
+        try {
+          posthog?.capture("search_performed", { query: search.trim() });
+        } catch {
+          // Analytics blocked — non-critical
+        }
       }
     }, 300);
     return () => clearTimeout(timer);
@@ -123,10 +129,14 @@ export default function ExplorePage() {
   // ── Buy Now handler ────────────────────────────────────────────────────────
   async function handleBuyNow(itemId: string) {
     const item = listings.find((l) => l.id === itemId);
-    posthog.capture("buy_now_clicked", {
-      item_id: itemId,
-      price: item?.suggested_price,
-    });
+    try {
+      posthog?.capture("buy_now_clicked", {
+        item_id: itemId,
+        price: item?.suggested_price,
+      });
+    } catch {
+      // Analytics blocked — non-critical
+    }
 
     setBuyingId(itemId);
     try {
@@ -236,7 +246,7 @@ export default function ExplorePage() {
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+          <div className={`grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 transition-opacity ${filtering ? "opacity-60" : "opacity-100"}`}>
             {listings.map((l) => (
               <div
                 key={l.id}
@@ -291,7 +301,7 @@ export default function ExplorePage() {
                     {l.suggested_price != null && (
                       <button
                         onClick={() => void handleBuyNow(l.id)}
-                        disabled={buyingId === l.id}
+                        disabled={buyingId !== null}
                         className="w-full py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-1.5"
                       >
                         {buyingId === l.id ? (

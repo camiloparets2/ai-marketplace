@@ -73,14 +73,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         account.id,
         error
       );
-    } else {
-      console.log(
-        "[webhook/stripe] Updated charges_enabled for",
-        account.id,
-        "→",
-        chargesEnabled
+      // Return 500 so Stripe retries the webhook.
+      return NextResponse.json(
+        { error: "Failed to update seller profile" },
+        { status: 500 }
       );
     }
+
+    console.log(
+      "[webhook/stripe] Updated charges_enabled for",
+      account.id,
+      "→",
+      chargesEnabled
+    );
   }
 
   // ── Handle checkout.session.completed ───────────────────────────────────────

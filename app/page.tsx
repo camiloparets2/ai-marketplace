@@ -279,10 +279,14 @@ export default function Page() {
       setPriceRationale(result.priceRationale ?? null);
       setStage("review");
 
-      posthog.capture("item_analyzed", {
-        condition: selectedCondition,
-        category: result.category,
-      });
+      try {
+        posthog?.capture("item_analyzed", {
+          condition: selectedCondition,
+          category: result.category,
+        });
+      } catch {
+        // Analytics blocked (ad-blocker) — non-critical
+      }
     } catch {
       setError("Connection failed. Please check your network and try again.");
       setStage("error");
@@ -521,7 +525,8 @@ export default function Page() {
             {selectedCondition && selectedFiles.length > 0 && (
               <button
                 onClick={() => void handleAnalyze()}
-                className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
+                disabled={stage !== "idle"}
+                className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 Analyze {selectedFiles.length} photo
                 {selectedFiles.length !== 1 ? "s" : ""} as &quot;
