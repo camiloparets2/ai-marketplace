@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { supabaseAdmin } from "@/lib/supabase";
+import {
+  getCheckoutLimiter,
+  isRateLimitConfigured,
+  getClientIp,
+} from "@/lib/rate-limit";
 
 // Lazily initialised — avoids import-time crash when STRIPE_SECRET_KEY is
 // absent during the build step (Next.js collects page data at build time).
@@ -31,6 +36,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: "Invalid JSON body" },
       { status: 400 }
     );
+  }
+
+  // ── Rate limiting — per IP, 10 req/min ─────────────────────────────────────
+  if (isRateLimitConfigured()) {
+    try {
+      const ip = getClientIp(req);
+      const { success } = await getCheckoutLimiter().limit(ip);
+      if (!success) {
+        return NextResponse.json(
+          { error: "Too many checkout attempts. Please wait a moment." },
+          { status: 429 }
+        );
+      }
+    } catch (rlErr) {
+      console.error("[checkout] Rate limiter error — failing open", rlErr);
+    }
   }
 
   // Fetch the listing from DB — must be published and available.

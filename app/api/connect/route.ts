@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { createServerClient } from "@supabase/ssr";
 import { supabaseAdmin } from "@/lib/supabase";
+import {
+  getConnectLimiter,
+  isRateLimitConfigured,
+} from "@/lib/rate-limit";
 
 let _stripe: Stripe | null = null;
 function getStripe(): Stripe {
@@ -36,6 +40,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // ── Rate limiting — per user, 5 req/hour ──────────────────────────────────
+  if (isRateLimitConfigured()) {
+    try {
+      const { success } = await getConnectLimiter().limit(user.id);
+      if (!success) {
+        return NextResponse.json(
+          { error: "Too many onboarding attempts. Please try again later." },
+          { status: 429 }
+        );
+      }
+    } catch (rlErr) {
+      console.error("[connect] Rate limiter error — failing open", rlErr);
+    }
   }
 
   // ── Check for existing Connect account ──────────────────────────────────────

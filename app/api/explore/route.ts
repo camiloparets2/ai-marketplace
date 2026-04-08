@@ -4,10 +4,19 @@ import { supabaseAdmin } from "@/lib/supabase";
 // Public endpoint — no auth required.
 // Fetches only PUBLISHED listings for the Explore marketplace feed.
 
+// Escape SQL LIKE/ILIKE wildcard characters so user input is treated as literal text.
+function escapeLike(str: string): string {
+  return str.replace(/[%_\\]/g, "\\$&");
+}
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const { searchParams } = new URL(req.url);
-  const search = searchParams.get("search") ?? "";
-  const category = searchParams.get("category") ?? "";
+  const rawSearch = searchParams.get("search") ?? "";
+  const rawCategory = searchParams.get("category") ?? "";
+
+  // Sanitize: trim, cap length, escape LIKE wildcards
+  const search = escapeLike(rawSearch.trim().slice(0, 200));
+  const category = escapeLike(rawCategory.trim().slice(0, 200));
 
   // Build the base query — try with is_published filter first; fall back
   // without it if the column doesn't exist yet (PostgreSQL error 42703).
