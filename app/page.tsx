@@ -12,6 +12,7 @@ import {
 import { getAllFlatRates } from "@/lib/shipping";
 import { prepareImageForUpload } from "@/lib/image-validation";
 import { createClient } from "@/utils/supabase/client";
+import { usePostHog } from "posthog-js/react";
 
 // ─── Stage machine ────────────────────────────────────────────────────────────
 
@@ -122,6 +123,7 @@ const inputClass =
 
 export default function Page() {
   const router = useRouter();
+  const posthog = usePostHog();
   const [authChecked, setAuthChecked] = useState(false);
 
   // ── Auth gate ─────────────────────────────────────────────────────────────
@@ -276,6 +278,11 @@ export default function Page() {
       }
       setPriceRationale(result.priceRationale ?? null);
       setStage("review");
+
+      posthog.capture("item_analyzed", {
+        condition: selectedCondition,
+        category: result.category,
+      });
     } catch {
       setError("Connection failed. Please check your network and try again.");
       setStage("error");

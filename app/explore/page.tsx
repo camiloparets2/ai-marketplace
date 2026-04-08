@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Search, Tag, Package, ShoppingCart, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { usePostHog } from "posthog-js/react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,7 @@ function timeAgo(dateStr: string): string {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ExplorePage() {
+  const posthog = usePostHog();
   const [listings, setListings] = useState<Listing[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -110,6 +112,9 @@ export default function ExplorePage() {
   useEffect(() => {
     const timer = setTimeout(() => {
       void fetchListings(search, selectedCategory);
+      if (search.trim()) {
+        posthog.capture("search_performed", { query: search.trim() });
+      }
     }, 300);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -117,6 +122,12 @@ export default function ExplorePage() {
 
   // ── Buy Now handler ────────────────────────────────────────────────────────
   async function handleBuyNow(itemId: string) {
+    const item = listings.find((l) => l.id === itemId);
+    posthog.capture("buy_now_clicked", {
+      item_id: itemId,
+      price: item?.suggested_price,
+    });
+
     setBuyingId(itemId);
     try {
       const res = await fetch("/api/checkout", {

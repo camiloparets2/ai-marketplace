@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { createClient } from "@/utils/supabase/client";
+import { usePostHog } from "posthog-js/react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -46,6 +47,7 @@ function Skeleton({ className }: { className?: string }) {
 
 export default function DashboardPage() {
   const router = useRouter();
+  const posthog = usePostHog();
   const [authChecked, setAuthChecked] = useState(false);
   const [listings, setListings] = useState<Listing[]>([]);
   const [loading, setLoading] = useState(true);
@@ -161,6 +163,9 @@ export default function DashboardPage() {
         toast.error(body?.error ?? "Could not update listing status.");
       } else {
         toast.success(newState ? "Listing published!" : "Listing unpublished.");
+        if (newState) {
+          posthog.capture("item_published", { item_id: id });
+        }
       }
     } catch {
       setListings((prev) =>
