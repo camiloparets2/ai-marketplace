@@ -43,3 +43,5 @@ next-env.d.ts
 # local tooling (not part of the app)
 .claude/
 .gstack/
+
+.vercel

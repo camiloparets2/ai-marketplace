@@ -25,7 +25,7 @@ export interface ExtractionResult {
   model: string | null;
   // UPC extracted via OCR from visible barcode or label text.
   upc: string | null;
-  condition: "New" | "Like New" | "Very Good" | "Good" | "Acceptable";
+  condition: "New" | "Like New" | "Good" | "Fair" | "Poor";
   // eBay-style category path, e.g. "Electronics > Headphones"
   category: string;
   // Open-ended key-value spec pairs (wattage, color, size, material, etc.).
@@ -43,6 +43,14 @@ export interface ExtractionResult {
   suggestedShippingService: ShippingService;
   // Dollar amount from the flat rate lookup table, or null when MANUAL_ESTIMATE_NEEDED.
   estimatedShippingCost: number | null;
+  // Competitive resale price suggested by Claude based on brand, model, condition,
+  // and current market knowledge (eBay, FB Marketplace comparable sales).
+  // Null when Claude cannot make a confident estimate (unknown/generic items).
+  suggestedPrice: number | null;
+  // 1–2 sentence rationale explaining the pricing recommendation, e.g.
+  // "Used Sony WH-1000XM4 in Good condition typically sells for $150–$180 on eBay.
+  //  Priced at $165 to sell within a week." Null when suggestedPrice is null.
+  priceRationale: string | null;
   // Per-field confidence scores from 0–100. Only keys that Claude populated are present.
   // UI renders a yellow "needs review" indicator when confidence[field] < CONFIDENCE_THRESHOLD.
   // NOTE (Phase 2 TODO): Claude generates confidence scores in the same inference pass as
@@ -90,7 +98,7 @@ export const EXTRACTION_TOOL_SCHEMA = {
       },
       condition: {
         type: "string",
-        enum: ["New", "Like New", "Very Good", "Good", "Acceptable"],
+        enum: ["New", "Like New", "Good", "Fair", "Poor"],
         description: "Condition assessment based on visible wear",
       },
       category: {
@@ -140,6 +148,16 @@ export const EXTRACTION_TOOL_SCHEMA = {
         description:
           "Estimated shipping cost in dollars from the flat rate table, null when MANUAL_ESTIMATE_NEEDED",
       },
+      suggestedPrice: {
+        type: ["number", "null"],
+        description:
+          "Competitive resale price in USD. Use your knowledge of current market values on eBay, Facebook Marketplace, and similar platforms for this exact item in this condition. Price to sell within 1–2 weeks — not the highest possible price, not a fire-sale price. Null only if the item is too generic or unusual to price confidently.",
+      },
+      priceRationale: {
+        type: ["string", "null"],
+        description:
+          "1–2 sentences explaining your price. Cite the comparable market (e.g. 'Used Sony WH-1000XM4 in Good condition sells for $150–180 on eBay. $165 targets a quick sale.'). Null when suggestedPrice is null.",
+      },
       confidence: {
         type: "object",
         description:
@@ -159,6 +177,8 @@ export const EXTRACTION_TOOL_SCHEMA = {
       "estimatedWeightLbs",
       "suggestedShippingService",
       "estimatedShippingCost",
+      "suggestedPrice",
+      "priceRationale",
       "confidence",
     ],
   },
