@@ -5,20 +5,15 @@ const nextConfig: NextConfig = {
   // attempting to bundle them into the edge runtime.
   serverExternalPackages: ["@anthropic-ai/sdk", "stripe", "@supabase/supabase-js"],
 
-  // Allow external images from Google Custom Search stock photos
+  // Allow external images — Google Custom Search returns URLs from any domain
+  // (amazon.com, walmart.com, ebay.com, etc.). We use unoptimized on the
+  // <Image> component as the primary bypass, but this wildcard ensures
+  // Next.js never blocks a valid stock photo URL.
   images: {
     remotePatterns: [
       {
         protocol: "https",
-        hostname: "encrypted-tbn0.gstatic.com",
-      },
-      {
-        protocol: "https",
-        hostname: "*.gstatic.com",
-      },
-      {
-        protocol: "https",
-        hostname: "**.googleusercontent.com",
+        hostname: "**",
       },
     ],
   },

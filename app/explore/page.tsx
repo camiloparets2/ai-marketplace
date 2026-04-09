@@ -67,6 +67,44 @@ function timeAgo(dateStr: string): string {
   return `${days}d ago`;
 }
 
+// ─── Stock image with error fallback ─────────────────────────────────────────
+// If the Google stock image URL 404s or fails to load (CORS, expired, etc.),
+// this component swaps itself out for the gradient placeholder automatically.
+
+function StockImage({
+  src,
+  alt,
+  fallbackGradient,
+}: {
+  src: string;
+  alt: string;
+  fallbackGradient: string;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return (
+      <div
+        className={`w-full h-full bg-gradient-to-br ${fallbackGradient} flex items-center justify-center`}
+      >
+        <Box className="w-8 h-8 text-gray-300" />
+      </div>
+    );
+  }
+
+  return (
+    <Image
+      src={src}
+      alt={alt}
+      fill
+      className="object-contain p-2"
+      sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
+      unoptimized
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ExplorePage() {
@@ -257,13 +295,10 @@ export default function ExplorePage() {
                 {/* Product image or fallback */}
                 <div className="relative h-36 bg-gray-50 flex items-center justify-center overflow-hidden">
                   {l.stock_image_url ? (
-                    <Image
+                    <StockImage
                       src={l.stock_image_url}
                       alt={l.title}
-                      fill
-                      className="object-contain p-2"
-                      sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
-                      unoptimized
+                      fallbackGradient={getCategoryGradient(l.category)}
                     />
                   ) : (
                     <div

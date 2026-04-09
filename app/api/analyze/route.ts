@@ -30,11 +30,23 @@ async function fetchStockImageUrl(
 ): Promise<string | null> {
   const apiKey = process.env.GOOGLE_SEARCH_API_KEY;
   const cx = process.env.GOOGLE_SEARCH_ENGINE_ID;
-  if (!apiKey || !cx) return null;
+
+  if (!apiKey || !cx) {
+    console.warn("[analyze/google] SKIPPED — missing env vars:", {
+      hasKey: !!apiKey,
+      hasCx: !!cx,
+    });
+    return null;
+  }
 
   // Build a short, precise search query from the product title + brand
   const query = [brand, title].filter(Boolean).join(" ").slice(0, 120);
-  if (!query.trim()) return null;
+  if (!query.trim()) {
+    console.warn("[analyze/google] SKIPPED — empty query from title/brand");
+    return null;
+  }
+
+  console.log("[analyze/google] Searching for:", JSON.stringify(query));
 
   try {
     const url = new URL("https://www.googleapis.com/customsearch/v1");
@@ -46,19 +58,46 @@ async function fetchStockImageUrl(
     url.searchParams.set("imgSize", "medium");
     url.searchParams.set("safe", "active");
 
-    const res = await fetch(url.toString(), { signal: AbortSignal.timeout(5_000) });
+    const res = await fetch(url.toString(), {
+      signal: AbortSignal.timeout(5_000),
+    });
+
     if (!res.ok) {
-      console.warn("[analyze] Google Image search failed:", res.status);
+      // Read the raw error body so we can see auth/quota/restriction errors
+      const errorBody = await res.text().catch(() => "(unreadable)");
+      console.error(
+        "[analyze/google] API error:",
+        res.status,
+        res.statusText,
+        "—",
+        errorBody
+      );
       return null;
     }
 
     const data = (await res.json()) as {
       items?: Array<{ link?: string }>;
+      searchInformation?: { totalResults?: string };
     };
 
-    return data.items?.[0]?.link ?? null;
+    if (!data.items || data.items.length === 0) {
+      console.warn(
+        "[analyze/google] No images found for query:",
+        JSON.stringify(query),
+        "| totalResults:",
+        data.searchInformation?.totalResults ?? "unknown"
+      );
+      return null;
+    }
+
+    const imageUrl = data.items[0].link ?? null;
+    console.log(
+      "[analyze/google] Found image:",
+      imageUrl?.slice(0, 120) ?? "null"
+    );
+    return imageUrl;
   } catch (err) {
-    console.warn("[analyze] Google Image search error:", err);
+    console.error("[analyze/google] Exception:", err);
     return null;
   }
 }
