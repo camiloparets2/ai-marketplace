@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Search, Tag, Package, ShoppingCart, Loader2 } from "lucide-react";
+import { Search, Box, Package, ShoppingCart, Loader2 } from "lucide-react";
+import Image from "next/image";
 import { toast } from "sonner";
 import { usePostHog } from "posthog-js/react";
 
@@ -16,6 +17,7 @@ interface Listing {
   category: string;
   suggested_price: number | null;
   suggested_shipping_service: string;
+  stock_image_url: string | null;
   created_at: string;
 }
 
@@ -252,11 +254,24 @@ export default function ExplorePage() {
                 key={l.id}
                 className="bg-white rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col"
               >
-                {/* Category color header */}
-                <div
-                  className={`h-24 bg-gradient-to-br ${getCategoryGradient(l.category)} flex items-center justify-center`}
-                >
-                  <Tag className="w-8 h-8 text-gray-300" />
+                {/* Product image or fallback */}
+                <div className="relative h-36 bg-gray-50 flex items-center justify-center overflow-hidden">
+                  {l.stock_image_url ? (
+                    <Image
+                      src={l.stock_image_url}
+                      alt={l.title}
+                      fill
+                      className="object-contain p-2"
+                      sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
+                      unoptimized
+                    />
+                  ) : (
+                    <div
+                      className={`w-full h-full bg-gradient-to-br ${getCategoryGradient(l.category)} flex items-center justify-center`}
+                    >
+                      <Box className="w-8 h-8 text-gray-300" />
+                    </div>
+                  )}
                 </div>
                 <div className="p-4 flex flex-col flex-1">
                   <h3 className="font-semibold text-gray-900 text-sm line-clamp-2 leading-snug">

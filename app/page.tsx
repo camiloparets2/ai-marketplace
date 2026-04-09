@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { X, Plus } from "lucide-react";
+import { X, Plus, Camera, ImagePlus } from "lucide-react";
 import type { ExtractionResult } from "@/lib/types/extraction";
 import {
   CONFIDENCE_THRESHOLD,
@@ -167,7 +167,9 @@ export default function Page() {
   const [price, setPrice] = useState("");
   const [priceRationale, setPriceRationale] = useState<string | null>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
+  const addMoreInputRef = useRef<HTMLInputElement>(null);
   const loadingText = useLoadingStage(stage === "analyzing");
 
   const reset = useCallback(() => {
@@ -181,7 +183,9 @@ export default function Page() {
     setCopied(false);
     setPrice("");
     setPriceRationale(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    if (cameraInputRef.current) cameraInputRef.current.value = "";
+    if (galleryInputRef.current) galleryInputRef.current.value = "";
+    if (addMoreInputRef.current) addMoreInputRef.current.value = "";
   }, [selectedFiles]);
 
   // ── File selection (multi-image, max 5) ───────────────────────────────────
@@ -196,7 +200,8 @@ export default function Page() {
       preview: URL.createObjectURL(file),
     }));
     setSelectedFiles((prev) => [...prev, ...additions].slice(0, 5));
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    // Reset whichever input triggered the selection so the same file can be re-added
+    e.target.value = "";
   }
 
   function removeFile(index: number) {
@@ -386,9 +391,25 @@ export default function Page() {
           </p>
         </div>
 
-        {/* Hidden file input — multiple enabled for multi-image */}
+        {/* Hidden file inputs — camera capture + gallery picker + add more */}
         <input
-          ref={fileInputRef}
+          ref={cameraInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/heic,.heic"
+          capture="environment"
+          className="hidden"
+          onChange={handleFilesSelected}
+        />
+        <input
+          ref={galleryInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/heic,.heic"
+          multiple
+          className="hidden"
+          onChange={handleFilesSelected}
+        />
+        <input
+          ref={addMoreInputRef}
           type="file"
           accept="image/jpeg,image/png,image/webp,image/heic,.heic"
           multiple
@@ -442,36 +463,26 @@ export default function Page() {
                 </div>
 
                 {selectedFiles.length === 0 ? (
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex flex-col items-center justify-center gap-3 w-full h-44 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors cursor-pointer"
-                  >
-                    <svg
-                      className="w-10 h-10"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
+                  <div className="grid grid-cols-2 gap-3">
+                    {/* Take Photo — opens camera on mobile */}
+                    <button
+                      onClick={() => cameraInputRef.current?.click()}
+                      className="flex flex-col items-center justify-center gap-2.5 h-36 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors cursor-pointer"
                     >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={1.5}
-                        d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
-                      />
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={1.5}
-                        d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"
-                      />
-                    </svg>
-                    <span className="font-medium text-sm">
-                      Take photos or choose files
-                    </span>
-                    <span className="text-xs">
-                      JPEG · PNG · WebP · HEIC up to 5 MB each
-                    </span>
-                  </button>
+                      <Camera className="w-8 h-8" />
+                      <span className="font-medium text-sm">Take Photo</span>
+                      <span className="text-xs">Open camera</span>
+                    </button>
+                    {/* Upload Gallery — opens file picker */}
+                    <button
+                      onClick={() => galleryInputRef.current?.click()}
+                      className="flex flex-col items-center justify-center gap-2.5 h-36 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 text-gray-400 hover:border-purple-400 hover:text-purple-500 transition-colors cursor-pointer"
+                    >
+                      <ImagePlus className="w-8 h-8" />
+                      <span className="font-medium text-sm">Upload Gallery</span>
+                      <span className="text-xs">Choose files</span>
+                    </button>
+                  </div>
                 ) : (
                   <div>
                     <div className="flex items-center justify-between mb-2">
@@ -509,7 +520,7 @@ export default function Page() {
                       ))}
                       {selectedFiles.length < 5 && (
                         <button
-                          onClick={() => fileInputRef.current?.click()}
+                          onClick={() => addMoreInputRef.current?.click()}
                           className="aspect-square rounded-lg border-2 border-dashed border-gray-300 flex items-center justify-center text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors"
                         >
                           <Plus className="w-5 h-5" />
@@ -899,7 +910,7 @@ export default function Page() {
               <button
                 onClick={() => {
                   reset();
-                  setTimeout(() => fileInputRef.current?.click(), 50);
+                  setTimeout(() => galleryInputRef.current?.click(), 50);
                 }}
                 className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
               >

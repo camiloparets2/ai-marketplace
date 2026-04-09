@@ -28,7 +28,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     let q = supabaseAdmin
       .from("listings_log")
       .select(
-        "id, title, brand, model, condition, category, suggested_price, suggested_shipping_service, created_at"
+        "id, title, brand, model, condition, category, suggested_price, suggested_shipping_service, stock_image_url, created_at"
       )
       .eq("status", "available")
       .order("created_at", { ascending: false })

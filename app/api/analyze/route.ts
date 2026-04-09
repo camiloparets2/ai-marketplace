@@ -20,6 +20,49 @@ import type { AcceptedMimeType } from "@/lib/image-validation";
 import { getShippingRate } from "@/lib/shipping";
 import { supabaseAdmin } from "@/lib/supabase";
 
+// ─── Google Custom Search — stock product image ──────────────────────────────
+// Fetches a single professional stock image from Google Custom Search API.
+// Returns null gracefully on any failure so the user flow is never blocked.
+
+async function fetchStockImageUrl(
+  title: string,
+  brand: string | null
+): Promise<string | null> {
+  const apiKey = process.env.GOOGLE_SEARCH_API_KEY;
+  const cx = process.env.GOOGLE_SEARCH_ENGINE_ID;
+  if (!apiKey || !cx) return null;
+
+  // Build a short, precise search query from the product title + brand
+  const query = [brand, title].filter(Boolean).join(" ").slice(0, 120);
+  if (!query.trim()) return null;
+
+  try {
+    const url = new URL("https://www.googleapis.com/customsearch/v1");
+    url.searchParams.set("key", apiKey);
+    url.searchParams.set("cx", cx);
+    url.searchParams.set("q", query);
+    url.searchParams.set("searchType", "image");
+    url.searchParams.set("num", "1");
+    url.searchParams.set("imgSize", "medium");
+    url.searchParams.set("safe", "active");
+
+    const res = await fetch(url.toString(), { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) {
+      console.warn("[analyze] Google Image search failed:", res.status);
+      return null;
+    }
+
+    const data = (await res.json()) as {
+      items?: Array<{ link?: string }>;
+    };
+
+    return data.items?.[0]?.link ?? null;
+  } catch (err) {
+    console.warn("[analyze] Google Image search error:", err);
+    return null;
+  }
+}
+
 // Lazily initialised — avoids import-time crash when ANTHROPIC_API_KEY is absent
 // in local dev before .env.local is configured.
 let _client: Anthropic | null = null;
@@ -274,6 +317,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     extracted.condition =
       userCondition as ExtractionResult["condition"];
 
+    // ── Fetch stock product image (non-blocking) ─────────────────────────────
+    // Google Custom Search grabs a professional product photo to use as the
+    // marketplace thumbnail. Failure returns null — never blocks the flow.
+    const stockImageUrl = await fetchStockImageUrl(
+      extracted.title,
+      extracted.brand
+    );
+
     // ── Persist to Supabase ───────────────────────────────────────────────────
     // Fire-and-forget with a try/catch: a DB failure must never break the user's
     // workflow. The extraction result is returned regardless.
@@ -293,6 +344,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           suggested_shipping_service: extracted.suggestedShippingService,
           raw_specs: extracted.specs,
           raw_dimensions: extracted.estimatedDimensions,
+          stock_image_url: stockImageUrl,
         });
 
       if (dbError) {
@@ -303,7 +355,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       console.error("[analyze] Supabase insert threw unexpectedly", dbErr);
     }
 
-    return NextResponse.json(extracted);
+    return NextResponse.json({ ...extracted, stockImageUrl });
   } catch (err) {
     // ── Anthropic SDK error handling ──────────────────────────────────────────
     if (err instanceof RateLimitError) {
