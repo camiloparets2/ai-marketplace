@@ -37,7 +37,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const primary = await supabaseAdmin
     .from("listings_log")
     .select(
-      "id, title, brand, model, condition, category, suggested_price, suggested_shipping_service, is_published, status, created_at"
+      "id, title, brand, model, condition, category, suggested_price, suggested_shipping_service, stock_image_url, original_image_urls, is_published, status, created_at"
     )
     .eq("seller_id", user.id)
     .order("created_at", { ascending: false });

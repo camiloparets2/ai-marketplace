@@ -18,6 +18,7 @@ interface Listing {
   suggested_price: number | null;
   suggested_shipping_service: string;
   stock_image_url: string | null;
+  original_image_urls: string[] | null;
   created_at: string;
 }
 
@@ -306,6 +307,12 @@ export default function ExplorePage() {
                     >
                       <Box className="w-8 h-8 text-gray-300" />
                     </div>
+                  )}
+                  {/* Real photos badge */}
+                  {l.original_image_urls && l.original_image_urls.length > 0 && (
+                    <span className="absolute bottom-1.5 right-1.5 bg-black/60 text-white text-xs font-medium px-1.5 py-0.5 rounded-md backdrop-blur-sm">
+                      {l.original_image_urls.length} 📷
+                    </span>
                   )}
                 </div>
                 <div className="p-4 flex flex-col flex-1">

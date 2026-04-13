@@ -102,6 +102,54 @@ async function fetchStockImageUrl(
   }
 }
 
+// ─── Supabase Storage — upload user photos ───────────────────────────────────
+// Uploads the seller's original photos to the "listing-photos" bucket and
+// returns an array of permanent public URLs. Failures return an empty array —
+// never blocks the user flow.
+
+async function uploadOriginalPhotos(
+  userId: string,
+  imageEntries: Array<{ data: string; mimeType: string }>
+): Promise<string[]> {
+  const urls: string[] = [];
+  const timestamp = Date.now();
+
+  for (let i = 0; i < imageEntries.length; i++) {
+    const entry = imageEntries[i];
+    const ext = entry.mimeType === "image/png" ? "png" : entry.mimeType === "image/webp" ? "webp" : "jpg";
+    const filePath = `${userId}/${timestamp}-${i}.${ext}`;
+
+    try {
+      const buffer = Buffer.from(entry.data, "base64");
+      const { error: uploadError } = await supabaseAdmin.storage
+        .from("listing-photos")
+        .upload(filePath, buffer, {
+          contentType: entry.mimeType,
+          upsert: false,
+        });
+
+      if (uploadError) {
+        console.error("[analyze/storage] Upload failed for image", i, uploadError.message);
+        continue;
+      }
+
+      // Build the public URL for this file
+      const { data: urlData } = supabaseAdmin.storage
+        .from("listing-photos")
+        .getPublicUrl(filePath);
+
+      if (urlData?.publicUrl) {
+        urls.push(urlData.publicUrl);
+      }
+    } catch (err) {
+      console.error("[analyze/storage] Exception uploading image", i, err);
+    }
+  }
+
+  console.log(`[analyze/storage] Uploaded ${urls.length}/${imageEntries.length} photos`);
+  return urls;
+}
+
 // Lazily initialised — avoids import-time crash when ANTHROPIC_API_KEY is absent
 // in local dev before .env.local is configured.
 let _client: Anthropic | null = null;
@@ -356,13 +404,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     extracted.condition =
       userCondition as ExtractionResult["condition"];
 
-    // ── Fetch stock product image (non-blocking) ─────────────────────────────
-    // Google Custom Search grabs a professional product photo to use as the
-    // marketplace thumbnail. Failure returns null — never blocks the flow.
-    const stockImageUrl = await fetchStockImageUrl(
-      extracted.title,
-      extracted.brand
-    );
+    // ── Upload original photos + fetch stock image (parallel) ──────────────
+    // Run both operations concurrently to minimize latency. Both are
+    // fail-safe — returning null/[] on error so the user flow never blocks.
+    const [stockImageUrl, originalImageUrls] = await Promise.all([
+      fetchStockImageUrl(extracted.title, extracted.brand),
+      uploadOriginalPhotos(user.id, imageEntries),
+    ]);
 
     // ── Persist to Supabase ───────────────────────────────────────────────────
     // Fire-and-forget with a try/catch: a DB failure must never break the user's
@@ -384,6 +432,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           raw_specs: extracted.specs,
           raw_dimensions: extracted.estimatedDimensions,
           stock_image_url: stockImageUrl,
+          original_image_urls: originalImageUrls,
         });
 
       if (dbError) {
@@ -394,7 +443,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       console.error("[analyze] Supabase insert threw unexpectedly", dbErr);
     }
 
-    return NextResponse.json({ ...extracted, stockImageUrl });
+    return NextResponse.json({
+      ...extracted,
+      stockImageUrl,
+      originalImageUrls,
+    });
   } catch (err) {
     // ── Anthropic SDK error handling ──────────────────────────────────────────
     if (err instanceof RateLimitError) {

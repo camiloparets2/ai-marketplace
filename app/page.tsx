@@ -167,6 +167,10 @@ export default function Page() {
   const [price, setPrice] = useState("");
   const [priceRationale, setPriceRationale] = useState<string | null>(null);
 
+  // Phase 9: Dual-image state — stock thumbnail + original user gallery
+  const [stockImageUrl, setStockImageUrl] = useState<string | null>(null);
+  const [originalImageUrls, setOriginalImageUrls] = useState<string[]>([]);
+
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
   const addMoreInputRef = useRef<HTMLInputElement>(null);
@@ -183,6 +187,8 @@ export default function Page() {
     setCopied(false);
     setPrice("");
     setPriceRationale(null);
+    setStockImageUrl(null);
+    setOriginalImageUrls([]);
     if (cameraInputRef.current) cameraInputRef.current.value = "";
     if (galleryInputRef.current) galleryInputRef.current.value = "";
     if (addMoreInputRef.current) addMoreInputRef.current.value = "";
@@ -266,7 +272,10 @@ export default function Page() {
         return;
       }
 
-      const result = data as ExtractionResult;
+      const result = data as ExtractionResult & {
+        stockImageUrl?: string | null;
+        originalImageUrls?: string[];
+      };
       setExtraction(result);
       setTitle(result.title);
       setBrand(result.brand ?? "");
@@ -282,6 +291,8 @@ export default function Page() {
         setPrice(result.suggestedPrice.toFixed(2));
       }
       setPriceRationale(result.priceRationale ?? null);
+      setStockImageUrl(result.stockImageUrl ?? null);
+      setOriginalImageUrls(result.originalImageUrls ?? []);
       setStage("review");
 
       try {
@@ -580,32 +591,59 @@ export default function Page() {
         {/* ── Review: editable extraction result ─────────────────────────── */}
         {(stage === "review" || stage === "generating") && extraction && (
           <div className="flex flex-col gap-5">
-            <div className="flex items-center gap-4">
-              <div className="flex gap-1.5 flex-shrink-0">
-                {selectedFiles.slice(0, 3).map((sf, i) => (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    key={i}
-                    src={sf.preview}
-                    alt={`Photo ${i + 1}`}
-                    className="w-12 h-12 object-cover rounded-lg shadow-sm"
-                  />
-                ))}
-                {selectedFiles.length > 3 && (
-                  <div className="w-12 h-12 rounded-lg bg-gray-100 flex items-center justify-center text-xs font-medium text-gray-500">
-                    +{selectedFiles.length - 3}
+            {/* Image preview panel — stock thumbnail + user gallery */}
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+              {/* Stock image — primary marketplace thumbnail */}
+              {stockImageUrl && (
+                <div className="mb-3">
+                  <p className="text-xs font-medium text-gray-500 mb-1.5 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-green-400 inline-block" />
+                    Marketplace Thumbnail
+                  </p>
+                  <div className="relative h-40 bg-gray-50 rounded-lg overflow-hidden">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={stockImageUrl}
+                      alt="Stock product image"
+                      className="w-full h-full object-contain p-2"
+                    />
                   </div>
+                </div>
+              )}
+
+              {/* User's actual photos — condition gallery */}
+              <div>
+                <p className="text-xs font-medium text-gray-500 mb-1.5 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-blue-400 inline-block" />
+                  Your Photos ({selectedFiles.length})
+                </p>
+                <div className="flex gap-2 overflow-x-auto pb-1">
+                  {selectedFiles.map((sf, i) => (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      key={i}
+                      src={sf.preview}
+                      alt={`Your photo ${i + 1}`}
+                      className="w-16 h-16 object-cover rounded-lg border border-gray-200 flex-shrink-0"
+                    />
+                  ))}
+                </div>
+                {originalImageUrls.length > 0 && (
+                  <p className="text-xs text-green-600 mt-1">
+                    ✓ {originalImageUrls.length} photo{originalImageUrls.length !== 1 ? "s" : ""} uploaded and saved
+                  </p>
                 )}
               </div>
-              <div>
+
+              <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
                 <p className="text-xs text-gray-500">
                   Review and edit, then set your price.
                 </p>
                 <button
                   onClick={reset}
-                  className="text-xs text-blue-600 hover:underline mt-0.5"
+                  className="text-xs text-blue-600 hover:underline"
                 >
-                  Start over with new photos
+                  Start over
                 </button>
               </div>
             </div>
