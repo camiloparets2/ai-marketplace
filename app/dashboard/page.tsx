@@ -28,9 +28,42 @@ interface Listing {
   category: string;
   suggested_price: number | null;
   suggested_shipping_service: string;
+  stock_image_url: string | null;
+  original_image_urls: string[] | null;
   is_published?: boolean;
   status?: string; // "available" | "sold"
   created_at: string;
+}
+
+// ─── Listing thumbnail helper ────────────────────────────────────────────────
+// Shows stock image → first original photo → gray placeholder
+
+function ListingThumb({ listing }: { listing: Listing }) {
+  const src =
+    listing.stock_image_url ??
+    (listing.original_image_urls && listing.original_image_urls.length > 0
+      ? listing.original_image_urls[0]
+      : null);
+
+  if (!src) {
+    return (
+      <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
+        <Package className="w-4 h-4 text-gray-300" />
+      </div>
+    );
+  }
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={src}
+      alt=""
+      className="w-10 h-10 rounded-lg object-cover border border-gray-200 flex-shrink-0"
+      onError={(e) => {
+        (e.target as HTMLImageElement).style.display = "none";
+      }}
+    />
+  );
 }
 
 // ─── Skeleton loader ─────────────────────────────────────────────────────────
@@ -430,8 +463,13 @@ export default function DashboardPage() {
                       key={l.id}
                       className="hover:bg-gray-50/50 transition-colors"
                     >
-                      <td className="px-4 py-3 font-medium text-gray-900 max-w-[200px] truncate">
-                        {l.title}
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          <ListingThumb listing={l} />
+                          <span className="font-medium text-gray-900 truncate max-w-[180px]">
+                            {l.title}
+                          </span>
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-gray-600 max-w-[150px] truncate hidden sm:table-cell">
                         {l.category}

@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Search, Box, Package, ShoppingCart, Loader2 } from "lucide-react";
 import Image from "next/image";
+import Link from "next/link";
 import { toast } from "sonner";
 import { usePostHog } from "posthog-js/react";
 
@@ -289,7 +290,8 @@ export default function ExplorePage() {
         ) : (
           <div className={`grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 transition-opacity ${filtering ? "opacity-60" : "opacity-100"}`}>
             {listings.map((l) => (
-              <div
+              <Link
+                href={`/listing/${l.id}`}
                 key={l.id}
                 className="bg-white rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col"
               >
@@ -357,7 +359,11 @@ export default function ExplorePage() {
                     {/* Buy Now button */}
                     {l.suggested_price != null && (
                       <button
-                        onClick={() => void handleBuyNow(l.id)}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          void handleBuyNow(l.id);
+                        }}
                         disabled={buyingId !== null}
                         className="w-full py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-1.5"
                       >
@@ -376,7 +382,7 @@ export default function ExplorePage() {
                     )}
                   </div>
                 </div>
-              </div>
+              </Link>
             ))}
           </div>
         )}
