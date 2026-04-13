@@ -12,6 +12,8 @@ import {
   CheckCircle,
   Landmark,
   Loader2,
+  Store,
+  ExternalLink,
 } from "lucide-react";
 import { toast } from "sonner";
 import { createClient } from "@/utils/supabase/client";
@@ -91,6 +93,11 @@ export default function DashboardPage() {
   } | null>(null);
   const [connectLoading, setConnectLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [ebayStatus, setEbayStatus] = useState<{
+    connected: boolean;
+    tokenExpired: boolean;
+  } | null>(null);
+  const [postingEbayIds, setPostingEbayIds] = useState<Set<string>>(new Set());
 
   // ── Auth gate ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -133,22 +140,55 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const fetchEbayStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/ebay/status");
+      if (res.ok) {
+        const data = await res.json();
+        setEbayStatus(data);
+      }
+    } catch {
+      // Non-critical — badge just won't show.
+    }
+  }, []);
+
   useEffect(() => {
     if (authChecked) {
       void fetchListings();
       void fetchConnectStatus();
+      void fetchEbayStatus();
     }
-  }, [authChecked, fetchListings, fetchConnectStatus]);
+  }, [authChecked, fetchListings, fetchConnectStatus, fetchEbayStatus]);
 
   // Refresh Connect status when returning from Stripe onboarding
+  // Also handle eBay OAuth result query params
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get("connect") === "complete") {
       void fetchConnectStatus();
-      // Clean URL without reload
+    }
+    if (params.get("ebay") === "connected") {
+      toast.success("eBay account connected successfully!");
+      void fetchEbayStatus();
+    }
+    if (params.get("ebay") === "denied") {
+      toast.error("eBay connection was cancelled.");
+    }
+    if (params.get("ebay") === "error") {
+      const reason = params.get("reason");
+      const messages: Record<string, string> = {
+        config: "eBay OAuth is not configured on the server.",
+        token: "Failed to exchange eBay authorization code. Please try again.",
+        network: "Network error connecting to eBay. Please try again.",
+        db: "Connected to eBay but failed to save tokens. Please try again.",
+      };
+      toast.error(messages[reason ?? ""] ?? "Failed to connect eBay account.");
+    }
+    // Clean URL for any of the above
+    if (params.has("connect") || params.has("ebay")) {
       window.history.replaceState({}, "", "/dashboard");
     }
-  }, [fetchConnectStatus]);
+  }, [fetchConnectStatus, fetchEbayStatus]);
 
   // ── Start Stripe Connect onboarding ─────────────────────────────────────────
   async function handleConnectOnboarding() {
@@ -165,6 +205,44 @@ export default function DashboardPage() {
       toast.error("Network error. Please try again.");
     } finally {
       setConnectLoading(false);
+    }
+  }
+
+  // ── Post listing to eBay ──────────────────────────────────────────────────
+  async function handlePostToEbay(id: string) {
+    setPostingEbayIds((prev) => new Set(prev).add(id));
+    try {
+      const res = await fetch("/api/ebay/post", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listing_id: id }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error ?? "Failed to post to eBay. Please try again.");
+        return;
+      }
+      toast.success(
+        <span>
+          Posted to eBay!{" "}
+          <a
+            href={data.ebayUrl as string}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline font-semibold"
+          >
+            View listing
+          </a>
+        </span>
+      );
+    } catch {
+      toast.error("Network error. Please try again.");
+    } finally {
+      setPostingEbayIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   }
 
@@ -340,6 +418,23 @@ export default function DashboardPage() {
                 Connect Bank Account
               </button>
             )}
+            {/* eBay Connect badge / button */}
+            {ebayStatus?.connected && !ebayStatus.tokenExpired ? (
+              <span className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-yellow-50 border border-yellow-200 text-sm font-medium text-yellow-800">
+                <CheckCircle className="w-4 h-4 text-yellow-600" />
+                eBay Connected
+              </span>
+            ) : (
+              <a
+                href="/api/ebay/auth"
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-yellow-400 text-yellow-900 text-sm font-semibold hover:bg-yellow-500 transition-colors"
+              >
+                <Store className="w-4 h-4" />
+                {ebayStatus?.connected && ebayStatus.tokenExpired
+                  ? "Reconnect eBay"
+                  : "Connect eBay"}
+              </a>
+            )}
             <button
               onClick={exportCsv}
               disabled={listings.length === 0}
@@ -454,6 +549,9 @@ export default function DashboardPage() {
                     <th className="text-right px-4 py-3 font-medium text-gray-500 hidden sm:table-cell">
                       Date
                     </th>
+                    <th className="text-center px-4 py-3 font-medium text-gray-500 hidden md:table-cell">
+                      eBay
+                    </th>
                     <th className="w-12" />
                   </tr>
                 </thead>
@@ -517,6 +615,26 @@ export default function DashboardPage() {
                       </td>
                       <td className="px-4 py-3 text-right text-gray-500 hidden sm:table-cell">
                         {new Date(l.created_at).toLocaleDateString()}
+                      </td>
+                      {/* Post to eBay — only for published listings */}
+                      <td className="px-2 py-3 text-center hidden md:table-cell">
+                        {l.is_published && l.status !== "sold" ? (
+                          <button
+                            onClick={() => void handlePostToEbay(l.id)}
+                            disabled={postingEbayIds.has(l.id)}
+                            title="Post to eBay"
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-yellow-50 text-yellow-800 border border-yellow-200 hover:bg-yellow-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          >
+                            {postingEbayIds.has(l.id) ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <ExternalLink className="w-3 h-3" />
+                            )}
+                            Post
+                          </button>
+                        ) : (
+                          <span className="text-gray-300 text-xs">—</span>
+                        )}
                       </td>
                       <td className="px-2 py-3">
                         <button
