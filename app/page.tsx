@@ -108,6 +108,7 @@ export default function Page() {
   const [extraction, setExtraction] = useState<ExtractionResult | null>(null);
   const [listingUrl, setListingUrl] = useState<string>("");
   const [copied, setCopied] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
 
   // Editable extraction fields — initialised from API response, user can change
   const [title, setTitle] = useState("");
@@ -124,7 +125,14 @@ export default function Page() {
   const [price, setPrice] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sessionIdRef = useRef<string>(crypto.randomUUID());
   const loadingText = useLoadingStage(stage === "analyzing");
+
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   // Reset back to idle so the user can start a new listing
   const reset = useCallback(() => {
@@ -266,6 +274,21 @@ export default function Page() {
     }
   }
 
+  // ── Enhance Photo — fake-door click handler (Phase 1a) ────────────────────
+
+  function handleEnhanceClick() {
+    const event = {
+      event: "enhance_photo_click",
+      session_id: sessionIdRef.current,
+      price_usd: parseFloat(price),
+      extracted_brand: brand || null,
+      extracted_category: category || null,
+      timestamp: new Date().toISOString(),
+    };
+    console.log("[enhance_photo_click]", JSON.stringify(event, null, 2));
+    setToast("✨ Enhance Photo is coming soon — we're measuring interest. Thanks!");
+  }
+
   // ── Copy link ──────────────────────────────────────────────────────────────
 
   async function copyLink() {
@@ -285,6 +308,9 @@ export default function Page() {
   }
 
   // ─── Render ──────────────────────────────────────────────────────────────────
+
+  const priceAsNumber = parseFloat(price);
+  const enhanceEligible = !isNaN(priceAsNumber) && priceAsNumber >= 15;
 
   return (
     <main className="min-h-screen bg-gray-50 flex flex-col items-center px-4 py-8 pb-16">
@@ -572,6 +598,21 @@ export default function Page() {
                   />
                 </div>
               </Field>
+
+              {/* Enhance Photo — fake-door button (Phase 1a) */}
+              {enhanceEligible ? (
+                <button
+                  onClick={handleEnhanceClick}
+                  disabled={stage === "generating"}
+                  className="w-full py-2.5 rounded-xl border border-purple-200 bg-purple-50 text-purple-700 font-medium text-sm hover:bg-purple-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  ✨ Enhance Photo
+                </button>
+              ) : (
+                <p className="text-xs text-gray-400 text-center">
+                  Enhance available for listings $15+
+                </p>
+              )}
             </div>
 
             {/* Inline error from a failed link-creation retry */}
@@ -683,6 +724,13 @@ export default function Page() {
         )}
 
       </div>
+
+      {/* Toast notification */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-lg bg-gray-900 text-white text-sm rounded-xl px-4 py-3 shadow-lg text-center z-50 transition-opacity">
+          {toast}
+        </div>
+      )}
     </main>
   );
 }
