@@ -1,5 +1,23 @@
 # TODOS
 
+## Phase 2 Launch Blockers (multi-platform publishing is built — these unblock it)
+
+### [ ] Finish eBay Developer Program approval + configure OAuth
+**What:** Complete the developer.ebay.com application (below), then create a keyset, set the OAuth "accepted" URL to `{APP_URL}/api/oauth/ebay/callback`, and fill `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`, `EBAY_RU_NAME`, `EBAY_POSTAL_CODE` in Vercel. Test end-to-end with `EBAY_ENV=SANDBOX` first.
+**Why:** The eBay publish pipeline (`lib/platforms/ebay.ts`) is live-ready but cannot run without credentials.
+
+### [ ] Apply for an Etsy Open API v3 key
+**What:** Request an API key at etsy.com/developers ("commercial" access for a listing tool), set the redirect URI to `{APP_URL}/api/oauth/etsy/callback`, fill `ETSY_API_KEY`.
+**Why:** Etsy publishing (`lib/platforms/etsy.ts`) is built and waiting on the key. Etsy approval usually takes days, not weeks.
+**Note:** Etsy policy allows handmade/vintage/craft supplies — general resale items belong on eBay/FB/OfferUp, not Etsy. The `ETSY_WHO_MADE`/`ETSY_WHEN_MADE` env defaults assume vintage resale.
+
+### [ ] Apply the platform_connections migration + verify Supabase env vars
+**What:** `supabase db push` (or run `supabase/migrations/20260702000000_platform_connections.sql` in the SQL editor); set `NEXT_PUBLIC_SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` in Vercel.
+**Why:** OAuth tokens and hosted listing photos both live in Supabase; without it, eBay/Etsy connect flows fail with a clear config error.
+
+### [ ] Facebook Marketplace / OfferUp: revisit API access quarterly
+**What:** Facebook only exposes Marketplace listing APIs to approved Commerce Platform partners; OfferUp has no public API. The app ships an assisted-post flow (copy + photo + deep link) for both. Re-check partner program availability quarterly; if approved, swap the assist flow for a live publish in `lib/platforms/`.
+
 ## Phase 1 Parallel Actions (do while building this weekend)
 
 ### [ ] Apply for eBay Developer Program

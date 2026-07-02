@@ -2,20 +2,7 @@
 export const maxDuration = 30;
 
 import { NextRequest, NextResponse } from "next/server";
-import Stripe from "stripe";
-
-// Lazily initialised so the module doesn't crash during build if
-// STRIPE_SECRET_KEY is not yet set in the environment.
-let _stripe: Stripe | null = null;
-function getStripe(): Stripe {
-  if (!_stripe) {
-    if (!process.env.STRIPE_SECRET_KEY) {
-      throw new Error("STRIPE_SECRET_KEY is not configured");
-    }
-    _stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-  }
-  return _stripe;
-}
+import { createPaymentLink } from "@/lib/stripe-link";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -77,32 +64,12 @@ export async function POST(
     );
   }
 
-  // Stripe requires prices in the smallest currency unit (cents for USD).
-  // Round to avoid floating-point issues: $29.99 → 2999 cents.
-  const unitAmount = Math.round(price * 100);
-
   // ── Stripe: create product → price → payment link ───────────────────────────
-  // Three separate API calls. If any fail, we surface a clear error before the
-  // user gets a broken or non-existent link — per the design doc constraint.
+  // Three separate API calls (see lib/stripe-link.ts). If any fail, we surface
+  // a clear error before the user gets a broken or non-existent link.
   try {
-    const stripe = getStripe();
-
-    const product = await stripe.products.create({
-      name: title.trim(),
-      ...(description ? { description: description.trim() } : {}),
-    });
-
-    const stripePrice = await stripe.prices.create({
-      product: product.id,
-      unit_amount: unitAmount,
-      currency: "usd",
-    });
-
-    const paymentLink = await stripe.paymentLinks.create({
-      line_items: [{ price: stripePrice.id, quantity: 1 }],
-    });
-
-    return NextResponse.json({ url: paymentLink.url });
+    const url = await createPaymentLink(title, price, description);
+    return NextResponse.json({ url });
   } catch (err) {
     // Stripe errors: StripeCardError, StripeInvalidRequestError, StripeAPIError, etc.
     // All extend StripeError which has a .message property.

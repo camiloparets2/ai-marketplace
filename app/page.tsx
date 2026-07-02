@@ -7,8 +7,11 @@ import {
   CRITICAL_FIELDS,
   SHIPPING_DISPLAY_NAMES,
 } from "@/lib/types/extraction";
-import { getAllFlatRates } from "@/lib/shipping";
+import { getAllFlatRates, getShippingRate } from "@/lib/shipping";
 import { prepareImageForUpload } from "@/lib/image-validation";
+import type { AcceptedMimeType } from "@/lib/image-validation";
+import { PLATFORM_DISPLAY_NAMES } from "@/lib/platforms/types";
+import type { ApiPlatform } from "@/lib/platforms/types";
 
 // ─── Stage machine ────────────────────────────────────────────────────────────
 
@@ -17,9 +20,33 @@ type Stage =
   | "preparing"  // HEIC conversion + compression (client-side)
   | "analyzing"  // API call in flight
   | "review"     // extraction result, editable
-  | "generating" // Stripe link creation
-  | "done"       // link ready
+  | "publishing" // multi-platform publish in flight
+  | "published"  // per-platform results ready
   | "error";     // terminal error
+
+// ─── Publish targets ──────────────────────────────────────────────────────────
+
+type PublishTarget = "ebay" | "etsy" | "facebook" | "offerup" | "direct";
+
+const TARGET_LABELS: Record<PublishTarget, string> = {
+  ...PLATFORM_DISPLAY_NAMES,
+  direct: "Direct payment link",
+};
+
+// Mirrors the /api/publish response shape.
+type TargetResult =
+  | { platform: PublishTarget; status: "live"; url: string }
+  | {
+      platform: PublishTarget;
+      status: "assist";
+      postUrl: string;
+      copyText: string;
+      title: string;
+      description: string;
+      price: number;
+    }
+  | { platform: PublishTarget; status: "not_connected"; connectUrl: string }
+  | { platform: PublishTarget; status: "error"; message: string };
 
 // ─── Loading progress stages ──────────────────────────────────────────────────
 // Time-based — not tied to real API progress. Each label reinforces the
@@ -36,15 +63,21 @@ function useLoadingStage(active: boolean) {
   const [index, setIndex] = useState(0);
 
   useEffect(() => {
-    if (!active) {
+    if (!active) return;
+    // Advance through the stage labels on a fixed schedule; each stage's ms is
+    // the time spent in that stage, so timers fire at the cumulative offsets.
+    let elapsed = 0;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    ANALYSIS_STAGES.forEach((stage, i) => {
+      if (stage.ms === Infinity) return;
+      elapsed += stage.ms;
+      timers.push(setTimeout(() => setIndex(i + 1), elapsed));
+    });
+    return () => {
+      for (const t of timers) clearTimeout(t);
       setIndex(0);
-      return;
-    }
-    const stage = ANALYSIS_STAGES[index];
-    if (stage.ms === Infinity) return;
-    const id = setTimeout(() => setIndex((i) => i + 1), stage.ms);
-    return () => clearTimeout(id);
-  }, [active, index]);
+    };
+  }, [active]);
 
   return ANALYSIS_STAGES[Math.min(index, ANALYSIS_STAGES.length - 1)].text;
 }
@@ -99,6 +132,22 @@ function Field({
 const inputClass =
   "w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500";
 
+// ─── Clipboard helper ─────────────────────────────────────────────────────────
+
+async function writeClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Fallback for browsers that block the Clipboard API
+    const el = document.createElement("textarea");
+    el.value = text;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand("copy");
+    document.body.removeChild(el);
+  }
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Page() {
@@ -106,8 +155,25 @@ export default function Page() {
   const [error, setError] = useState<string>("");
   const [preview, setPreview] = useState<string>("");
   const [extraction, setExtraction] = useState<ExtractionResult | null>(null);
-  const [listingUrl, setListingUrl] = useState<string>("");
-  const [copied, setCopied] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string>("");
+
+  // The processed photo, kept for the publish call (eBay/Etsy need the bytes).
+  const [imageBase64, setImageBase64] = useState<string>("");
+  const [imageMime, setImageMime] = useState<AcceptedMimeType>("image/jpeg");
+
+  // Marketplace connection state + publish selection
+  const [connections, setConnections] = useState<Record<ApiPlatform, boolean>>({
+    ebay: false,
+    etsy: false,
+  });
+  const [targets, setTargets] = useState<Set<PublishTarget>>(
+    new Set(["facebook", "offerup", "direct"])
+  );
+  const [results, setResults] = useState<TargetResult[]>([]);
+  const [banner, setBanner] = useState<{
+    kind: "success" | "error";
+    text: string;
+  } | null>(null);
 
   // Editable extraction fields — initialised from API response, user can change
   const [title, setTitle] = useState("");
@@ -126,6 +192,49 @@ export default function Page() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingText = useLoadingStage(stage === "analyzing");
 
+  // ── Connections + OAuth redirect banner ─────────────────────────────────────
+
+  useEffect(() => {
+    // Toast from OAuth callback redirects (?connected=ebay / ?connect_error=…)
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("connected");
+    const connectError = params.get("connect_error");
+    if (connected || connectError) {
+      // Deferred so the effect body stays free of synchronous setState.
+      queueMicrotask(() =>
+        setBanner(
+          connected
+            ? {
+                kind: "success",
+                text: `${TARGET_LABELS[connected as PublishTarget] ?? connected} connected!`,
+              }
+            : { kind: "error", text: connectError ?? "" }
+        )
+      );
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+
+    void fetch("/api/connections", {
+      headers: {
+        "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
+      },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { connections?: Record<ApiPlatform, boolean> } | null) => {
+        if (!data?.connections) return;
+        setConnections(data.connections);
+        // Pre-select connected marketplaces — the point of the product is
+        // "one tap, listed everywhere you can be".
+        setTargets((prev) => {
+          const next = new Set(prev);
+          if (data.connections?.ebay) next.add("ebay");
+          if (data.connections?.etsy) next.add("etsy");
+          return next;
+        });
+      })
+      .catch(() => undefined);
+  }, []);
+
   // Reset back to idle so the user can start a new listing
   const reset = useCallback(() => {
     if (preview) URL.revokeObjectURL(preview);
@@ -133,9 +242,10 @@ export default function Page() {
     setError("");
     setPreview("");
     setExtraction(null);
-    setListingUrl("");
-    setCopied(false);
+    setResults([]);
+    setCopiedKey("");
     setPrice("");
+    setImageBase64("");
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, [preview]);
 
@@ -169,6 +279,8 @@ export default function Page() {
     let binary = "";
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     const base64 = btoa(binary);
+    setImageBase64(base64);
+    setImageMime(mimeType);
 
     try {
       const res = await fetch("/api/analyze", {
@@ -211,77 +323,76 @@ export default function Page() {
     if (file) void handleFile(file);
   }
 
-  // ── Stripe listing link creation ────────────────────────────────────────────
+  // ── Multi-platform publish ──────────────────────────────────────────────────
 
-  async function handleGenerateLink() {
+  function toggleTarget(target: PublishTarget) {
+    setTargets((prev) => {
+      const next = new Set(prev);
+      if (next.has(target)) next.delete(target);
+      else next.add(target);
+      return next;
+    });
+  }
+
+  async function handlePublish() {
     if (!price || isNaN(parseFloat(price)) || parseFloat(price) <= 0) {
-      setError("Please enter a valid price before generating your listing link.");
+      setError("Please enter a valid price before publishing.");
+      return;
+    }
+    if (targets.size === 0) {
+      setError("Pick at least one place to list.");
       return;
     }
     setError("");
-    setStage("generating");
-
-    // Auto-build a Stripe product description from the extraction data
-    const parts: string[] = [];
-    if (brand) parts.push(`Brand: ${brand}`);
-    if (model) parts.push(`Model: ${model}`);
-    parts.push(`Condition: ${condition}`);
-    if (extraction?.specs) {
-      Object.entries(extraction.specs)
-        .slice(0, 5)
-        .forEach(([k, v]) => parts.push(`${k}: ${v}`));
-    }
-    parts.push(`Shipping: ${SHIPPING_DISPLAY_NAMES[shippingService]}`);
+    setStage("publishing");
 
     try {
-      const res = await fetch("/api/create-link", {
+      const res = await fetch("/api/publish", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
         },
         body: JSON.stringify({
-          title,
-          price: parseFloat(price),
-          description: parts.join(" · "),
+          listing: {
+            title,
+            brand: brand || null,
+            model: model || null,
+            upc: upc || null,
+            condition,
+            category,
+            specs: extraction?.specs ?? {},
+            price: parseFloat(price),
+            shippingCost: getShippingRate(shippingService).cost,
+          },
+          image: imageBase64,
+          mimeType: imageMime,
+          targets: [...targets],
         }),
       });
 
       const data = await res.json();
 
-      if (!res.ok || !data.url) {
-        setError(
-          data.error ??
-            "Could not create your listing link. Please try again."
-        );
+      if (!res.ok || !Array.isArray(data.results)) {
+        setError(data.error ?? "Publishing failed. Please try again.");
         setStage("review"); // let them retry without starting over
         return;
       }
 
-      setListingUrl(data.url);
-      setStage("done");
+      setResults(data.results as TargetResult[]);
+      setStage("published");
     } catch {
       setError("Connection failed. Please try again.");
       setStage("review");
     }
   }
 
-  // ── Copy link ──────────────────────────────────────────────────────────────
+  // ── Copy helper with per-button feedback ────────────────────────────────────
 
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(listingUrl);
-    } catch {
-      // Fallback for browsers that block the Clipboard API
-      const el = document.createElement("textarea");
-      el.value = listingUrl;
-      document.body.appendChild(el);
-      el.select();
-      document.execCommand("copy");
-      document.body.removeChild(el);
-    }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  async function copyWithFeedback(key: string, text: string) {
+    await writeClipboard(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(""), 2000);
   }
 
   // ─── Render ──────────────────────────────────────────────────────────────────
@@ -294,40 +405,93 @@ export default function Page() {
         <div className="text-center">
           <h1 className="text-2xl font-bold text-gray-900">Snap to List</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Photograph an item. Get a listing in seconds.
+            Photograph an item. List it everywhere in seconds.
           </p>
         </div>
 
+        {/* OAuth result banner */}
+        {banner && (
+          <div
+            className={`text-sm rounded-lg px-3 py-2 flex justify-between items-center ${
+              banner.kind === "success"
+                ? "bg-green-50 text-green-700"
+                : "bg-red-50 text-red-600"
+            }`}
+          >
+            <span>{banner.text}</span>
+            <button
+              onClick={() => setBanner(null)}
+              className="ml-2 font-bold opacity-60 hover:opacity-100"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {/* ── Idle: upload prompt ─────────────────────────────────────────── */}
         {stage === "idle" && (
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="flex flex-col items-center justify-center gap-3 w-full h-56 rounded-2xl border-2 border-dashed border-gray-300 bg-white text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors cursor-pointer"
-          >
-            <svg
-              className="w-12 h-12"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
+          <>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="flex flex-col items-center justify-center gap-3 w-full h-56 rounded-2xl border-2 border-dashed border-gray-300 bg-white text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors cursor-pointer"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={1.5}
-                d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
-              />
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={1.5}
-                d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"
-              />
-            </svg>
-            <span className="font-medium text-base">
-              Take a photo or choose a file
-            </span>
-            <span className="text-xs">JPEG · PNG · WebP · HEIC up to 5 MB</span>
-          </button>
+              <svg
+                className="w-12 h-12"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
+                />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"
+                />
+              </svg>
+              <span className="font-medium text-base">
+                Take a photo or choose a file
+              </span>
+              <span className="text-xs">JPEG · PNG · WebP · HEIC up to 5 MB</span>
+            </button>
+
+            {/* Marketplace connections — connect once, publish forever */}
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex flex-col gap-2">
+              <p className="text-sm font-medium text-gray-700">
+                Marketplace accounts
+              </p>
+              {(["ebay", "etsy"] as const).map((p) => (
+                <div
+                  key={p}
+                  className="flex items-center justify-between text-sm"
+                >
+                  <span className="text-gray-600">{TARGET_LABELS[p]}</span>
+                  {connections[p] ? (
+                    <span className="text-green-600 font-medium">
+                      ✓ Connected
+                    </span>
+                  ) : (
+                    <a
+                      href={`/api/oauth/${p}/start`}
+                      className="text-blue-600 hover:underline font-medium"
+                    >
+                      Connect →
+                    </a>
+                  )}
+                </div>
+              ))}
+              <p className="text-xs text-gray-400 mt-1">
+                Facebook Marketplace and OfferUp don&apos;t offer listing APIs —
+                you&apos;ll get a one-tap assisted post instead.
+              </p>
+            </div>
+          </>
         )}
 
         {/* Hidden file input — capture="environment" opens the rear camera on mobile */}
@@ -361,7 +525,7 @@ export default function Page() {
         )}
 
         {/* ── Review: editable extraction result ──────────────────────────── */}
-        {(stage === "review" || stage === "generating") && extraction && (
+        {(stage === "review" || stage === "publishing") && extraction && (
           <div className="flex flex-col gap-5">
             <div className="flex items-center gap-4">
               {preview && (
@@ -555,7 +719,7 @@ export default function Page() {
                 )}
               </Field>
 
-              {/* Price — required to generate the Stripe Payment Link */}
+              {/* Price — required to publish anywhere */}
               <Field label="Your asking price (USD)">
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">
@@ -574,7 +738,59 @@ export default function Page() {
               </Field>
             </div>
 
-            {/* Inline error from a failed link-creation retry */}
+            {/* Platform selection */}
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 flex flex-col gap-3">
+              <p className="text-sm font-medium text-gray-700">List on</p>
+              {(
+                ["ebay", "etsy", "facebook", "offerup", "direct"] as const
+              ).map((t) => {
+                const isApi = t === "ebay" || t === "etsy";
+                const needsConnect = isApi && !connections[t as ApiPlatform];
+                return (
+                  <label
+                    key={t}
+                    className="flex items-center justify-between text-sm py-1 cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 accent-blue-600"
+                        checked={targets.has(t)}
+                        disabled={needsConnect}
+                        onChange={() => toggleTarget(t)}
+                      />
+                      <span
+                        className={
+                          needsConnect ? "text-gray-400" : "text-gray-700"
+                        }
+                      >
+                        {TARGET_LABELS[t]}
+                      </span>
+                      {(t === "facebook" || t === "offerup") && (
+                        <span className="text-xs bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded">
+                          assisted
+                        </span>
+                      )}
+                    </span>
+                    {needsConnect && (
+                      <a
+                        href={`/api/oauth/${t}/start`}
+                        className="text-blue-600 hover:underline text-xs font-medium"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        Connect →
+                      </a>
+                    )}
+                  </label>
+                );
+              })}
+              <p className="text-xs text-gray-400">
+                Facebook Marketplace and OfferUp have no listing APIs — assisted
+                posting copies your listing and opens their post page.
+              </p>
+            </div>
+
+            {/* Inline error from a failed publish retry */}
             {error && stage === "review" && (
               <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
                 {error}
@@ -582,63 +798,136 @@ export default function Page() {
             )}
 
             <button
-              onClick={() => void handleGenerateLink()}
-              disabled={stage === "generating" || !price}
+              onClick={() => void handlePublish()}
+              disabled={stage === "publishing" || !price || targets.size === 0}
               className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              {stage === "generating"
-                ? "Creating listing link..."
-                : "Generate listing link →"}
+              {stage === "publishing"
+                ? "Publishing..."
+                : `Publish to ${targets.size} ${targets.size === 1 ? "place" : "places"} →`}
             </button>
           </div>
         )}
 
-        {/* ── Done: payment link ready ─────────────────────────────────────── */}
-        {stage === "done" && (
-          <div className="flex flex-col gap-5">
-            <div className="bg-white rounded-2xl border border-green-200 shadow-sm p-5 flex flex-col gap-4">
-              <div className="flex items-center gap-2 text-green-700">
-                <svg
-                  className="w-5 h-5"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M5 13l4 4L19 7"
-                  />
-                </svg>
-                <span className="font-semibold">Listing link ready!</span>
-              </div>
+        {/* ── Published: per-platform results ─────────────────────────────── */}
+        {stage === "published" && (
+          <div className="flex flex-col gap-4">
+            {results.map((r) => (
+              <div
+                key={r.platform}
+                className={`bg-white rounded-2xl border shadow-sm p-5 flex flex-col gap-3 ${
+                  r.status === "live"
+                    ? "border-green-200"
+                    : r.status === "assist"
+                      ? "border-purple-200"
+                      : "border-red-100"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-gray-900">
+                    {TARGET_LABELS[r.platform]}
+                  </span>
+                  {r.status === "live" && (
+                    <span className="text-xs font-medium text-green-700 bg-green-50 px-2 py-0.5 rounded">
+                      ● Live
+                    </span>
+                  )}
+                  {r.status === "assist" && (
+                    <span className="text-xs font-medium text-purple-700 bg-purple-50 px-2 py-0.5 rounded">
+                      Ready to post
+                    </span>
+                  )}
+                  {(r.status === "error" || r.status === "not_connected") && (
+                    <span className="text-xs font-medium text-red-600 bg-red-50 px-2 py-0.5 rounded">
+                      {r.status === "error" ? "Failed" : "Not connected"}
+                    </span>
+                  )}
+                </div>
 
-              <div className="bg-gray-50 rounded-lg p-3 text-sm text-gray-700 break-all font-mono">
-                {listingUrl}
-              </div>
+                {r.status === "live" && (
+                  <>
+                    <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-700 break-all font-mono">
+                      {r.url}
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() =>
+                          void copyWithFeedback(r.platform, r.url)
+                        }
+                        className="flex-1 py-2 rounded-lg bg-blue-600 text-white font-medium text-sm hover:bg-blue-700 transition-colors"
+                      >
+                        {copiedKey === r.platform ? "Copied!" : "Copy link"}
+                      </button>
+                      <a
+                        href={r.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex-1 py-2 rounded-lg border border-gray-200 text-gray-700 font-medium text-sm text-center hover:bg-gray-50 transition-colors"
+                      >
+                        View ↗
+                      </a>
+                    </div>
+                  </>
+                )}
 
-              <div className="flex flex-col gap-2">
-                <button
-                  onClick={() => void copyLink()}
-                  className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
-                >
-                  {copied ? "Copied!" : "Copy link"}
-                </button>
-                <a
-                  href={listingUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full py-3 rounded-xl border border-gray-200 text-gray-700 font-medium text-sm text-center hover:bg-gray-50 transition-colors"
-                >
-                  Open payment page ↗
-                </a>
+                {r.status === "assist" && (
+                  <>
+                    <p className="text-xs text-gray-500">
+                      1. Copy your listing &nbsp;2. Save the photo &nbsp;3. Open{" "}
+                      {TARGET_LABELS[r.platform]} and paste.
+                    </p>
+                    <div className="flex flex-col gap-2">
+                      <button
+                        onClick={() =>
+                          void copyWithFeedback(r.platform, r.copyText)
+                        }
+                        className="w-full py-2 rounded-lg bg-blue-600 text-white font-medium text-sm hover:bg-blue-700 transition-colors"
+                      >
+                        {copiedKey === r.platform
+                          ? "Copied!"
+                          : "Copy listing text"}
+                      </button>
+                      <div className="flex gap-2">
+                        <a
+                          href={preview}
+                          download="listing-photo.jpg"
+                          className="flex-1 py-2 rounded-lg border border-gray-200 text-gray-700 font-medium text-sm text-center hover:bg-gray-50 transition-colors"
+                        >
+                          Save photo
+                        </a>
+                        <a
+                          href={r.postUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex-1 py-2 rounded-lg bg-purple-600 text-white font-medium text-sm text-center hover:bg-purple-700 transition-colors"
+                        >
+                          Open & paste ↗
+                        </a>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {r.status === "not_connected" && (
+                  <a
+                    href={r.connectUrl}
+                    className="w-full py-2 rounded-lg bg-blue-600 text-white font-medium text-sm text-center hover:bg-blue-700 transition-colors"
+                  >
+                    Connect {TARGET_LABELS[r.platform]} →
+                  </a>
+                )}
+
+                {r.status === "error" && (
+                  <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
+                    {r.message}
+                  </p>
+                )}
               </div>
-            </div>
+            ))}
 
             <button
               onClick={reset}
-              className="text-sm text-gray-500 hover:text-gray-700 text-center"
+              className="text-sm text-gray-500 hover:text-gray-700 text-center py-2"
             >
               List another item
             </button>
