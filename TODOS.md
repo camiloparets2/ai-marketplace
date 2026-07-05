@@ -1,5 +1,20 @@
 # TODOS
 
+## Billing Follow-ups (subscriptions + credits are built — these finish the rollout)
+
+### [ ] Create the Stripe webhook endpoint
+**What:** Stripe Dashboard → Developers → Webhooks → Add endpoint: `https://ai-marketplace-teal.vercel.app/api/billing/webhook`, events `checkout.session.completed`, `customer.subscription.*`, `invoice.paid`, `invoice.payment_failed`. Copy the signing secret into `STRIPE_WEBHOOK_SECRET` in Vercel. Test with `stripe listen --forward-to localhost:3000/api/billing/webhook` locally.
+**Why:** Without it, checkouts succeed but subscriptions never sync and credits are never granted.
+
+### [ ] Apply the billing migration before enabling checkout
+**What:** `supabase db push` — applies `20260706000000_billing_credits.sql` (tables + atomic spend/refund functions). Until applied, credit gating fails open (logged warning) so the product keeps working — but nothing is metered.
+
+### [ ] Confirm final plan prices
+**What:** Prices in `lib/billing/plans.ts` are placeholders (Starter $9.99 / Pro $29.99 / Power $79.99, roadmap credit amounts). Changing `priceUsd` creates a new Stripe price at next checkout via lookup keys; existing subscribers keep their old price unless migrated in Stripe.
+
+### [ ] Run one live-mode end-to-end billing test
+**What:** Test-mode first (test card 4242…), then live: subscribe → webhook grants credits → burn a credit on an AI draft → cancel via portal → verify access-until-period-end. Roadmap Gate 2/3 requirement.
+
 ## Auth Foundation Follow-ups (auth is built — these finish the rollout)
 
 ### [ ] Configure Supabase Auth in production

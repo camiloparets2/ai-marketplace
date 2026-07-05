@@ -58,6 +58,28 @@ supabase db push   # or paste supabase/migrations/*.sql into the SQL editor
 Then open the app and hit **Connect →** next to each marketplace — tokens are
 stored server-side (Supabase, service-role only) and auto-refreshed.
 
+## Subscriptions & AI credits
+
+Stripe Billing powers monthly plans; an internal credit ledger meters AI
+usage. **1 credit = 1 AI listing draft** (`/api/analyze`); editing,
+publishing, and syncing are free. Credits renew with each paid invoice and
+don't roll over; new users get a one-time 10-credit trial automatically.
+When credits hit zero, AI drafting pauses (402 with an upgrade CTA) but
+everything else stays accessible.
+
+- Plans/prices: `lib/billing/plans.ts` (plan keys double as Stripe price
+  lookup keys — products/prices are auto-created at first checkout, no
+  dashboard setup)
+- Pages: `/pricing` (public), `/billing` (plan, credits, Stripe Customer
+  Portal)
+- Routes: `/api/billing/checkout`, `/api/billing/portal`,
+  `/api/billing/status`, `/api/billing/webhook`
+- Accounting: atomic spend via a guarded SQL UPDATE (`spend_credits`),
+  audit ledger per action, idempotent webhooks (event-id dedupe +
+  unique-invoice grants), refunds on failed AI calls
+- Setup: set `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET`, point a Stripe
+  webhook at `/api/billing/webhook`, and apply the billing migration
+
 ## eBay Marketplace Account Deletion endpoint (Production keyset requirement)
 
 eBay requires every Production keyset to expose an endpoint that (a) answers a

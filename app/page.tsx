@@ -180,6 +180,10 @@ export default function Page() {
   } | null>(null);
   // Signed-in user's email for the account header; null in legacy beta mode.
   const [accountEmail, setAccountEmail] = useState<string | null>(null);
+  // AI credits remaining; null → unknown (signed out / billing not migrated).
+  const [creditsLeft, setCreditsLeft] = useState<number | null>(null);
+  // Set when analysis failed specifically for lack of credits → upgrade CTA.
+  const [outOfCredits, setOutOfCredits] = useState(false);
 
   // Editable extraction fields — initialised from API response, user can change
   const [title, setTitle] = useState("");
@@ -228,6 +232,16 @@ export default function Page() {
       })
       .catch(() => undefined);
 
+    // Credits remaining for the header chip (401 in legacy mode → ignored).
+    void fetch("/api/billing/status")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { creditsRemaining?: number | null } | null) => {
+        if (typeof data?.creditsRemaining === "number") {
+          setCreditsLeft(data.creditsRemaining);
+        }
+      })
+      .catch(() => undefined);
+
     void fetch("/api/connections", {
       headers: {
         "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
@@ -254,6 +268,7 @@ export default function Page() {
     if (preview) URL.revokeObjectURL(preview);
     setStage("idle");
     setError("");
+    setOutOfCredits(false);
     setPreview("");
     setExtraction(null);
     setResults([]);
@@ -309,6 +324,7 @@ export default function Page() {
       const data = await res.json();
 
       if (!res.ok) {
+        setOutOfCredits(res.status === 402);
         setError(
           data.error ?? "Analysis failed. Please try a different photo."
         );
@@ -316,6 +332,9 @@ export default function Page() {
         return;
       }
 
+      setOutOfCredits(false);
+      // One credit consumed — reflect it without waiting for a refetch.
+      setCreditsLeft((c) => (c !== null && c > 0 ? c - 1 : c));
       const result = data as ExtractionResult;
       setExtraction(result);
       setTitle(result.title);
@@ -415,7 +434,7 @@ export default function Page() {
     if (isSupabaseAuthConfigured()) {
       await createSupabaseBrowserClient().auth.signOut();
     }
-    window.location.href = "/login";
+    window.location.assign("/login");
   }
 
   // ─── Render ──────────────────────────────────────────────────────────────────
@@ -432,7 +451,22 @@ export default function Page() {
           </p>
           {accountEmail && (
             <p className="text-xs text-gray-400 mt-2">
-              {accountEmail} ·{" "}
+              {accountEmail}
+              {creditsLeft !== null && (
+                <>
+                  {" · "}
+                  <a href="/billing" className="hover:underline">
+                    <span
+                      className={
+                        creditsLeft === 0 ? "text-red-600 font-medium" : ""
+                      }
+                    >
+                      {creditsLeft} credit{creditsLeft === 1 ? "" : "s"} left
+                    </span>
+                  </a>
+                </>
+              )}
+              {" · "}
               <button
                 onClick={() => void handleSignOut()}
                 className="text-blue-600 hover:underline"
@@ -968,7 +1002,7 @@ export default function Page() {
           </div>
         )}
 
-        {/* ── Error: terminal (analysis failed) ───────────────────────────── */}
+        {/* ── Error: terminal (analysis failed / out of credits) ──────────── */}
         {stage === "error" && (
           <div className="bg-white rounded-2xl border border-red-100 shadow-sm p-5 flex flex-col gap-4">
             {preview && (
@@ -981,20 +1015,31 @@ export default function Page() {
             )}
             <div className="text-center">
               <p className="font-semibold text-gray-900">
-                Could not analyze this photo
+                {outOfCredits
+                  ? "You're out of AI credits"
+                  : "Could not analyze this photo"}
               </p>
               <p className="text-sm text-gray-500 mt-1">{error}</p>
             </div>
             <div className="flex flex-col gap-2">
-              <button
-                onClick={() => {
-                  reset();
-                  setTimeout(() => fileInputRef.current?.click(), 50);
-                }}
-                className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
-              >
-                Try a different photo
-              </button>
+              {outOfCredits ? (
+                <a
+                  href="/pricing"
+                  className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm text-center hover:bg-blue-700 transition-colors"
+                >
+                  View plans →
+                </a>
+              ) : (
+                <button
+                  onClick={() => {
+                    reset();
+                    setTimeout(() => fileInputRef.current?.click(), 50);
+                  }}
+                  className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
+                >
+                  Try a different photo
+                </button>
+              )}
               <button
                 onClick={reset}
                 className="w-full py-3 rounded-xl border border-gray-200 text-gray-700 font-medium text-sm hover:bg-gray-50 transition-colors"

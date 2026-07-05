@@ -14,6 +14,9 @@ import type { ExtractionResult } from "@/lib/types/extraction";
 import type { AcceptedMimeType } from "@/lib/image-validation";
 import { getShippingRate } from "@/lib/shipping";
 import { authenticateRequest } from "@/lib/auth/guard";
+import { randomUUID } from "crypto";
+import { spendCredits, refundCredits } from "@/lib/billing/credits";
+import { CREDIT_COST_AI_EXTRACTION } from "@/lib/billing/plans";
 
 // Lazily initialised — avoids import-time crash when ANTHROPIC_API_KEY is absent
 // in local dev before .env.local is configured.
@@ -58,7 +61,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Auth ────────────────────────────────────────────────────────────────────
   // Signed-in Supabase session, or the legacy pre-shared beta key during the
   // transition (see lib/auth/guard.ts — key removal is a Gate 2 TODO).
-  const { authorized } = await authenticateRequest(req);
+  const { authorized, user } = await authenticateRequest(req);
   if (!authorized) {
     return errorResponse("Unauthorized", false, 401);
   }
@@ -110,6 +113,44 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       false,
       400
     );
+  }
+
+  // ── AI credits ──────────────────────────────────────────────────────────────
+  // 1 credit per extraction, reserved atomically BEFORE the (expensive) API
+  // call and refunded if the call fails to produce a usable draft. Legacy
+  // beta-key requests carry no user, so they aren't metered (Gate 2 TODO).
+  const requestId = randomUUID();
+  let credited = false;
+  if (user) {
+    const spend = await spendCredits(
+      user.id,
+      CREDIT_COST_AI_EXTRACTION,
+      "ai_listing_extraction",
+      requestId
+    );
+    if (!spend.ok && spend.reason === "no_credits") {
+      const renews = spend.status.periodEnd
+        ? ` Your credits renew ${new Date(spend.status.periodEnd).toLocaleDateString()}.`
+        : "";
+      return NextResponse.json(
+        {
+          error: `You're out of AI credits.${renews} Upgrade your plan to keep listing.`,
+          retryable: false,
+          code: "no_credits",
+          renewsAt: spend.status.periodEnd,
+        },
+        { status: 402 }
+      );
+    }
+    credited = spend.ok;
+    // reason === "unavailable" → billing infra not migrated yet; fail open.
+  }
+
+  // Refund helper for every failure path below the spend.
+  async function refund(): Promise<void> {
+    if (credited && user) {
+      await refundCredits(user.id, CREDIT_COST_AI_EXTRACTION, requestId);
+    }
   }
 
   // ── Claude Vision call ──────────────────────────────────────────────────────
@@ -165,6 +206,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         "[analyze] Unexpected response shape — no tool_use block",
         response.content
       );
+      await refund();
       return errorResponse(
         "Analysis returned an unexpected response. Please try again.",
         true,
@@ -183,6 +225,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json(extracted);
   } catch (err) {
     // ── Anthropic SDK error handling ──────────────────────────────────────────
+    // Every path below failed to produce a draft — return the credit first.
+    await refund();
+
     if (err instanceof RateLimitError) {
       return errorResponse(
         "Service is busy right now. Please wait a moment and try again.",
