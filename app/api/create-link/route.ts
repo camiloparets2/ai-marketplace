@@ -3,6 +3,7 @@ export const maxDuration = 30;
 
 import { NextRequest, NextResponse } from "next/server";
 import { createPaymentLink } from "@/lib/stripe-link";
+import { authenticateRequest } from "@/lib/auth/guard";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,11 +30,9 @@ export async function POST(
   req: NextRequest
 ): Promise<NextResponse<CreateLinkSuccess | CreateLinkError>> {
   // ── Auth ────────────────────────────────────────────────────────────────────
-  const incomingKey = req.headers.get("x-api-key");
-  if (
-    !process.env.APP_INTERNAL_BETA_KEY ||
-    incomingKey !== process.env.APP_INTERNAL_BETA_KEY
-  ) {
+  // Session or legacy beta key — same policy as /api/analyze.
+  const { authorized } = await authenticateRequest(req);
+  if (!authorized) {
     return NextResponse.json({ error: "Unauthorized", retryable: false }, { status: 401 });
   }
 

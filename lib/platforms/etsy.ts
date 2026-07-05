@@ -17,7 +17,11 @@
 //   defaults are "someone_else" / "2010_2019". Adjust for handmade shops.
 
 import { createHash, randomBytes } from "crypto";
-import type { ListingInput, PlatformConnection } from "@/lib/platforms/types";
+import type {
+  ListingInput,
+  PlatformConnection,
+  UnownedConnection,
+} from "@/lib/platforms/types";
 import { composeListing } from "@/lib/platforms/compose";
 import { saveConnection, isExpired } from "@/lib/connections";
 import type { AcceptedMimeType } from "@/lib/image-validation";
@@ -91,11 +95,13 @@ async function tokenRequest(body: Record<string, string>): Promise<TokenResponse
   return (await res.json()) as TokenResponse;
 }
 
+// Returns an unowned token bundle — the OAuth callback stamps the signed-in
+// user's id before saving.
 export async function etsyExchangeCode(
   code: string,
   verifier: string,
   origin: string
-): Promise<PlatformConnection> {
+): Promise<UnownedConnection> {
   const token = await tokenRequest({
     grant_type: "authorization_code",
     client_id: apiKey(),

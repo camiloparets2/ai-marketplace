@@ -93,6 +93,9 @@ export type PublishResult =
 // ─── Stored OAuth connection ──────────────────────────────────────────────────
 
 export interface PlatformConnection {
+  // Owning Supabase auth user. Connections are per-user; the OAuth callback
+  // stamps this from the signed-in session before saving.
+  userId: string;
   platform: ApiPlatform;
   accessToken: string;
   refreshToken: string | null;
@@ -101,3 +104,7 @@ export interface PlatformConnection {
   // Platform-specific extras (e.g. Etsy shop_id) cached at connect time.
   meta: Record<string, string>;
 }
+
+// A token bundle fresh from an OAuth code exchange, before it's attributed
+// to the signed-in user.
+export type UnownedConnection = Omit<PlatformConnection, "userId">;

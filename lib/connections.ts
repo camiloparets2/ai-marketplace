@@ -1,12 +1,11 @@
 // OAuth token store for marketplace connections (eBay, Etsy).
 //
-// Phase 1 is single-seller (the app is gated by one pre-shared beta key), so
-// connections are keyed by platform only — one row per platform in the
-// `platform_connections` table. Multi-user token storage arrives with real
-// auth in Phase 2.
+// Connections are per-user: (user_id, platform) is the primary key, and every
+// read/write is scoped to the signed-in Supabase user. Tokens live behind the
+// service role only — RLS is enabled with no policies, so browser roles can
+// never read this table.
 //
-// Storage backend: Supabase (service role — this module must only be imported
-// from server code, never from components).
+// This module must only be imported from server code, never from components.
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { ApiPlatform, PlatformConnection } from "@/lib/platforms/types";
@@ -28,6 +27,7 @@ export function getSupabaseAdmin(): SupabaseClient {
 }
 
 interface ConnectionRow {
+  user_id: string;
   platform: string;
   access_token: string;
   refresh_token: string | null;
@@ -39,6 +39,7 @@ export async function saveConnection(conn: PlatformConnection): Promise<void> {
   const { error } = await getSupabaseAdmin()
     .from("platform_connections")
     .upsert({
+      user_id: conn.userId,
       platform: conn.platform,
       access_token: conn.accessToken,
       refresh_token: conn.refreshToken,
@@ -52,11 +53,13 @@ export async function saveConnection(conn: PlatformConnection): Promise<void> {
 }
 
 export async function getConnection(
+  userId: string,
   platform: ApiPlatform
 ): Promise<PlatformConnection | null> {
   const { data, error } = await getSupabaseAdmin()
     .from("platform_connections")
-    .select("platform, access_token, refresh_token, expires_at, meta")
+    .select("user_id, platform, access_token, refresh_token, expires_at, meta")
+    .eq("user_id", userId)
     .eq("platform", platform)
     .maybeSingle<ConnectionRow>();
 
@@ -66,6 +69,7 @@ export async function getConnection(
   if (!data) return null;
 
   return {
+    userId: data.user_id,
     platform,
     accessToken: data.access_token,
     refreshToken: data.refresh_token,

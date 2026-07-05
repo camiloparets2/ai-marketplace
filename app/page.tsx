@@ -12,6 +12,10 @@ import { prepareImageForUpload } from "@/lib/image-validation";
 import type { AcceptedMimeType } from "@/lib/image-validation";
 import { PLATFORM_DISPLAY_NAMES } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
+import {
+  createSupabaseBrowserClient,
+  isSupabaseAuthConfigured,
+} from "@/lib/supabase/client";
 
 // ─── Stage machine ────────────────────────────────────────────────────────────
 
@@ -174,6 +178,8 @@ export default function Page() {
     kind: "success" | "error";
     text: string;
   } | null>(null);
+  // Signed-in user's email for the account header; null in legacy beta mode.
+  const [accountEmail, setAccountEmail] = useState<string | null>(null);
 
   // Editable extraction fields — initialised from API response, user can change
   const [title, setTitle] = useState("");
@@ -213,6 +219,14 @@ export default function Page() {
       );
       window.history.replaceState({}, "", window.location.pathname);
     }
+
+    // Who's signed in (session cookie flows automatically).
+    void fetch("/api/auth/status")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { email?: string | null } | null) => {
+        if (data?.email) setAccountEmail(data.email);
+      })
+      .catch(() => undefined);
 
     void fetch("/api/connections", {
       headers: {
@@ -395,6 +409,15 @@ export default function Page() {
     setTimeout(() => setCopiedKey(""), 2000);
   }
 
+  // ── Sign out ────────────────────────────────────────────────────────────────
+
+  async function handleSignOut() {
+    if (isSupabaseAuthConfigured()) {
+      await createSupabaseBrowserClient().auth.signOut();
+    }
+    window.location.href = "/login";
+  }
+
   // ─── Render ──────────────────────────────────────────────────────────────────
 
   return (
@@ -407,6 +430,17 @@ export default function Page() {
           <p className="text-sm text-gray-500 mt-1">
             Photograph an item. List it everywhere in seconds.
           </p>
+          {accountEmail && (
+            <p className="text-xs text-gray-400 mt-2">
+              {accountEmail} ·{" "}
+              <button
+                onClick={() => void handleSignOut()}
+                className="text-blue-600 hover:underline"
+              >
+                Sign out
+              </button>
+            </p>
+          )}
         </div>
 
         {/* OAuth result banner */}

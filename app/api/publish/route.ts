@@ -27,6 +27,7 @@ import { hostListingPhoto } from "@/lib/storage";
 import { publishToEbay } from "@/lib/platforms/ebay";
 import { publishToEtsy } from "@/lib/platforms/etsy";
 import { createPaymentLink } from "@/lib/stripe-link";
+import { authenticateRequest } from "@/lib/auth/guard";
 
 type PublishTarget = Platform | "direct";
 
@@ -86,12 +87,11 @@ function parseBody(raw: unknown): PublishBody | string {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // Same pre-shared beta key gate as /api/analyze.
-  const incomingKey = req.headers.get("x-api-key");
-  if (
-    !process.env.APP_INTERNAL_BETA_KEY ||
-    incomingKey !== process.env.APP_INTERNAL_BETA_KEY
-  ) {
+  // Session preferred; legacy beta key still allows the stateless targets
+  // (assist platforms + direct Stripe link). eBay/Etsy require a user because
+  // their connections are per-account.
+  const { authorized, user } = await authenticateRequest(req);
+  if (!authorized) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -127,28 +127,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   async function publishTo(target: PublishTarget): Promise<TargetResult> {
     try {
       switch (target) {
-        case "ebay": {
-          const conn = await getConnection("ebay");
-          if (!conn) {
-            return {
-              platform: target,
-              status: "not_connected",
-              connectUrl: "/api/oauth/ebay/start",
-            };
-          }
-          const url = await publishToEbay(conn, listing, await hostedUrl());
-          return { platform: target, status: "live", url };
-        }
+        case "ebay":
         case "etsy": {
-          const conn = await getConnection("etsy");
+          // Marketplace publishing is user-scoped; a beta key alone can't
+          // reach anyone's tokens.
+          if (!user) {
+            return {
+              platform: target,
+              status: "not_connected",
+              connectUrl: "/login",
+            };
+          }
+          const conn = await getConnection(user.id, target);
           if (!conn) {
             return {
               platform: target,
               status: "not_connected",
-              connectUrl: "/api/oauth/etsy/start",
+              connectUrl: `/api/oauth/${target}/start`,
             };
           }
-          const url = await publishToEtsy(conn, listing, imageBytes, mimeType);
+          const url =
+            target === "ebay"
+              ? await publishToEbay(conn, listing, await hostedUrl())
+              : await publishToEtsy(conn, listing, imageBytes, mimeType);
           return { platform: target, status: "live", url };
         }
         case "facebook":

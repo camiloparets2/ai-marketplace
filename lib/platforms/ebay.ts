@@ -16,7 +16,11 @@
 // Optional policy overrides (otherwise the seller's first policy is used):
 //   EBAY_FULFILLMENT_POLICY_ID, EBAY_PAYMENT_POLICY_ID, EBAY_RETURN_POLICY_ID
 
-import type { ListingInput, PlatformConnection } from "@/lib/platforms/types";
+import type {
+  ListingInput,
+  PlatformConnection,
+  UnownedConnection,
+} from "@/lib/platforms/types";
 import {
   composeListing,
   ebayHtmlDescription,
@@ -98,7 +102,9 @@ async function tokenRequest(body: URLSearchParams): Promise<TokenResponse> {
   return (await res.json()) as TokenResponse;
 }
 
-export async function ebayExchangeCode(code: string): Promise<PlatformConnection> {
+// Returns an unowned token bundle — the OAuth callback stamps the signed-in
+// user's id before saving.
+export async function ebayExchangeCode(code: string): Promise<UnownedConnection> {
   const { ruName } = credentials();
   const token = await tokenRequest(
     new URLSearchParams({

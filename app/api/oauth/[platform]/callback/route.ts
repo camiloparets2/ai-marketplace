@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { ebayExchangeCode } from "@/lib/platforms/ebay";
 import { etsyExchangeCode } from "@/lib/platforms/etsy";
 import { saveConnection } from "@/lib/connections";
+import { requireUser } from "@/lib/auth/guard";
 
 function backToApp(origin: string, params: Record<string, string>): NextResponse {
   const url = new URL("/", origin);
@@ -50,9 +51,17 @@ export async function GET(
     });
   }
 
+  // The consent flow started from a signed-in session; it must still be one.
+  const user = await requireUser();
+  if (!user) {
+    return backToApp(origin, {
+      connect_error: "You were signed out during the connection — sign in and try again.",
+    });
+  }
+
   try {
     if (platform === "ebay") {
-      await saveConnection(await ebayExchangeCode(code));
+      await saveConnection({ ...(await ebayExchangeCode(code)), userId: user.id });
     } else {
       const verifier = req.cookies.get("etsy_code_verifier")?.value;
       if (!verifier) {
@@ -61,7 +70,10 @@ export async function GET(
             "Connection session expired — please try connecting again.",
         });
       }
-      await saveConnection(await etsyExchangeCode(code, verifier, origin));
+      await saveConnection({
+        ...(await etsyExchangeCode(code, verifier, origin)),
+        userId: user.id,
+      });
     }
     return backToApp(origin, { connected: platform });
   } catch (err) {

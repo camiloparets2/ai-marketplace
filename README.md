@@ -15,10 +15,26 @@ everywhere in one tap.
 
 ## Pipeline
 
-1. **Snap** — camera/file input; HEIC→JPEG conversion, resize to 2048px, JPEG 0.85 (client-side, `lib/image-validation.ts`)
-2. **Extract** — `/api/analyze` → Claude Vision with a forced tool call returning `ExtractionResult` (title, brand, model, UPC, condition, category, specs, dimensions, shipping suggestion, per-field confidence)
-3. **Review** — editable form with low-confidence "⚠ review" indicators
-4. **Publish** — `/api/publish` fans out to the selected targets in parallel; each target succeeds or fails independently and the UI renders one status card per platform
+1. **Sign in** — Supabase Auth: Google or email/password (`/login`), with forgot/reset password flows. Marketplace connections are per-user.
+2. **Snap** — camera/file input; HEIC→JPEG conversion, resize to 2048px, JPEG 0.85 (client-side, `lib/image-validation.ts`)
+3. **Extract** — `/api/analyze` → Claude Vision with a forced tool call returning `ExtractionResult` (title, brand, model, UPC, condition, category, specs, dimensions, shipping suggestion, per-field confidence)
+4. **Review** — editable form with low-confidence "⚠ review" indicators
+5. **Publish** — `/api/publish` fans out to the selected targets in parallel; each target succeeds or fails independently and the UI renders one status card per platform
+
+## Auth setup
+
+1. In Supabase → Authentication → Providers, enable **Email** and **Google**
+   (create a Google Cloud OAuth client whose redirect URI is
+   `https://<PROJECT_REF>.supabase.co/auth/v1/callback`).
+2. Set Site URL to your deployed URL and add redirect URLs for
+   `{APP_URL}/auth/callback` and `http://localhost:3000/auth/callback`.
+3. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+
+Routes: `/login` (sign in/up + Google), `/forgot-password`, `/reset-password`,
+`/auth/callback` (code exchange; validates `?next=` against open redirects),
+`/api/auth/status` (safe metadata only). Signed-out visitors to the app are
+redirected to `/login` by `middleware.ts`. Without the Supabase auth env vars
+the app runs in legacy beta-key mode (see `.env.example`).
 
 ## Setup
 

@@ -1,5 +1,22 @@
 # TODOS
 
+## Auth Foundation Follow-ups (auth is built — these finish the rollout)
+
+### [ ] Configure Supabase Auth in production
+**What:** In Supabase → Authentication: enable the Google provider (paste Google Cloud OAuth Client ID/Secret; the Google app's redirect URI is `https://<PROJECT_REF>.supabase.co/auth/v1/callback`), set Site URL to `https://ai-marketplace-teal.vercel.app`, and add redirect URLs for `/auth/callback` (prod + localhost, with and without `?next=`). Set `NEXT_PUBLIC_SUPABASE_ANON_KEY` in Vercel. Full checklist: docs/launch-roadmap.md → "Authentication And Account Recovery".
+**Why:** The login page, Google button, and password reset are live in code but inert until the provider + URLs are configured.
+
+### [ ] Apply the per-user connections migration
+**What:** `supabase db push` — applies `20260705000000_per_user_connections.sql`, which recreates `platform_connections` keyed by (user_id, platform). Any Phase 1 connection must be reconnected once signed in.
+**Why:** Marketplace connections are now owned by user accounts.
+
+### [ ] Configure production SMTP for auth emails
+**What:** Supabase → Authentication → SMTP: connect a real sender (Resend/Postmark/SES). Supabase's built-in email is rate-limited to a handful of messages per hour — fine for testing, not for beta users resetting passwords.
+
+### [ ] Remove the legacy beta key at Gate 2
+**What:** Delete `APP_INTERNAL_BETA_KEY` / `NEXT_PUBLIC_APP_INTERNAL_BETA_KEY`, the fallback in `lib/auth/guard.ts`, and the `x-api-key` headers in `app/page.tsx` once all beta sellers have accounts.
+**Why:** The key predates real auth; it carries no user identity and shouldn't outlive the transition.
+
 ## Phase 2 Launch Blockers (multi-platform publishing is built — these unblock it)
 
 ### [ ] Finish eBay Developer Program approval + configure OAuth

@@ -1,17 +1,28 @@
 // Starts the OAuth consent flow for an API platform (eBay or Etsy).
 // Browser navigation route — CSRF is handled with a state cookie verified in
-// the callback. Phase 1 is single-seller, so no user session is involved.
+// the callback. Requires a signed-in user: the resulting tokens are saved
+// against their account.
 
 import { NextRequest, NextResponse } from "next/server";
 import { randomBytes } from "crypto";
 import { ebayAuthorizeUrl } from "@/lib/platforms/ebay";
 import { etsyAuthorizeUrl, generatePkce } from "@/lib/platforms/etsy";
+import { requireUser } from "@/lib/auth/guard";
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ platform: string }> }
 ): Promise<NextResponse> {
   const { platform } = await params;
+
+  // Connections belong to a user — send signed-out visitors to sign in first.
+  const user = await requireUser();
+  if (!user) {
+    return NextResponse.redirect(
+      `${req.nextUrl.origin}/login?next=${encodeURIComponent(`/api/oauth/${platform}/start`)}`
+    );
+  }
+
   const state = randomBytes(16).toString("hex");
 
   let authorizeUrl: string;

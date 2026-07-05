@@ -13,6 +13,7 @@ import { EXTRACTION_TOOL_SCHEMA } from "@/lib/types/extraction";
 import type { ExtractionResult } from "@/lib/types/extraction";
 import type { AcceptedMimeType } from "@/lib/image-validation";
 import { getShippingRate } from "@/lib/shipping";
+import { authenticateRequest } from "@/lib/auth/guard";
 
 // Lazily initialised — avoids import-time crash when ANTHROPIC_API_KEY is absent
 // in local dev before .env.local is configured.
@@ -55,14 +56,10 @@ function errorResponse(
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Auth ────────────────────────────────────────────────────────────────────
-  // Phase 1: simple pre-shared API key shared with the 10 test sellers.
-  // Phase 2: replace with Upstash Redis per-IP rate limiting when the URL
-  // becomes semi-public. See TODOS.md.
-  const incomingKey = req.headers.get("x-api-key");
-  if (
-    !process.env.APP_INTERNAL_BETA_KEY ||
-    incomingKey !== process.env.APP_INTERNAL_BETA_KEY
-  ) {
+  // Signed-in Supabase session, or the legacy pre-shared beta key during the
+  // transition (see lib/auth/guard.ts — key removal is a Gate 2 TODO).
+  const { authorized } = await authenticateRequest(req);
+  if (!authorized) {
     return errorResponse("Unauthorized", false, 401);
   }
 
