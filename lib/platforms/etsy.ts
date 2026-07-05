@@ -25,8 +25,13 @@ import type { AcceptedMimeType } from "@/lib/image-validation";
 const API_BASE = "https://api.etsy.com/v3";
 
 function apiKey(): string {
-  const key = process.env.ETSY_API_KEY;
-  if (!key) throw new Error("Etsy is not configured. Set ETSY_API_KEY.");
+  // ETSY_CLIENT_ID accepted as an alias — it's the name used in the launch
+  // roadmap and (per that doc) already set in Vercel Production. Etsy v3
+  // calls this value the "keystring"; it doubles as the OAuth client_id.
+  const key = process.env.ETSY_API_KEY ?? process.env.ETSY_CLIENT_ID;
+  if (!key) {
+    throw new Error("Etsy is not configured. Set ETSY_API_KEY (or ETSY_CLIENT_ID).");
+  }
   return key;
 }
 
@@ -35,7 +40,14 @@ const OAUTH_SCOPES = "listings_w listings_r shops_r";
 // ─── OAuth (PKCE) ─────────────────────────────────────────────────────────────
 
 export function etsyRedirectUri(origin: string): string {
-  return `${process.env.NEXT_PUBLIC_APP_URL ?? origin}/api/oauth/etsy/callback`;
+  // The redirect URI must match the one registered with Etsy byte-for-byte.
+  // ETSY_REDIRECT_URI overrides the derived default so an already-registered
+  // URI (e.g. /api/etsy/oauth/callback, aliased in next.config.ts) keeps
+  // working without re-registering the app.
+  return (
+    process.env.ETSY_REDIRECT_URI ??
+    `${process.env.NEXT_PUBLIC_APP_URL ?? origin}/api/oauth/etsy/callback`
+  );
 }
 
 export function generatePkce(): { verifier: string; challenge: string } {

@@ -45,7 +45,9 @@ function authBase(): string {
 function credentials(): { clientId: string; clientSecret: string; ruName: string } {
   const clientId = process.env.EBAY_CLIENT_ID;
   const clientSecret = process.env.EBAY_CLIENT_SECRET;
-  const ruName = process.env.EBAY_RU_NAME;
+  // EBAY_RUNAME accepted as an alias — it's the spelling used in the launch
+  // roadmap and (per that doc) already set in Vercel Production.
+  const ruName = process.env.EBAY_RU_NAME ?? process.env.EBAY_RUNAME;
   if (!clientId || !clientSecret || !ruName) {
     throw new Error(
       "eBay is not configured. Set EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, and EBAY_RU_NAME."
