@@ -42,6 +42,51 @@ supabase db push   # or paste supabase/migrations/*.sql into the SQL editor
 Then open the app and hit **Connect →** next to each marketplace — tokens are
 stored server-side (Supabase, service-role only) and auto-refreshed.
 
+## eBay Marketplace Account Deletion endpoint (Production keyset requirement)
+
+eBay requires every Production keyset to expose an endpoint that (a) answers a
+challenge and (b) receives account-deletion notifications so you can erase that
+user's data. This project ships it at:
+
+```
+app/api/ebay/account-deletion/route.ts   →   {APP_URL}/api/ebay/account-deletion
+```
+
+**Set two env vars** (see `.env.example`), locally and in the Vercel panel:
+
+- `EBAY_MARKETPLACE_DELETION_VERIFICATION_TOKEN` — a secret you invent (32–80
+  chars, `[A-Za-z0-9_-]`). Paste the **same** value into the eBay Developer
+  Portal.
+- `EBAY_MARKETPLACE_DELETION_ENDPOINT` — the **exact** public HTTPS URL eBay is
+  configured to call. The challenge hash won't match if this differs by even one
+  character.
+
+**Deploy (Vercel):** it's a normal Next.js App Router route — `git push` and
+Vercel serves it automatically. No `vercel.json` or extra config needed. (Note:
+a root-level `api/*.js` file is *not* used here — Next.js on Vercel only serves
+`app/api/**/route.ts`.)
+
+**Test the GET challenge locally:**
+
+```bash
+# Terminal 1 — run with the two env vars set (endpoint must match the URL you curl)
+EBAY_MARKETPLACE_DELETION_VERIFICATION_TOKEN=my-secret-token-abcdefg1234567890XYZ \
+EBAY_MARKETPLACE_DELETION_ENDPOINT=http://localhost:3000/api/ebay/account-deletion \
+npm run dev
+
+# Terminal 2 — eBay's GET challenge
+curl "http://localhost:3000/api/ebay/account-deletion?challenge_code=test_challenge_42"
+# → {"challengeResponse":"<sha256 of challengeCode + verificationToken + endpoint>"}
+```
+
+**Paste into eBay Developer Portal** (Alerts & Notifications → Marketplace
+Account Deletion): the endpoint URL is your deployed
+`https://<your-app>.vercel.app/api/ebay/account-deletion` and the verification
+token is the value you set above.
+
+Erasure logic lives in `lib/platforms/ebay-deletion.ts` — wire new stores of
+eBay-user data into `handleEbayAccountDeletion()` as the product grows.
+
 ## Commands
 
 ```bash
