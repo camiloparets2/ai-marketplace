@@ -1,5 +1,17 @@
 # TODOS
 
+## Inventory Follow-ups (Phase 2 core is built — these complete it)
+
+### [ ] Apply the inventory migration
+**What:** `supabase db push` — applies `20260706100000_inventory.sql` (inventory_items, marketplace_listings, publish_attempts). Until applied, publishes still work but nothing is recorded (logged warning) and `/inventory` shows empty.
+
+### [ ] eBay/Etsy sale polling
+**What:** Detect sales that happen ON eBay/Etsy (today only direct-link sales sync automatically; eBay/Etsy sales require the seller to tap "Mark sold"). eBay: Sell Fulfillment API `getOrders` polling or Notification API; Etsy: `getShopReceipts` polling. On detection → `markItemSold(...)` which already handles cross-channel delisting.
+**Why:** Closes the last oversell window without manual action. Roadmap Phase 2 ("sold-item sync").
+
+### [ ] Inventory item detail + edit
+**What:** Item detail page with editable cost of goods, purchase source, storage location, notes (columns already exist), plus listing history. Then profit per sale = sold_price − cost_of_goods − fees (Phase 4 analytics feed off this).
+
 ## Billing Follow-ups (subscriptions + credits are built — these finish the rollout)
 
 ### [ ] Create the Stripe webhook endpoint

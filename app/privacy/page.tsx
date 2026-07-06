@@ -35,6 +35,11 @@ export default function PrivacyPage() {
               manage listings you initiate.
             </li>
             <li>
+              <strong>Inventory and sale records</strong> for items you list —
+              titles, prices, where each item is listed, and sale outcomes —
+              so your channels stay in sync and you can track profit.
+            </li>
+            <li>
               <strong>Payment data</strong> is handled by Stripe. We never see
               or store card numbers.
             </li>

@@ -58,6 +58,30 @@ supabase db push   # or paste supabase/migrations/*.sql into the SQL editor
 Then open the app and hit **Connect →** next to each marketplace — tokens are
 stored server-side (Supabase, service-role only) and auto-refreshed.
 
+## Inventory & anti-oversell sync
+
+Inventory is the source of truth: every publish (signed-in) writes an
+`inventory_items` record plus one `marketplace_listings` row per live channel,
+and every publish attempt is audit-logged. `/inventory` shows each item, its
+channels, and the sync actions:
+
+- **Mark sold** — records the sale (price, platform, timestamp) and ends the
+  listing on every *other* channel: eBay offers are withdrawn, Etsy listings
+  deactivated, Stripe payment links disabled. The platform where it sold is
+  skipped (it ended its own listing) — except direct links, which Stripe
+  leaves active and we always disable.
+- **Delist all** — ends everywhere without a sale; item returns to draft.
+- **Direct sales sync automatically**: a completed payment-link checkout hits
+  the Stripe webhook → item marked sold → all other channels ended. No
+  seller action needed.
+- Failed ends are marked `end_failed` with the error and retried on the next
+  sold/delist action (idempotent).
+
+Which listings to end is pure, tested logic in `lib/inventory-rules.ts`;
+execution lives in `lib/inventory.ts`. Cost-of-goods columns are in place for
+profit analytics (Phase 4). eBay/Etsy *sale* detection (their side) is not
+polled yet — tracked in TODOS.md.
+
 ## Subscriptions & AI credits
 
 Stripe Billing powers monthly plans; an internal credit ledger meters AI

@@ -13,7 +13,7 @@ import { createServerClient } from "@supabase/ssr";
 
 // Pages that need a signed-in user. API routes enforce auth themselves
 // (lib/auth/guard.ts) so they can return JSON 401s instead of redirects.
-const PROTECTED_PAGES = ["/", "/reset-password", "/billing"];
+const PROTECTED_PAGES = ["/", "/reset-password", "/billing", "/inventory"];
 
 export async function middleware(req: NextRequest): Promise<NextResponse> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -61,5 +61,5 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
 export const config = {
   // Only pages that read or gate on the session. API routes, static assets,
   // and public pages (login, privacy, terms, connect landings) are excluded.
-  matcher: ["/", "/reset-password", "/billing"],
+  matcher: ["/", "/reset-password", "/billing", "/inventory"],
 };

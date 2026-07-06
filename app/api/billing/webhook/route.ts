@@ -20,6 +20,15 @@ import { getStripe, upsertSubscription, userIdForCustomer } from "@/lib/billing/
 import type { SubscriptionLike } from "@/lib/billing/stripe";
 import { getSupabaseAdmin } from "@/lib/connections";
 import { PLANS, isPaidPlanKey } from "@/lib/billing/plans";
+import { handleDirectSale } from "@/lib/inventory";
+
+// Narrow view of a Checkout Session — enough to route payment-link sales.
+interface CheckoutSessionLike {
+  id: string;
+  mode?: string;
+  payment_link?: string | { id: string } | null;
+  amount_total?: number | null;
+}
 
 // Narrow view of a Stripe Invoice tolerant of API-version drift (the parent
 // subscription reference moved between versions).
@@ -123,8 +132,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     switch (event.type) {
       case "checkout.session.completed": {
-        // Subscription state arrives via customer.subscription.* events;
-        // nothing to do here beyond the audit row already written.
+        // Subscription checkouts sync via customer.subscription.* events.
+        // Payment-link checkouts are DIRECT SALES: mark the inventory item
+        // sold and end its listings on every other channel (anti-oversell).
+        const session = event.data.object as unknown as CheckoutSessionLike;
+        if (session.mode === "payment" && session.payment_link) {
+          const paymentLinkId =
+            typeof session.payment_link === "string"
+              ? session.payment_link
+              : session.payment_link.id;
+          await handleDirectSale(paymentLinkId, session.amount_total ?? null);
+        }
         break;
       }
       case "customer.subscription.created":

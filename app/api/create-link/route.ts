@@ -67,7 +67,7 @@ export async function POST(
   // Three separate API calls (see lib/stripe-link.ts). If any fail, we surface
   // a clear error before the user gets a broken or non-existent link.
   try {
-    const url = await createPaymentLink(title, price, description);
+    const { url } = await createPaymentLink(title, price, description);
     return NextResponse.json({ url });
   } catch (err) {
     // Stripe errors: StripeCardError, StripeInvalidRequestError, StripeAPIError, etc.

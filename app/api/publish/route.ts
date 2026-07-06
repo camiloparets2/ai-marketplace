@@ -28,6 +28,13 @@ import { publishToEbay } from "@/lib/platforms/ebay";
 import { publishToEtsy } from "@/lib/platforms/etsy";
 import { createPaymentLink } from "@/lib/stripe-link";
 import { authenticateRequest } from "@/lib/auth/guard";
+import {
+  createInventoryItem,
+  recordLiveListing,
+  recordPublishAttempt,
+  markItemListed,
+} from "@/lib/inventory";
+import type { LiveListing } from "@/lib/inventory";
 
 type PublishTarget = Platform | "direct";
 
@@ -124,6 +131,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return hostedUrlPromise;
   }
 
+  // Live publishes carry platform-side ids the inventory layer needs to end
+  // the listing later (anti-oversell). Collected during fan-out, written after.
+  const liveRecords: LiveListing[] = [];
+
   async function publishTo(target: PublishTarget): Promise<TargetResult> {
     try {
       switch (target) {
@@ -146,11 +157,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               connectUrl: `/api/oauth/${target}/start`,
             };
           }
-          const url =
-            target === "ebay"
-              ? await publishToEbay(conn, listing, await hostedUrl())
-              : await publishToEtsy(conn, listing, imageBytes, mimeType);
-          return { platform: target, status: "live", url };
+          if (target === "ebay") {
+            const published = await publishToEbay(conn, listing, await hostedUrl());
+            liveRecords.push({
+              platform: "ebay",
+              url: published.url,
+              externalId: published.listingId,
+              meta: { offerId: published.offerId, sku: published.sku },
+            });
+            return { platform: target, status: "live", url: published.url };
+          }
+          const published = await publishToEtsy(conn, listing, imageBytes, mimeType);
+          liveRecords.push({
+            platform: "etsy",
+            url: published.url,
+            externalId: published.listingId,
+            meta: { shopId: published.shopId },
+          });
+          return { platform: target, status: "live", url: published.url };
         }
         case "facebook":
         case "offerup": {
@@ -167,12 +191,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
         case "direct": {
           const composed = composeListing("ebay", listing);
-          const url = await createPaymentLink(
+          const link = await createPaymentLink(
             listing.title,
             listing.price,
             composed.description
           );
-          return { platform: target, status: "live", url };
+          liveRecords.push({
+            platform: "direct",
+            url: link.url,
+            externalId: link.id,
+            meta: {},
+          });
+          return { platform: target, status: "live", url: link.url };
         }
       }
     } catch (err) {
@@ -187,5 +217,35 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const results = await Promise.all(targets.map(publishTo));
-  return NextResponse.json({ results });
+
+  // ── Inventory: source of truth ───────────────────────────────────────────
+  // Record the item + its live listings so sold/delist sync can end them
+  // everywhere later. Best-effort: an inventory write failure must never
+  // undo a publish that already succeeded on the marketplaces.
+  let inventoryItemId: string | null = null;
+  if (user) {
+    try {
+      const photoUrl = await hostedUrl().catch(() => null);
+      inventoryItemId = await createInventoryItem(user.id, listing, photoUrl);
+
+      for (const record of liveRecords) {
+        await recordLiveListing(user.id, inventoryItemId, record, listing.price);
+      }
+      if (liveRecords.length > 0) await markItemListed(inventoryItemId);
+
+      for (const result of results) {
+        await recordPublishAttempt(
+          user.id,
+          inventoryItemId,
+          result.platform,
+          result.status,
+          result.status === "error" ? result.message : undefined
+        );
+      }
+    } catch (err) {
+      console.error("[publish] inventory recording failed:", err);
+    }
+  }
+
+  return NextResponse.json({ results, inventoryItemId });
 }

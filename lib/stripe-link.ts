@@ -15,13 +15,21 @@ function getStripe(): Stripe {
   return _stripe;
 }
 
-// Creates product → price → payment link and returns the shareable URL.
+export interface PaymentLinkResult {
+  url: string;
+  // Payment link id — stored on the marketplace listing so the billing
+  // webhook can match a completed checkout back to the inventory item, and
+  // so the link can be deactivated when the item sells.
+  id: string;
+}
+
+// Creates product → price → payment link.
 // price is in USD dollars; converted to cents for Stripe.
 export async function createPaymentLink(
   title: string,
   price: number,
   description?: string
-): Promise<string> {
+): Promise<PaymentLinkResult> {
   const stripe = getStripe();
 
   const product = await stripe.products.create({
@@ -39,5 +47,11 @@ export async function createPaymentLink(
     line_items: [{ price: stripePrice.id, quantity: 1 }],
   });
 
-  return paymentLink.url;
+  return { url: paymentLink.url, id: paymentLink.id };
+}
+
+// Deactivates a payment link. Stripe keeps links active after purchase, so
+// this is what prevents a second buyer paying for a sold one-of-one item.
+export async function deactivatePaymentLink(id: string): Promise<void> {
+  await getStripe().paymentLinks.update(id, { active: false });
 }

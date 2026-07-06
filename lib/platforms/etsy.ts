@@ -282,12 +282,19 @@ async function suggestTaxonomyId(
 
 // ─── Publish ──────────────────────────────────────────────────────────────────
 
+export interface EtsyPublishResult {
+  url: string;
+  listingId: string;
+  // Needed later to end the listing.
+  shopId: string;
+}
+
 export async function publishToEtsy(
   connection: PlatformConnection,
   input: ListingInput,
   imageBytes: Uint8Array,
   mimeType: AcceptedMimeType
-): Promise<string> {
+): Promise<EtsyPublishResult> {
   const conn = await freshConnection(connection);
   const shopId = await resolveShopId(conn);
   const composed = composeListing("etsy", input);
@@ -350,5 +357,29 @@ export async function publishToEtsy(
     );
   }
 
-  return `https://www.etsy.com/listing/${listing.listing_id}`;
+  return {
+    url: `https://www.etsy.com/listing/${listing.listing_id}`,
+    listingId: String(listing.listing_id),
+    shopId,
+  };
+}
+
+// Ends a live Etsy listing (sold elsewhere / manual delist) by deactivating
+// it — the listing survives as inactive in Shop Manager, so the seller can
+// relist without re-paying setup work.
+export async function endEtsyListing(
+  connection: PlatformConnection,
+  shopId: string,
+  listingId: string
+): Promise<void> {
+  const conn = await freshConnection(connection);
+  const res = await etsyFetch(
+    conn.accessToken,
+    `/application/shops/${shopId}/listings/${listingId}`,
+    { method: "PATCH", json: { state: "inactive" } }
+  );
+  // 404 → listing gone; already the end state we wanted.
+  if (!res.ok && res.status !== 404) {
+    throw await etsyError(res, "listing deactivation");
+  }
 }

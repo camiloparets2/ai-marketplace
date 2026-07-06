@@ -302,11 +302,19 @@ async function resolvePolicies(accessToken: string): Promise<PolicyIds> {
 
 // ─── Publish ──────────────────────────────────────────────────────────────────
 
+export interface EbayPublishResult {
+  url: string;
+  listingId: string;
+  // Needed later to end the listing (withdraw the offer).
+  offerId: string;
+  sku: string;
+}
+
 export async function publishToEbay(
   connection: PlatformConnection,
   input: ListingInput,
   imageUrl: string
-): Promise<string> {
+): Promise<EbayPublishResult> {
   const conn = await freshConnection(connection);
   const composed = composeListing("ebay", input);
 
@@ -374,7 +382,28 @@ export async function publishToEbay(
   if (!publishRes.ok) throw await ebayError(publishRes, "offer publish");
   const published = (await publishRes.json()) as { listingId: string };
 
-  return isProduction()
+  const url = isProduction()
     ? `https://www.ebay.com/itm/${published.listingId}`
     : `https://sandbox.ebay.com/itm/${published.listingId}`;
+  return { url, listingId: published.listingId, offerId: offer.offerId, sku };
+}
+
+// Ends a live eBay listing (sold elsewhere / manual delist) by withdrawing
+// its offer. Treats "already ended" responses as success so retries and
+// sold-elsewhere races stay idempotent.
+export async function endEbayListing(
+  connection: PlatformConnection,
+  offerId: string
+): Promise<void> {
+  const conn = await freshConnection(connection);
+  const res = await ebayFetch(
+    conn.accessToken,
+    `/sell/inventory/v1/offer/${offerId}/withdraw`,
+    { method: "POST", body: {} }
+  );
+  // 404 → offer gone (already withdrawn or sold out); that's the end state
+  // we wanted.
+  if (!res.ok && res.status !== 404) {
+    throw await ebayError(res, "listing withdrawal");
+  }
 }
