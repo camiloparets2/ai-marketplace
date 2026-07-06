@@ -26,7 +26,10 @@ Supabase backup schedule (PITR or daily dumps), a rollback note (Vercel instant 
 ### [ ] 7. Legal review — drafts upgraded to launch-grade; attorney sign-off remains
 /privacy and /terms are now full-coverage drafts (data categories, AI disclosure, user rights, subscriptions/refunds, acceptable use, marketplace disclaimers, liability cap, termination) accurate to how the app actually behaves. Remaining before large-scale paid launch: (a) a licensed attorney's confirmation pass, (b) pin the governing-law state in Terms §11 (currently phrased as "the state in which the operator resides"), (c) re-check when new data stores or countries are added.
 
-### [ ] 8. Advertise
+### [ ] 8. Mobile app — PWA shipped; store wrapper optional later
+The site is now an installable app (manifest + icons + standalone display + bottom tab bar). Strategy and the Capacitor store-wrapper path: `docs/mobile-app.md`. Nothing blocking launch here.
+
+### [ ] 9. Advertise
 The ad destination is `/welcome` (public landing, OG tags set). Good first channels: reseller communities (r/Flipping, r/eBaySellerAdvice), TikTok/Reels demo of snap→listed-everywhere, and Google Ads on "crosslisting app" keywords. Track signups via PostHog before spending.
 
 ## Phase 3 Follow-ups (Shopify + channel hub are built — these complete the phase)

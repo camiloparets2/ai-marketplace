@@ -1,6 +1,7 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import AppTabBar from "@/app/tab-bar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,6 +31,25 @@ export const metadata: Metadata = {
       "One photo → listed on eBay, Etsy, Shopify, and more. Automatic cross-channel delisting when it sells.",
     type: "website",
   },
+  // Installed-app behavior on iOS (Android reads the manifest).
+  appleWebApp: {
+    capable: true,
+    title: "Snap to List",
+    statusBarStyle: "default",
+  },
+  icons: {
+    icon: "/icons/icon-192.png",
+    apple: "/icons/apple-touch-icon.png",
+  },
+};
+
+// viewport-fit=cover lets the app paint edge-to-edge on notched phones; the
+// tab bar pads itself with env(safe-area-inset-bottom).
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#2563eb",
 };
 
 export default function RootLayout({
@@ -42,7 +62,11 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {children}
+        {/* Native-style bottom navigation on phones (app pages only) */}
+        <AppTabBar />
+      </body>
     </html>
   );
 }
