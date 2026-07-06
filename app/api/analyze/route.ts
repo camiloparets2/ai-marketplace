@@ -18,6 +18,7 @@ import { randomUUID } from "crypto";
 import { spendCredits, refundCredits } from "@/lib/billing/credits";
 import { CREDIT_COST_AI_EXTRACTION } from "@/lib/billing/plans";
 import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
+import { trackEvent } from "@/lib/telemetry";
 
 // Lazily initialised — avoids import-time crash when ANTHROPIC_API_KEY is absent
 // in local dev before .env.local is configured.
@@ -237,11 +238,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const shippingRate = getShippingRate(extracted.suggestedShippingService);
     extracted.estimatedShippingCost = shippingRate.cost;
 
+    await trackEvent(user?.id ?? null, "draft_created", { requestId });
     return NextResponse.json(extracted);
   } catch (err) {
     // ── Anthropic SDK error handling ──────────────────────────────────────────
     // Every path below failed to produce a draft — return the credit first.
     await refund();
+    await trackEvent(user?.id ?? null, "draft_failed", { requestId });
 
     if (err instanceof RateLimitError) {
       return errorResponse(
