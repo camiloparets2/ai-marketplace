@@ -3,6 +3,7 @@
 // via middleware; signed-in users go straight to the app.
 
 import Link from "next/link";
+import { BrandWordmark } from "@/app/brand";
 
 export const metadata = {
   title: "Photograph it. It's listed everywhere.",
@@ -44,10 +45,15 @@ export default function WelcomePage() {
       <div className="w-full max-w-2xl flex flex-col gap-10">
         {/* Hero */}
         <div className="text-center flex flex-col gap-4">
+          <div className="flex justify-center">
+            <BrandWordmark markClassName="w-8 h-8" textClassName="text-xl" />
+          </div>
           <h1 className="text-4xl font-bold text-gray-900 leading-tight">
             Photograph it.
             <br />
-            It&apos;s listed everywhere.
+            <span className="text-brand-gradient">
+              It&apos;s listed everywhere.
+            </span>
           </h1>
           <p className="text-gray-500 max-w-md mx-auto">
             Snap to List turns one photo into live listings on eBay, Etsy,
@@ -57,7 +63,7 @@ export default function WelcomePage() {
           <div className="flex gap-3 justify-center">
             <Link
               href="/login"
-              className="px-6 py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
+              className="px-6 py-3 rounded-xl btn-primary font-semibold text-sm transition-colors"
             >
               Start free — 10 AI drafts
             </Link>
@@ -104,7 +110,7 @@ export default function WelcomePage() {
         <div className="text-center">
           <Link
             href="/login"
-            className="inline-block px-8 py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
+            className="inline-block px-8 py-3 rounded-xl btn-primary font-semibold text-sm transition-colors"
           >
             List your first item →
           </Link>

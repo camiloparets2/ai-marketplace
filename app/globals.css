@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f8fafc;
+  --foreground: #111827;
 }
 
 @theme inline {
@@ -12,17 +12,13 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Geist is loaded in the root layout — use it (was accidentally Arial). */
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* App-like feel on phones: no blue tap flashes, no rubber-band page bounce,
@@ -42,4 +38,23 @@ input,
 textarea {
   -webkit-user-select: text;
   user-select: text;
+}
+
+@layer components {
+  /* The one primary action style, used everywhere a main CTA appears:
+     brand gradient, soft glow, gentle press feedback. Size/radius stay at
+     the call site. */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2
+      bg-gradient-to-r from-blue-600 to-indigo-600 text-white
+      shadow-md shadow-blue-600/25 transition-all
+      hover:from-blue-700 hover:to-indigo-700 hover:shadow-lg hover:shadow-blue-600/30
+      active:scale-[0.98]
+      disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
+  }
+
+  /* Headline treatment for brand moments (landing hero, wordmark). */
+  .text-brand-gradient {
+    @apply bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 bg-clip-text text-transparent;
+  }
 }

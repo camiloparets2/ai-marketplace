@@ -114,7 +114,7 @@ export default function PricingPage() {
                   disabled={busyPlan !== null}
                   className={`w-full py-2.5 rounded-xl font-semibold text-sm transition-colors disabled:opacity-50 ${
                     highlight
-                      ? "bg-blue-600 text-white hover:bg-blue-700"
+                      ? "btn-primary"
                       : "border border-gray-200 text-gray-700 hover:bg-gray-50"
                   }`}
                 >

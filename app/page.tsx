@@ -16,6 +16,7 @@ import {
   createSupabaseBrowserClient,
   isSupabaseAuthConfigured,
 } from "@/lib/supabase/client";
+import { BrandWordmark } from "@/app/brand";
 
 // ─── Stage machine ────────────────────────────────────────────────────────────
 
@@ -453,7 +454,9 @@ export default function Page() {
 
         {/* Header */}
         <div className="text-center">
-          <h1 className="text-2xl font-bold text-gray-900">Snap to List</h1>
+          <div className="flex justify-center">
+            <BrandWordmark />
+          </div>
           <p className="text-sm text-gray-500 mt-1">
             Photograph an item. List it everywhere in seconds.
           </p>
@@ -897,7 +900,7 @@ export default function Page() {
             <button
               onClick={() => void handlePublish()}
               disabled={stage === "publishing" || !price || targets.size === 0}
-              className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="w-full py-3 rounded-xl btn-primary font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {stage === "publishing"
                 ? "Publishing..."
@@ -951,7 +954,7 @@ export default function Page() {
                         onClick={() =>
                           void copyWithFeedback(r.platform, r.url)
                         }
-                        className="flex-1 py-2 rounded-lg bg-blue-600 text-white font-medium text-sm hover:bg-blue-700 transition-colors"
+                        className="flex-1 py-2 rounded-lg btn-primary font-medium text-sm transition-colors"
                       >
                         {copiedKey === r.platform ? "Copied!" : "Copy link"}
                       </button>
@@ -978,7 +981,7 @@ export default function Page() {
                         onClick={() =>
                           void copyWithFeedback(r.platform, r.copyText)
                         }
-                        className="w-full py-2 rounded-lg bg-blue-600 text-white font-medium text-sm hover:bg-blue-700 transition-colors"
+                        className="w-full py-2 rounded-lg btn-primary font-medium text-sm transition-colors"
                       >
                         {copiedKey === r.platform
                           ? "Copied!"
@@ -1008,7 +1011,7 @@ export default function Page() {
                 {r.status === "not_connected" && (
                   <a
                     href={r.connectUrl}
-                    className="w-full py-2 rounded-lg bg-blue-600 text-white font-medium text-sm text-center hover:bg-blue-700 transition-colors"
+                    className="w-full py-2 rounded-lg btn-primary font-medium text-sm text-center transition-colors"
                   >
                     Connect {TARGET_LABELS[r.platform]} →
                   </a>
@@ -1064,7 +1067,7 @@ export default function Page() {
               {outOfCredits ? (
                 <a
                   href="/pricing"
-                  className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm text-center hover:bg-blue-700 transition-colors"
+                  className="w-full py-3 rounded-xl btn-primary font-semibold text-sm text-center transition-colors"
                 >
                   View plans →
                 </a>
@@ -1074,7 +1077,7 @@ export default function Page() {
                     reset();
                     setTimeout(() => fileInputRef.current?.click(), 50);
                   }}
-                  className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
+                  className="w-full py-3 rounded-xl btn-primary font-semibold text-sm transition-colors"
                 >
                   Try a different photo
                 </button>

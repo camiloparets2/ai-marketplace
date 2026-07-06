@@ -114,7 +114,7 @@ export default function DashboardPage() {
             {/* Next best action */}
             <Link
               href={nextBestAction(data).href}
-              className="block bg-blue-600 text-white rounded-2xl shadow-sm p-4 hover:bg-blue-700 transition-colors"
+              className="block bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-2xl shadow-lg shadow-blue-600/25 p-4 hover:from-blue-700 hover:to-indigo-700 transition-all"
             >
               <p className="text-xs opacity-80">Next best action</p>
               <p className="font-semibold text-sm mt-0.5">

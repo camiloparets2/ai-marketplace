@@ -185,7 +185,7 @@ export default function InventoryPage() {
             </p>
             <Link
               href="/"
-              className="inline-block mt-4 px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
+              className="inline-block mt-4 px-4 py-2 rounded-xl btn-primary font-semibold text-sm transition-colors"
             >
               List an item →
             </Link>

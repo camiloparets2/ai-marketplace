@@ -11,6 +11,7 @@ import {
   isSupabaseAuthConfigured,
 } from "@/lib/supabase/client";
 import { safeNextPath } from "@/lib/auth/redirect";
+import { BrandWordmark } from "@/app/brand";
 
 const inputClass =
   "w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500";
@@ -156,7 +157,7 @@ function LoginForm() {
         <button
           type="submit"
           disabled={busy}
-          className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
+          className="w-full py-3 rounded-xl btn-primary font-semibold text-sm disabled:opacity-50 transition-colors"
         >
           {busy
             ? "Working..."
@@ -202,9 +203,9 @@ export default function LoginPage() {
   return (
     <main className="min-h-screen bg-gray-50 flex flex-col items-center px-4 py-16">
       <div className="w-full max-w-sm flex flex-col gap-6">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold text-gray-900">Snap to List</h1>
-          <p className="text-sm text-gray-500 mt-1">
+        <div className="text-center flex flex-col items-center gap-1">
+          <BrandWordmark />
+          <p className="text-sm text-gray-500">
             Sign in to list everywhere from one photo.
           </p>
         </div>
