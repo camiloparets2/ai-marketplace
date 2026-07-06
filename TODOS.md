@@ -1,5 +1,19 @@
 # TODOS
 
+## Salvage list from the July-5 prototype (superseded on master by this build)
+
+The prototype codebase lived on master (through commit `5b123ce`) and remains
+fully recoverable in git history. Its schema lives on as the `legacy_*` /
+prototype tables in Supabase. Feature ideas worth rebuilding properly here:
+
+- **Dual-image pipeline with stock-photo fallback** (`7a6cce8`, `d8edb94`) —
+  pairing the seller's photo with a clean stock image; revisit with the
+  multi-photo listing work.
+- **Listing detail page + dashboard thumbnails** (`0971258`) — aligns with
+  the "inventory item detail + edit" TODO below.
+- **Prompt-injection defense on the vision prompt** (`e9814db`) — review that
+  commit's approach when hardening /api/analyze further.
+
 ## Consumer-Launch Checklist (code is ready — this list gets you to advertising)
 
 Everything below is configuration/ops, not code. Work top to bottom.
