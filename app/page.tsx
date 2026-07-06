@@ -30,7 +30,13 @@ type Stage =
 
 // ─── Publish targets ──────────────────────────────────────────────────────────
 
-type PublishTarget = "ebay" | "etsy" | "facebook" | "offerup" | "direct";
+type PublishTarget =
+  | "ebay"
+  | "etsy"
+  | "shopify"
+  | "facebook"
+  | "offerup"
+  | "direct";
 
 const TARGET_LABELS: Record<PublishTarget, string> = {
   ...PLATFORM_DISPLAY_NAMES,
@@ -169,6 +175,7 @@ export default function Page() {
   const [connections, setConnections] = useState<Record<ApiPlatform, boolean>>({
     ebay: false,
     etsy: false,
+    shopify: false,
   });
   const [targets, setTargets] = useState<Set<PublishTarget>>(
     new Set(["facebook", "offerup", "direct"])
@@ -257,6 +264,7 @@ export default function Page() {
           const next = new Set(prev);
           if (data.connections?.ebay) next.add("ebay");
           if (data.connections?.etsy) next.add("etsy");
+          if (data.connections?.shopify) next.add("shopify");
           return next;
         });
       })
@@ -542,7 +550,7 @@ export default function Page() {
               <p className="text-sm font-medium text-gray-700">
                 Marketplace accounts
               </p>
-              {(["ebay", "etsy"] as const).map((p) => (
+              {(["ebay", "etsy", "shopify"] as const).map((p) => (
                 <div
                   key={p}
                   className="flex items-center justify-between text-sm"
@@ -554,7 +562,8 @@ export default function Page() {
                     </span>
                   ) : (
                     <a
-                      href={`/api/oauth/${p}/start`}
+                      // Shopify connect needs a shop domain — collected on the hub.
+                      href={p === "shopify" ? "/channels" : `/api/oauth/${p}/start`}
                       className="text-blue-600 hover:underline font-medium"
                     >
                       Connect →
@@ -564,7 +573,10 @@ export default function Page() {
               ))}
               <p className="text-xs text-gray-400 mt-1">
                 Facebook Marketplace and OfferUp don&apos;t offer listing APIs —
-                you&apos;ll get a one-tap assisted post instead.
+                you&apos;ll get a one-tap assisted post instead.{" "}
+                <a href="/channels" className="text-blue-600 hover:underline">
+                  Manage channels →
+                </a>
               </p>
             </div>
           </>
@@ -818,9 +830,16 @@ export default function Page() {
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 flex flex-col gap-3">
               <p className="text-sm font-medium text-gray-700">List on</p>
               {(
-                ["ebay", "etsy", "facebook", "offerup", "direct"] as const
+                [
+                  "ebay",
+                  "etsy",
+                  "shopify",
+                  "facebook",
+                  "offerup",
+                  "direct",
+                ] as const
               ).map((t) => {
-                const isApi = t === "ebay" || t === "etsy";
+                const isApi = t === "ebay" || t === "etsy" || t === "shopify";
                 const needsConnect = isApi && !connections[t as ApiPlatform];
                 return (
                   <label
@@ -850,7 +869,9 @@ export default function Page() {
                     </span>
                     {needsConnect && (
                       <a
-                        href={`/api/oauth/${t}/start`}
+                        href={
+                          t === "shopify" ? "/channels" : `/api/oauth/${t}/start`
+                        }
                         className="text-blue-600 hover:underline text-xs font-medium"
                         onClick={(e) => e.stopPropagation()}
                       >

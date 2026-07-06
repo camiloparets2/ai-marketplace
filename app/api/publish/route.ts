@@ -26,6 +26,7 @@ import { getConnection } from "@/lib/connections";
 import { hostListingPhoto } from "@/lib/storage";
 import { publishToEbay } from "@/lib/platforms/ebay";
 import { publishToEtsy } from "@/lib/platforms/etsy";
+import { publishToShopify } from "@/lib/platforms/shopify";
 import { createPaymentLink } from "@/lib/stripe-link";
 import { authenticateRequest } from "@/lib/auth/guard";
 import {
@@ -57,6 +58,7 @@ type TargetResult = {
 const VALID_TARGETS: ReadonlySet<string> = new Set([
   "ebay",
   "etsy",
+  "shopify",
   "facebook",
   "offerup",
   "direct",
@@ -88,7 +90,7 @@ function parseBody(raw: unknown): PublishBody | string {
     targets.length === 0 ||
     targets.some((t) => !VALID_TARGETS.has(t))
   )
-    return "targets must be a non-empty array of: ebay, etsy, facebook, offerup, direct";
+    return "targets must be a non-empty array of: ebay, etsy, shopify, facebook, offerup, direct";
 
   return { listing, image, mimeType, targets };
 }
@@ -139,7 +141,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     try {
       switch (target) {
         case "ebay":
-        case "etsy": {
+        case "etsy":
+        case "shopify": {
           // Marketplace publishing is user-scoped; a beta key alone can't
           // reach anyone's tokens.
           if (!user) {
@@ -154,7 +157,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             return {
               platform: target,
               status: "not_connected",
-              connectUrl: `/api/oauth/${target}/start`,
+              // Shopify connect needs a shop domain first — route via the hub.
+              connectUrl:
+                target === "shopify" ? "/channels" : `/api/oauth/${target}/start`,
             };
           }
           if (target === "ebay") {
@@ -164,6 +169,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               url: published.url,
               externalId: published.listingId,
               meta: { offerId: published.offerId, sku: published.sku },
+            });
+            return { platform: target, status: "live", url: published.url };
+          }
+          if (target === "shopify") {
+            const published = await publishToShopify(conn, listing, image);
+            liveRecords.push({
+              platform: "shopify",
+              url: published.url,
+              externalId: published.productId,
+              meta: { shop: published.shop },
             });
             return { platform: target, status: "live", url: published.url };
           }

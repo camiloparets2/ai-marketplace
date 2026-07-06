@@ -9,6 +9,7 @@ everywhere in one tap.
 |---|---|---|
 | eBay | **Live API publish** | OAuth-connected seller account → Sell Inventory API (inventory item → offer → publish). Returns the live `ebay.com/itm/...` URL. |
 | Etsy | **Live API publish** | OAuth (PKCE) connected shop → Open API v3 (draft listing → photo upload → activate). Returns the live `etsy.com/listing/...` URL. Activation incurs Etsy's $0.20 listing fee. |
+| Shopify | **Live API publish** | OAuth (HMAC-verified) connected store → REST Admin API product create with the photo embedded as base64. Returns the live `{shop}/products/{handle}` URL. Sales poll via orders; sold-elsewhere moves the product to draft. |
 | Facebook Marketplace | **Assisted post** | Facebook offers no public listing API for individual sellers. The app composes the listing, copies it to your clipboard, hands you the photo, and deep-links into `facebook.com/marketplace/create/item`. |
 | OfferUp | **Assisted post** | OfferUp has no public API. Same one-tap copy + photo + deep link into `offerup.com/post`. |
 | Direct link | **Stripe Payment Link** | No-fee direct checkout link you can share anywhere. |

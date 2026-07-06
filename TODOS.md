@@ -1,5 +1,17 @@
 # TODOS
 
+## Phase 3 Follow-ups (Shopify + channel hub are built — these complete the phase)
+
+### [ ] Create the Shopify app and set credentials
+**What:** partners.shopify.com → create an app (or a custom app on your store) → set the allowed redirection URL to `https://ai-marketplace-teal.vercel.app/api/oauth/shopify/callback` → put the client id/secret in `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` on Vercel. Then connect from `/channels` (enter the `.myshopify.com` domain).
+**Why:** Shopify publishing, delisting, and sales polling are live in code but inert without app credentials. Also run `supabase db push` (widens the platform check constraints).
+
+### [ ] Multi-account per marketplace
+**What:** Allow e.g. two eBay accounts per user: `platform_connections` PK becomes (user_id, platform, account_id), publish targets carry a connection choice, channel hub lists accounts per platform. Deferred deliberately — deep refactor, low value for solo sellers; labeled "on the roadmap" in the /channels UI.
+
+### [ ] Shopify product import (storefront → SnapToList)
+**What:** Roadmap Phase 3 wants two-way flow: import existing Shopify products into inventory. Export (SnapToList → Shopify) ships now; import is the follow-up.
+
 ## Inventory Follow-ups (Phase 2 core is built — these complete it)
 
 ### [ ] Apply the inventory migration

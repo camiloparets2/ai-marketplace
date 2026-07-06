@@ -33,6 +33,7 @@ interface Item {
 const PLATFORM_NAMES: Record<string, string> = {
   ebay: "eBay",
   etsy: "Etsy",
+  shopify: "Shopify",
   direct: "Direct link",
 };
 

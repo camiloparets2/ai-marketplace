@@ -13,6 +13,7 @@
 import { getSupabaseAdmin, getConnection } from "@/lib/connections";
 import { fetchEbaySales } from "@/lib/platforms/ebay";
 import { fetchEtsySales } from "@/lib/platforms/etsy";
+import { fetchShopifySales } from "@/lib/platforms/shopify";
 import { markItemSold } from "@/lib/inventory";
 import { API_PLATFORMS } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
@@ -154,9 +155,15 @@ async function syncPlatform(
     const sales: SaleKey[] =
       platform === "ebay"
         ? await fetchEbaySales(conn, since.toISOString())
-        : (await fetchEtsySales(conn, Math.floor(since.getTime() / 1000))).map(
-            (s) => ({ listingId: s.listingId, sku: null, price: s.price })
-          );
+        : platform === "shopify"
+          ? (await fetchShopifySales(conn, since.toISOString())).map((s) => ({
+              listingId: s.productId,
+              sku: null,
+              price: s.price,
+            }))
+          : (await fetchEtsySales(conn, Math.floor(since.getTime() / 1000))).map(
+              (s) => ({ listingId: s.listingId, sku: null, price: s.price })
+            );
 
     const matches = matchSales(sales, listings);
     for (const match of matches) {

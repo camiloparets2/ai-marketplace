@@ -19,6 +19,7 @@ const PROTECTED_PAGES = [
   "/billing",
   "/inventory",
   "/dashboard",
+  "/channels",
 ];
 
 export async function middleware(req: NextRequest): Promise<NextResponse> {
@@ -67,5 +68,12 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
 export const config = {
   // Only pages that read or gate on the session. API routes, static assets,
   // and public pages (login, privacy, terms, connect landings) are excluded.
-  matcher: ["/", "/reset-password", "/billing", "/inventory", "/dashboard"],
+  matcher: [
+    "/",
+    "/reset-password",
+    "/billing",
+    "/inventory",
+    "/dashboard",
+    "/channels",
+  ],
 };

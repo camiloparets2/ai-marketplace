@@ -5,6 +5,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ebayExchangeCode } from "@/lib/platforms/ebay";
 import { etsyExchangeCode } from "@/lib/platforms/etsy";
+import {
+  shopifyExchangeCode,
+  verifyShopifyHmac,
+  isValidShopDomain,
+} from "@/lib/platforms/shopify";
 import { saveConnection } from "@/lib/connections";
 import { requireUser } from "@/lib/auth/guard";
 
@@ -15,6 +20,7 @@ function backToApp(origin: string, params: Record<string, string>): NextResponse
   // One-shot cookies — always clear them regardless of outcome.
   res.cookies.delete("oauth_state_ebay");
   res.cookies.delete("oauth_state_etsy");
+  res.cookies.delete("oauth_state_shopify");
   res.cookies.delete("etsy_code_verifier");
   return res;
 }
@@ -29,7 +35,7 @@ export async function GET(
   const state = req.nextUrl.searchParams.get("state");
   const expectedState = req.cookies.get(`oauth_state_${platform}`)?.value;
 
-  if (platform !== "ebay" && platform !== "etsy") {
+  if (platform !== "ebay" && platform !== "etsy" && platform !== "shopify") {
     return NextResponse.json(
       { error: `Unknown platform: ${platform}` },
       { status: 404 }
@@ -62,6 +68,25 @@ export async function GET(
   try {
     if (platform === "ebay") {
       await saveConnection({ ...(await ebayExchangeCode(code)), userId: user.id });
+    } else if (platform === "shopify") {
+      // Shopify signs its callbacks — reject anything with a bad HMAC or a
+      // shop domain outside myshopify.com before exchanging the code.
+      const secret = process.env.SHOPIFY_API_SECRET;
+      const shop = req.nextUrl.searchParams.get("shop") ?? "";
+      if (!secret || !verifyShopifyHmac(req.nextUrl.searchParams, secret)) {
+        return backToApp(origin, {
+          connect_error: "Shopify signature check failed — please try again.",
+        });
+      }
+      if (!isValidShopDomain(shop)) {
+        return backToApp(origin, {
+          connect_error: "Invalid Shopify shop domain.",
+        });
+      }
+      await saveConnection({
+        ...(await shopifyExchangeCode(shop, code)),
+        userId: user.id,
+      });
     } else {
       const verifier = req.cookies.get("etsy_code_verifier")?.value;
       if (!verifier) {

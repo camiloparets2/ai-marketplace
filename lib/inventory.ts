@@ -9,13 +9,14 @@
 import { getSupabaseAdmin, getConnection } from "@/lib/connections";
 import { endEbayListing } from "@/lib/platforms/ebay";
 import { endEtsyListing } from "@/lib/platforms/etsy";
+import { endShopifyListing } from "@/lib/platforms/shopify";
 import { deactivatePaymentLink } from "@/lib/stripe-link";
 import { planEndListings } from "@/lib/inventory-rules";
 import type { ListingInput } from "@/lib/platforms/types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type ListingChannel = "ebay" | "etsy" | "direct";
+export type ListingChannel = "ebay" | "etsy" | "shopify" | "direct";
 
 export interface LiveListing {
   platform: ListingChannel;
@@ -190,6 +191,13 @@ async function endOneListing(userId: string, listing: ListingRow): Promise<void>
     const shopId = listing.meta.shopId;
     if (!shopId || !listing.external_id) throw new Error("missing Etsy ids");
     await endEtsyListing(conn, shopId, listing.external_id);
+    return;
+  }
+  if (listing.platform === "shopify") {
+    const conn = await getConnection(userId, "shopify");
+    if (!conn) throw new Error("Shopify is not connected — reconnect and retry");
+    if (!listing.external_id) throw new Error("missing Shopify product id");
+    await endShopifyListing(conn, listing.external_id);
     return;
   }
   throw new Error(`unknown platform: ${listing.platform}`);

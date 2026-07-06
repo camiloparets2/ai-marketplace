@@ -5,11 +5,15 @@
 //   assist — no public listing API exists (Facebook Marketplace, OfferUp); we
 //            generate a ready-to-paste listing + deep link into their post flow.
 
-export type ApiPlatform = "ebay" | "etsy";
+export type ApiPlatform = "ebay" | "etsy" | "shopify";
 export type AssistPlatform = "facebook" | "offerup";
 export type Platform = ApiPlatform | AssistPlatform;
 
-export const API_PLATFORMS: ReadonlyArray<ApiPlatform> = ["ebay", "etsy"];
+export const API_PLATFORMS: ReadonlyArray<ApiPlatform> = [
+  "ebay",
+  "etsy",
+  "shopify",
+];
 export const ASSIST_PLATFORMS: ReadonlyArray<AssistPlatform> = [
   "facebook",
   "offerup",
@@ -22,6 +26,7 @@ export const ALL_PLATFORMS: ReadonlyArray<Platform> = [
 export const PLATFORM_DISPLAY_NAMES: Record<Platform, string> = {
   ebay: "eBay",
   etsy: "Etsy",
+  shopify: "Shopify",
   facebook: "Facebook Marketplace",
   offerup: "OfferUp",
 };

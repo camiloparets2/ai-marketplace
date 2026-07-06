@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 
 interface DashboardData {
-  connections: { ebay: boolean; etsy: boolean };
+  connections: { ebay: boolean; etsy: boolean; shopify: boolean };
   creditsRemaining: number | null;
   creditsRenewAt: string | null;
   items: { draft: number; listed: number; sold: number; archived: number };
@@ -172,15 +172,25 @@ export default function DashboardPage() {
 
             {/* Channels */}
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex flex-col gap-2">
-              <p className="text-sm font-medium text-gray-700">Channels</p>
-              {(["ebay", "etsy"] as const).map((p) => (
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-gray-700">Channels</p>
+                <Link
+                  href="/channels"
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  Manage →
+                </Link>
+              </div>
+              {(["ebay", "etsy", "shopify"] as const).map((p) => (
                 <div key={p} className="flex items-center justify-between text-sm">
-                  <span className="text-gray-600">{p === "ebay" ? "eBay" : "Etsy"}</span>
+                  <span className="text-gray-600">
+                    {p === "ebay" ? "eBay" : p === "etsy" ? "Etsy" : "Shopify"}
+                  </span>
                   {data.connections[p] ? (
                     <span className="text-green-600 font-medium">✓ Connected</span>
                   ) : (
                     <a
-                      href={`/api/oauth/${p}/start`}
+                      href={p === "shopify" ? "/channels" : `/api/oauth/${p}/start`}
                       className="text-blue-600 hover:underline font-medium"
                     >
                       Connect →
@@ -197,7 +207,7 @@ export default function DashboardPage() {
             </div>
 
             {/* Quick links */}
-            <div className="grid grid-cols-3 gap-2 text-center text-sm">
+            <div className="grid grid-cols-2 gap-2 text-center text-sm">
               <Link
                 href="/"
                 className="py-2.5 rounded-xl bg-white border border-gray-100 shadow-sm text-gray-700 font-medium hover:bg-gray-50"
@@ -209,6 +219,12 @@ export default function DashboardPage() {
                 className="py-2.5 rounded-xl bg-white border border-gray-100 shadow-sm text-gray-700 font-medium hover:bg-gray-50"
               >
                 Inventory
+              </Link>
+              <Link
+                href="/channels"
+                className="py-2.5 rounded-xl bg-white border border-gray-100 shadow-sm text-gray-700 font-medium hover:bg-gray-50"
+              >
+                Channels
               </Link>
               <Link
                 href="/billing"

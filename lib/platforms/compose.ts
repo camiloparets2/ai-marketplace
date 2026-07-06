@@ -11,6 +11,7 @@ import type {
 export const TITLE_LIMITS: Record<Platform, number> = {
   ebay: 80,
   etsy: 140,
+  shopify: 255,
   facebook: 99,
   offerup: 80,
 };

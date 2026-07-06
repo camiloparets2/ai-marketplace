@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomBytes } from "crypto";
 import { ebayAuthorizeUrl } from "@/lib/platforms/ebay";
 import { etsyAuthorizeUrl, generatePkce } from "@/lib/platforms/etsy";
+import { shopifyAuthorizeUrl } from "@/lib/platforms/shopify";
 import { requireUser } from "@/lib/auth/guard";
 
 export async function GET(
@@ -37,6 +38,18 @@ export async function GET(
       const { verifier, challenge } = generatePkce();
       cookies.push({ name: "etsy_code_verifier", value: verifier });
       authorizeUrl = etsyAuthorizeUrl(state, challenge, req.nextUrl.origin);
+    } else if (platform === "shopify") {
+      // Shopify consent lives on the merchant's own domain, so the shop must
+      // be provided: /api/oauth/shopify/start?shop=my-store.myshopify.com
+      const shop = req.nextUrl.searchParams.get("shop")?.trim().toLowerCase();
+      if (!shop) {
+        return NextResponse.redirect(
+          `${req.nextUrl.origin}/channels?connect_error=${encodeURIComponent(
+            "Enter your .myshopify.com store domain to connect Shopify."
+          )}`
+        );
+      }
+      authorizeUrl = shopifyAuthorizeUrl(shop, state, req.nextUrl.origin);
     } else {
       return NextResponse.json(
         { error: `Unknown platform: ${platform}` },
