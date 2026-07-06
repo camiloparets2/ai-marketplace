@@ -67,16 +67,22 @@ export function etsyAuthorizeUrl(
   challenge: string,
   origin: string
 ): string {
-  const params = new URLSearchParams({
-    response_type: "code",
-    client_id: apiKey(),
-    redirect_uri: etsyRedirectUri(origin),
-    scope: OAUTH_SCOPES,
-    state,
-    code_challenge: challenge,
-    code_challenge_method: "S256",
-  });
-  return `https://www.etsy.com/oauth/connect?${params.toString()}`;
+  // Built manually rather than with URLSearchParams: Etsy documents
+  // %20-separated scopes, and URLSearchParams encodes spaces as "+",
+  // which some OAuth servers reject.
+  const params: Array<[string, string]> = [
+    ["response_type", "code"],
+    ["client_id", apiKey()],
+    ["redirect_uri", etsyRedirectUri(origin)],
+    ["scope", OAUTH_SCOPES],
+    ["state", state],
+    ["code_challenge", challenge],
+    ["code_challenge_method", "S256"],
+  ];
+  const query = params
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+    .join("&");
+  return `https://www.etsy.com/oauth/connect?${query}`;
 }
 
 interface TokenResponse {

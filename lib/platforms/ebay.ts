@@ -73,14 +73,19 @@ const OAUTH_SCOPES = [
 
 export function ebayAuthorizeUrl(state: string): string {
   const { clientId, ruName } = credentials();
-  const params = new URLSearchParams({
-    client_id: clientId,
-    response_type: "code",
-    redirect_uri: ruName,
-    scope: OAUTH_SCOPES,
-    state,
-  });
-  return `${authBase()}/oauth2/authorize?${params.toString()}`;
+  // Manual encoding: eBay documents %20-separated scopes; URLSearchParams
+  // would emit "+", which OAuth servers may reject.
+  const params: Array<[string, string]> = [
+    ["client_id", clientId],
+    ["response_type", "code"],
+    ["redirect_uri", ruName],
+    ["scope", OAUTH_SCOPES],
+    ["state", state],
+  ];
+  const query = params
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+    .join("&");
+  return `${authBase()}/oauth2/authorize?${query}`;
 }
 
 interface TokenResponse {
