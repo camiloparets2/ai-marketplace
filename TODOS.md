@@ -5,9 +5,13 @@
 ### [ ] Apply the inventory migration
 **What:** `supabase db push` — applies `20260706100000_inventory.sql` (inventory_items, marketplace_listings, publish_attempts). Until applied, publishes still work but nothing is recorded (logged warning) and `/inventory` shows empty.
 
-### [ ] eBay/Etsy sale polling
-**What:** Detect sales that happen ON eBay/Etsy (today only direct-link sales sync automatically; eBay/Etsy sales require the seller to tap "Mark sold"). eBay: Sell Fulfillment API `getOrders` polling or Notification API; Etsy: `getShopReceipts` polling. On detection → `markItemSold(...)` which already handles cross-channel delisting.
-**Why:** Closes the last oversell window without manual action. Roadmap Phase 2 ("sold-item sync").
+### [x] eBay/Etsy sale polling — BUILT (activation steps below)
+**Built:** `lib/order-sync.ts` polls eBay `getOrders` + Etsy `getShopReceipts`, matches sales to open listings (by listing id, SKU fallback), and routes through `markItemSold` → cross-channel delisting. Triggers: daily Vercel Cron (`vercel.json` → `/api/sync/orders`), opportunistic sync on inventory load (throttled 10 min), and a manual "Check for new sales" button.
+**To activate:**
+1. `supabase db push` (adds the `sync_state` table).
+2. Set `CRON_SECRET` in Vercel (any random string) so the cron sweep authenticates.
+3. **Reconnect eBay and Etsy accounts** connected before this shipped — sale polling needs the new `sell.fulfillment` (eBay) and `transactions_r` (Etsy) OAuth scopes.
+4. Hobby plan runs the cron daily; on Vercel Pro, tighten `vercel.json` to hourly (`"23 * * * *"`) for a smaller oversell window. Active sellers get 10-minute-grade sync from the inventory-load trigger regardless.
 
 ### [ ] Inventory item detail + edit
 **What:** Item detail page with editable cost of goods, purchase source, storage location, notes (columns already exist), plus listing history. Then profit per sale = sold_price − cost_of_goods − fees (Phase 4 analytics feed off this).

@@ -39,7 +39,9 @@ function apiKey(): string {
   return key;
 }
 
-const OAUTH_SCOPES = "listings_w listings_r shops_r";
+// transactions_r powers order polling (sale detection). Accounts connected
+// before it was added must reconnect for sales sync to work.
+const OAUTH_SCOPES = "listings_w listings_r shops_r transactions_r";
 
 // ─── OAuth (PKCE) ─────────────────────────────────────────────────────────────
 
@@ -362,6 +364,68 @@ export async function publishToEtsy(
     listingId: String(listing.listing_id),
     shopId,
   };
+}
+
+// ─── Sale detection (receipt polling) ─────────────────────────────────────────
+
+export interface EtsySale {
+  receiptId: string;
+  // Etsy listing_id of the sold item — matches our stored external_id.
+  listingId: string | null;
+  price: number | null;
+}
+
+// Narrow view of getShopReceipts.
+interface ReceiptsPayload {
+  results?: Array<{
+    receipt_id?: number;
+    is_paid?: boolean;
+    grandtotal?: { amount?: number; divisor?: number } | null;
+    transactions?: Array<{
+      listing_id?: number | null;
+      price?: { amount?: number; divisor?: number } | null;
+    }> | null;
+  }> | null;
+}
+
+function etsyMoney(
+  money: { amount?: number; divisor?: number } | null | undefined
+): number | null {
+  if (!money || typeof money.amount !== "number") return null;
+  const divisor = money.divisor && money.divisor > 0 ? money.divisor : 100;
+  return money.amount / divisor;
+}
+
+// Pure parse of getShopReceipts — one sale per paid transaction.
+export function extractEtsySales(payload: unknown): EtsySale[] {
+  const receipts = (payload as ReceiptsPayload).results ?? [];
+  const sales: EtsySale[] = [];
+  for (const receipt of receipts) {
+    if (receipt.is_paid === false) continue;
+    for (const tx of receipt.transactions ?? []) {
+      sales.push({
+        receiptId: String(receipt.receipt_id ?? "unknown"),
+        listingId: tx.listing_id ? String(tx.listing_id) : null,
+        price: etsyMoney(tx.price) ?? etsyMoney(receipt.grandtotal),
+      });
+    }
+  }
+  return sales;
+}
+
+// Fetch paid sales created since `sinceUnix` from the connected shop.
+export async function fetchEtsySales(
+  connection: PlatformConnection,
+  sinceUnix: number
+): Promise<EtsySale[]> {
+  const conn = await freshConnection(connection);
+  const shopId = await resolveShopId(conn);
+  const res = await etsyFetch(
+    conn.accessToken,
+    `/application/shops/${shopId}/receipts?min_created=${sinceUnix}&limit=100`
+  );
+  if (!res.ok) throw await etsyError(res, "receipt lookup");
+  return extractEtsySales(await res.json());
 }
 
 // Ends a live Etsy listing (sold elsewhere / manual delist) by deactivating

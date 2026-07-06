@@ -64,6 +64,9 @@ const OAUTH_SCOPES = [
   "https://api.ebay.com/oauth/api_scope",
   "https://api.ebay.com/oauth/api_scope/sell.inventory",
   "https://api.ebay.com/oauth/api_scope/sell.account",
+  // Order polling (sale detection). Accounts connected before this scope was
+  // added must reconnect for sales sync to work.
+  "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
 ].join(" ");
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────
@@ -386,6 +389,75 @@ export async function publishToEbay(
     ? `https://www.ebay.com/itm/${published.listingId}`
     : `https://sandbox.ebay.com/itm/${published.listingId}`;
   return { url, listingId: published.listingId, offerId: offer.offerId, sku };
+}
+
+// ─── Sale detection (order polling) ───────────────────────────────────────────
+
+export interface EbaySale {
+  orderId: string;
+  // eBay's listing id for the sold line item — matches our stored external_id.
+  listingId: string | null;
+  // Inventory API SKU — fallback match key (we set it at publish time).
+  sku: string | null;
+  price: number | null;
+}
+
+// Narrow view of a Sell Fulfillment getOrders response.
+interface OrdersPayload {
+  orders?: Array<{
+    orderId?: string;
+    orderPaymentStatus?: string;
+    pricingSummary?: { total?: { value?: string } } | null;
+    lineItems?: Array<{
+      legacyItemId?: string | null;
+      sku?: string | null;
+      total?: { value?: string } | null;
+    }> | null;
+  }> | null;
+}
+
+function moneyValue(value: string | undefined | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return isFinite(parsed) ? parsed : null;
+}
+
+// Pure parse of getOrders — one sale per PAID line item.
+export function extractEbaySales(payload: unknown): EbaySale[] {
+  const orders = (payload as OrdersPayload).orders ?? [];
+  const sales: EbaySale[] = [];
+  for (const order of orders) {
+    // Unpaid/failed orders don't end listings; skip until they become PAID.
+    if (order.orderPaymentStatus && order.orderPaymentStatus !== "PAID") {
+      continue;
+    }
+    for (const item of order.lineItems ?? []) {
+      sales.push({
+        orderId: order.orderId ?? "unknown",
+        listingId: item.legacyItemId ?? null,
+        sku: item.sku ?? null,
+        price:
+          moneyValue(item.total?.value) ??
+          moneyValue(order.pricingSummary?.total?.value),
+      });
+    }
+  }
+  return sales;
+}
+
+// Fetch PAID sales created since `sinceIso` from the connected account.
+export async function fetchEbaySales(
+  connection: PlatformConnection,
+  sinceIso: string
+): Promise<EbaySale[]> {
+  const conn = await freshConnection(connection);
+  const filter = encodeURIComponent(`creationdate:[${sinceIso}..]`);
+  const res = await ebayFetch(
+    conn.accessToken,
+    `/sell/fulfillment/v1/order?filter=${filter}&limit=50`
+  );
+  if (!res.ok) throw await ebayError(res, "order lookup");
+  return extractEbaySales(await res.json());
 }
 
 // Ends a live eBay listing (sold elsewhere / manual delist) by withdrawing

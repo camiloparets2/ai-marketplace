@@ -74,6 +74,14 @@ channels, and the sync actions:
 - **Direct sales sync automatically**: a completed payment-link checkout hits
   the Stripe webhook → item marked sold → all other channels ended. No
   seller action needed.
+- **eBay/Etsy sales sync automatically too** (`lib/order-sync.ts`): orders are
+  polled via eBay `getOrders` / Etsy `getShopReceipts`, matched to open
+  listings, and routed through the same sold pipeline. Three triggers: a
+  daily Vercel Cron (`/api/sync/orders`, gated by `CRON_SECRET`), a throttled
+  post-response sync whenever inventory is loaded, and a manual "Check for
+  new sales" button. Processing is idempotent, so overlapping windows and
+  replays are harmless. Requires the `sell.fulfillment` / `transactions_r`
+  OAuth scopes — accounts connected before these were added must reconnect.
 - Failed ends are marked `end_failed` with the error and retried on the next
   sold/delist action (idempotent).
 

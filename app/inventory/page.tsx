@@ -48,6 +48,7 @@ export default function InventoryPage() {
   const [loading, setLoading] = useState(true);
   const [busyItem, setBusyItem] = useState<string>("");
   const [notice, setNotice] = useState<string>("");
+  const [syncing, setSyncing] = useState(false);
   // Item id whose "mark sold" platform picker is open
   const [soldPicker, setSoldPicker] = useState<string>("");
 
@@ -107,6 +108,35 @@ export default function InventoryPage() {
     setBusyItem("");
   }
 
+  async function syncSales() {
+    setSyncing(true);
+    setNotice("");
+    try {
+      const res = await fetch("/api/sync/orders", { method: "POST" });
+      const data = (await res.json()) as {
+        results?: Array<{ platform: string; itemsSold: number; error?: string }>;
+        error?: string;
+      };
+      if (!res.ok) {
+        setNotice(data.error ?? "Sync failed. Please try again.");
+      } else {
+        const sold = (data.results ?? []).reduce((n, r) => n + r.itemsSold, 0);
+        const errors = (data.results ?? []).filter((r) => r.error);
+        setNotice(
+          sold > 0
+            ? `Synced — ${sold} item${sold === 1 ? "" : "s"} marked sold and delisted elsewhere.`
+            : errors.length > 0
+              ? `Sync issue: ${errors.map((e) => `${PLATFORM_NAMES[e.platform] ?? e.platform}: ${e.error}`).join("; ")}`
+              : "Synced — no new sales found."
+        );
+      }
+      await load();
+    } catch {
+      setNotice("Connection failed. Please try again.");
+    }
+    setSyncing(false);
+  }
+
   // Platforms a sale can be attributed to: the item's channels plus the
   // assisted ones (sales there happen off-platform).
   function soldPlatformChoices(item: Item): string[] {
@@ -122,6 +152,13 @@ export default function InventoryPage() {
           <p className="text-sm text-gray-500 mt-1">
             Every item, every channel — marking one sold ends it everywhere.
           </p>
+          <button
+            onClick={() => void syncSales()}
+            disabled={syncing}
+            className="mt-2 text-xs text-blue-600 hover:underline disabled:opacity-50"
+          >
+            {syncing ? "Checking eBay & Etsy..." : "↻ Check for new sales"}
+          </button>
         </div>
 
         {notice && (
