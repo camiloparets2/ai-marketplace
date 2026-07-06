@@ -76,24 +76,41 @@ export async function userIdForCustomer(
 async function resolvePriceId(planKey: PlanKey): Promise<string> {
   const stripe = getStripe();
   const plan = PLANS[planKey];
+  const unitAmount = Math.round(plan.priceUsd * 100);
 
+  // The catalog (lib/billing/plans.ts) is the source of truth. If a Stripe
+  // price exists under this lookup key AND still matches the catalog amount,
+  // reuse it; if the catalog changed, mint a new price and transfer the
+  // lookup key so new checkouts get the new price (existing subscribers
+  // keep the price they signed up at).
   const existing = await stripe.prices.list({
     lookup_keys: [planKey],
     active: true,
     limit: 1,
   });
-  if (existing.data[0]) return existing.data[0].id;
+  const current = existing.data[0];
+  if (current && current.unit_amount === unitAmount) return current.id;
 
-  const product = await stripe.products.create({
-    name: `Snap to List — ${plan.name}`,
-    metadata: { plan_key: planKey },
-  });
+  const productId =
+    current !== undefined
+      ? typeof current.product === "string"
+        ? current.product
+        : current.product.id
+      : (
+          await stripe.products.create({
+            name: `Snap to List — ${plan.name}`,
+            metadata: { plan_key: planKey },
+          })
+        ).id;
+
   const price = await stripe.prices.create({
-    product: product.id,
-    unit_amount: Math.round(plan.priceUsd * 100),
+    product: productId,
+    unit_amount: unitAmount,
     currency: "usd",
     recurring: { interval: "month" },
     lookup_key: planKey,
+    // Moves the lookup key off the outdated price onto this one.
+    transfer_lookup_key: true,
   });
   return price.id;
 }

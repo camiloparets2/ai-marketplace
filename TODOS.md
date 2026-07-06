@@ -11,7 +11,7 @@ Everything below is configuration/ops, not code. Work top to bottom.
 Google provider, Site/redirect URLs, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and **production SMTP** (Supabase's built-in sender is rate-limited to a handful/hour — not enough for real signups).
 
 ### [ ] 3. Billing live-mode test
-Stripe webhook endpoint + `STRIPE_WEBHOOK_SECRET`, confirm final prices in `lib/billing/plans.ts`, one end-to-end test-mode then live-mode subscription.
+Stripe webhook endpoint + `STRIPE_WEBHOOK_SECRET`, then one end-to-end test-mode then live-mode subscription. **Prices are decided** (Starter $9.99/60 · Pro $24.99/250 · Power $59.99/750 — full margin/value analysis in `docs/pricing-analysis.md`); adjust only if launch data says so.
 
 ### [ ] 4. Marketplace approvals
 eBay production keyset (test in SANDBOX first), Etsy API key, Shopify app credentials. Reconnect any early-connected accounts (new OAuth scopes for sale polling).
@@ -22,8 +22,8 @@ Add Sentry (or Vercel's error monitoring) for auth/AI/marketplace/Stripe failure
 ### [ ] 6. Ops basics before ads
 Supabase backup schedule (PITR or daily dumps), a rollback note (Vercel instant rollback + `git revert`), spend alerts: Anthropic ($25 soft/$50 hard — see Phase 1 list), Stripe email alerts, Vercel usage alerts.
 
-### [ ] 7. Legal review
-/privacy and /terms are honest working drafts written by an AI, not lawyer-reviewed. Fine for beta; review before paid public launch.
+### [ ] 7. Legal review — drafts upgraded to launch-grade; attorney sign-off remains
+/privacy and /terms are now full-coverage drafts (data categories, AI disclosure, user rights, subscriptions/refunds, acceptable use, marketplace disclaimers, liability cap, termination) accurate to how the app actually behaves. Remaining before large-scale paid launch: (a) a licensed attorney's confirmation pass, (b) pin the governing-law state in Terms §11 (currently phrased as "the state in which the operator resides"), (c) re-check when new data stores or countries are added.
 
 ### [ ] 8. Advertise
 The ad destination is `/welcome` (public landing, OG tags set). Good first channels: reseller communities (r/Flipping, r/eBaySellerAdvice), TikTok/Reels demo of snap→listed-everywhere, and Google Ads on "crosslisting app" keywords. Track signups via PostHog before spending.
@@ -65,8 +65,8 @@ The ad destination is `/welcome` (public landing, OG tags set). Good first chann
 ### [ ] Apply the billing migration before enabling checkout
 **What:** `supabase db push` — applies `20260706000000_billing_credits.sql` (tables + atomic spend/refund functions). Until applied, credit gating fails open (logged warning) so the product keeps working — but nothing is metered.
 
-### [ ] Confirm final plan prices
-**What:** Prices in `lib/billing/plans.ts` are placeholders (Starter $9.99 / Pro $29.99 / Power $79.99, roadmap credit amounts). Changing `priceUsd` creates a new Stripe price at next checkout via lookup keys; existing subscribers keep their old price unless migrated in Stripe.
+### [x] Confirm final plan prices — DECIDED
+**Decision:** Starter $9.99/60 · Pro $24.99/250 · Power $59.99/750. Unit economics, competitor comparison, and the time-saved fairness analysis: `docs/pricing-analysis.md`. `resolvePriceId` now verifies Stripe price amounts against the catalog and re-mints (transferring the lookup key) on change, so future price edits are a one-line change in `lib/billing/plans.ts`.
 
 ### [ ] Run one live-mode end-to-end billing test
 **What:** Test-mode first (test card 4242…), then live: subscribe → webhook grants credits → burn a credit on an AI draft → cancel via portal → verify access-until-period-end. Roadmap Gate 2/3 requirement.

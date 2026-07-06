@@ -49,6 +49,11 @@ export default function PricingPage() {
             with your subscription and don&apos;t roll over. Editing,
             publishing, and syncing never cost credits.
           </p>
+          <p className="text-sm text-gray-500 mt-1">
+            Cross-posting one item by hand takes 25–40 minutes. Here it takes
+            about 3 — every plan costs less per listing than the time it gives
+            back.
+          </p>
         </div>
 
         {error && (
