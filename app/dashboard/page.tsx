@@ -1,658 +1,240 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
-import {
-  Trash2,
-  Download,
-  Package,
-  DollarSign,
-  Eye,
-  EyeOff,
-  CheckCircle,
-  Landmark,
-  Loader2,
-  Store,
-  ExternalLink,
-} from "lucide-react";
-import { toast } from "sonner";
-import { createClient } from "@/utils/supabase/client";
-import { usePostHog } from "posthog-js/react";
+// Dashboard command center — the daily-driver view (roadmap "Professional UX
+// Requirements"): credits, channel health, money snapshot, what needs
+// attention, and the next best action. Signed-out visitors are bounced to
+// /login by middleware.
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+import { useEffect, useState } from "react";
+import Link from "next/link";
 
-interface Listing {
-  id: string;
-  title: string;
-  brand: string | null;
-  model: string | null;
-  condition: string;
-  category: string;
-  suggested_price: number | null;
-  suggested_shipping_service: string;
-  stock_image_url: string | null;
-  original_image_urls: string[] | null;
-  is_published?: boolean;
-  status?: string; // "available" | "sold"
-  created_at: string;
+interface DashboardData {
+  connections: { ebay: boolean; etsy: boolean; shopify: boolean };
+  creditsRemaining: number | null;
+  creditsRenewAt: string | null;
+  items: { draft: number; listed: number; sold: number; archived: number };
+  listedValue: number;
+  soldValue: number;
+  knownProfit: number;
+  soldWithCostCount: number;
+  soldCount: number;
+  endFailedCount: number;
 }
 
-// ─── Listing thumbnail helper ────────────────────────────────────────────────
-// Shows stock image → first original photo → gray placeholder
+function Tile({
+  label,
+  value,
+  sub,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: "default" | "good" | "warn";
+}) {
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+      <p className="text-xs text-gray-500">{label}</p>
+      <p
+        className={`text-xl font-bold mt-0.5 ${
+          tone === "good"
+            ? "text-green-700"
+            : tone === "warn"
+              ? "text-orange-600"
+              : "text-gray-900"
+        }`}
+      >
+        {value}
+      </p>
+      {sub && <p className="text-xs text-gray-400 mt-0.5">{sub}</p>}
+    </div>
+  );
+}
 
-function ListingThumb({ listing }: { listing: Listing }) {
-  const src =
-    listing.stock_image_url ??
-    (listing.original_image_urls && listing.original_image_urls.length > 0
-      ? listing.original_image_urls[0]
-      : null);
-
-  if (!src) {
-    return (
-      <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
-        <Package className="w-4 h-4 text-gray-300" />
-      </div>
-    );
+// The single most valuable thing to do right now, given current state.
+function nextBestAction(d: DashboardData): { text: string; href: string } {
+  if (d.endFailedCount > 0) {
+    return {
+      text: `Fix ${d.endFailedCount} listing${d.endFailedCount === 1 ? "" : "s"} that failed to delist — oversell risk`,
+      href: "/inventory",
+    };
   }
-
-  return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={src}
-      alt=""
-      className="w-10 h-10 rounded-lg object-cover border border-gray-200 flex-shrink-0"
-      onError={(e) => {
-        (e.target as HTMLImageElement).style.display = "none";
-      }}
-    />
-  );
+  if (!d.connections.ebay) {
+    return { text: "Connect your eBay account to publish live", href: "/api/oauth/ebay/start" };
+  }
+  if (d.creditsRemaining === 0) {
+    return { text: "You're out of AI credits — upgrade to keep listing", href: "/pricing" };
+  }
+  if (d.items.draft > 0) {
+    return {
+      text: `Finish ${d.items.draft} draft${d.items.draft === 1 ? "" : "s"} waiting in inventory`,
+      href: "/inventory",
+    };
+  }
+  return { text: "List your next item — snap a photo", href: "/" };
 }
-
-// ─── Skeleton loader ─────────────────────────────────────────────────────────
-
-function Skeleton({ className }: { className?: string }) {
-  return (
-    <div
-      className={`bg-gray-200 rounded animate-pulse ${className ?? ""}`}
-    />
-  );
-}
-
-// ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
-  const router = useRouter();
-  const posthog = usePostHog();
-  const [authChecked, setAuthChecked] = useState(false);
-  const [listings, setListings] = useState<Listing[]>([]);
+  const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set());
-  const [connectStatus, setConnectStatus] = useState<{
-    connected: boolean;
-    charges_enabled: boolean;
-  } | null>(null);
-  const [connectLoading, setConnectLoading] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [ebayStatus, setEbayStatus] = useState<{
-    connected: boolean;
-    tokenExpired: boolean;
-  } | null>(null);
-  const [postingEbayIds, setPostingEbayIds] = useState<Set<string>>(new Set());
-
-  // ── Auth gate ──────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const supabase = createClient();
-    void supabase.auth.getUser().then(({ data: { user } }) => {
-      if (!user) {
-        router.replace("/login");
-      } else {
-        setAuthChecked(true);
-      }
-    });
-  }, [router]);
-
-  // ── Fetch listings ─────────────────────────────────────────────────────────
-  const fetchListings = useCallback(async () => {
-    try {
-      const res = await fetch("/api/dashboard");
-      if (!res.ok) {
-        toast.error("Failed to load your listings.");
-        return;
-      }
-      const data = await res.json();
-      setListings(data.listings ?? []);
-    } catch {
-      toast.error("Failed to load your listings.");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const fetchConnectStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/api/connect");
-      if (res.ok) {
-        const data = await res.json();
-        setConnectStatus(data);
-      }
-    } catch {
-      // Non-critical — badge just won't show.
-    }
-  }, []);
-
-  const fetchEbayStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/api/ebay/status");
-      if (res.ok) {
-        const data = await res.json();
-        setEbayStatus(data);
-      }
-    } catch {
-      // Non-critical — badge just won't show.
-    }
-  }, []);
 
   useEffect(() => {
-    if (authChecked) {
-      void fetchListings();
-      void fetchConnectStatus();
-      void fetchEbayStatus();
-    }
-  }, [authChecked, fetchListings, fetchConnectStatus, fetchEbayStatus]);
-
-  // Refresh Connect status when returning from Stripe onboarding
-  // Also handle eBay OAuth result query params
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("connect") === "complete") {
-      void fetchConnectStatus();
-    }
-    if (params.get("ebay") === "connected") {
-      toast.success("eBay account connected successfully!");
-      void fetchEbayStatus();
-    }
-    if (params.get("ebay") === "denied") {
-      toast.error("eBay connection was cancelled.");
-    }
-    if (params.get("ebay") === "error") {
-      const reason = params.get("reason");
-      const messages: Record<string, string> = {
-        config: "eBay OAuth is not configured on the server.",
-        token: "Failed to exchange eBay authorization code. Please try again.",
-        network: "Network error connecting to eBay. Please try again.",
-        db: "Connected to eBay but failed to save tokens. Please try again.",
-      };
-      toast.error(messages[reason ?? ""] ?? "Failed to connect eBay account.");
-    }
-    // Clean URL for any of the above
-    if (params.has("connect") || params.has("ebay")) {
-      window.history.replaceState({}, "", "/dashboard");
-    }
-  }, [fetchConnectStatus, fetchEbayStatus]);
-
-  // ── Start Stripe Connect onboarding ─────────────────────────────────────────
-  async function handleConnectOnboarding() {
-    setConnectLoading(true);
-    try {
-      const res = await fetch("/api/connect", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok || !data.url) {
-        toast.error(data.error ?? "Could not start onboarding. Please try again.");
-        return;
-      }
-      window.location.href = data.url;
-    } catch {
-      toast.error("Network error. Please try again.");
-    } finally {
-      setConnectLoading(false);
-    }
-  }
-
-  // ── Post listing to eBay ──────────────────────────────────────────────────
-  async function handlePostToEbay(id: string) {
-    setPostingEbayIds((prev) => new Set(prev).add(id));
-    try {
-      const res = await fetch("/api/ebay/post", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ listing_id: id }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        toast.error(data.error ?? "Failed to post to eBay. Please try again.");
-        return;
-      }
-      toast.success(
-        <span>
-          Posted to eBay!{" "}
-          <a
-            href={data.ebayUrl as string}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="underline font-semibold"
-          >
-            View listing
-          </a>
-        </span>
-      );
-    } catch {
-      toast.error("Network error. Please try again.");
-    } finally {
-      setPostingEbayIds((prev) => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-    }
-  }
-
-  // ── Toggle publish (optimistic) ────────────────────────────────────────────
-  async function handleTogglePublish(id: string, currentState: boolean) {
-    const newState = !currentState;
-
-    // Optimistic update
-    setListings((prev) =>
-      prev.map((l) => (l.id === id ? { ...l, is_published: newState } : l))
-    );
-    setTogglingIds((prev) => new Set(prev).add(id));
-
-    try {
-      const res = await fetch("/api/dashboard", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, is_published: newState }),
-      });
-
-      if (!res.ok) {
-        // Rollback
-        setListings((prev) =>
-          prev.map((l) =>
-            l.id === id ? { ...l, is_published: currentState } : l
-          )
-        );
-        const body = await res.json().catch(() => null);
-        toast.error(body?.error ?? "Could not update listing status.");
-      } else {
-        toast.success(newState ? "Listing published!" : "Listing unpublished.");
-        if (newState) {
-          try {
-            posthog?.capture("item_published", { item_id: id });
-          } catch {
-            // Analytics blocked — non-critical
-          }
+    void fetch("/api/dashboard")
+      .then((res) => {
+        if (res.status === 401) {
+          window.location.assign("/login?next=/dashboard");
+          return null;
         }
-      }
-    } catch {
-      setListings((prev) =>
-        prev.map((l) =>
-          l.id === id ? { ...l, is_published: currentState } : l
-        )
-      );
-      toast.error("Network error. Please try again.");
-    } finally {
-      setTogglingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-    }
-  }
-
-  // ── Delete listing (optimistic) ────────────────────────────────────────────
-  async function handleDelete(id: string) {
-    if (deletingId) return; // prevent double-click
-    setDeletingId(id);
-    const prev = listings;
-    setListings((l) => l.filter((item) => item.id !== id));
-
-    try {
-      const res = await fetch("/api/dashboard", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id }),
-      });
-
-      if (!res.ok) {
-        setListings(prev);
-        toast.error("Could not delete that listing. Please try again.");
-      } else {
-        toast.success("Listing deleted.");
-      }
-    } catch {
-      setListings(prev);
-      toast.error("Network error. Please try again.");
-    } finally {
-      setDeletingId(null);
-    }
-  }
-
-  // ── Export CSV ──────────────────────────────────────────────────────────────
-  function exportCsv() {
-    if (listings.length === 0) {
-      toast.error("No listings to export.");
-      return;
-    }
-
-    const headers = [
-      "Title",
-      "Brand",
-      "Model",
-      "Condition",
-      "Category",
-      "Price",
-      "Shipping",
-      "Status",
-      "Date",
-    ];
-
-    const rows = listings.map((l) => [
-      l.title,
-      l.brand ?? "",
-      l.model ?? "",
-      l.condition,
-      l.category,
-      l.suggested_price?.toFixed(2) ?? "",
-      l.suggested_shipping_service,
-      l.status === "sold" ? "Sold" : l.is_published ? "Published" : "Draft",
-      new Date(l.created_at).toLocaleDateString(),
-    ]);
-
-    const csvContent = [headers, ...rows]
-      .map((row) =>
-        row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")
-      )
-      .join("\n");
-
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `snap2list-export-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success("CSV downloaded!");
-  }
-
-  // ── Metrics ────────────────────────────────────────────────────────────────
-  const totalScans = listings.length;
-  const totalValue = listings.reduce(
-    (sum, l) => sum + (l.suggested_price ?? 0),
-    0
-  );
-  const publishedCount = listings.filter((l) => l.is_published).length;
-  const soldCount = listings.filter((l) => l.status === "sold").length;
-
-  // ── Auth loading spinner ───────────────────────────────────────────────────
-  if (!authChecked) {
-    return (
-      <main className="flex-1 bg-gray-50 flex items-center justify-center">
-        <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-      </main>
-    );
-  }
+        return res.ok ? res.json() : null;
+      })
+      .then((d: DashboardData | null) => {
+        if (d) setData(d);
+      })
+      .catch(() => undefined)
+      .finally(() => setLoading(false));
+  }, []);
 
   return (
-    <main className="flex-1 bg-gray-50 px-4 py-8">
-      <div className="max-w-5xl mx-auto flex flex-col gap-6">
-        {/* ── Header + Export ──────────────────────────────────────────────── */}
-        <div className="flex items-center justify-between flex-wrap gap-3">
+    <main className="min-h-screen bg-gray-50 flex flex-col items-center px-4 py-8 pb-16">
+      <div className="w-full max-w-lg flex flex-col gap-5">
+        <div className="text-center">
           <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-          <div className="flex items-center gap-2">
-            {/* Stripe Connect badge / button */}
-            {connectStatus?.charges_enabled ? (
-              <span className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-green-50 border border-green-200 text-sm font-medium text-green-700">
-                <CheckCircle className="w-4 h-4" />
-                Payouts Active
-              </span>
-            ) : (
-              <button
-                onClick={() => void handleConnectOnboarding()}
-                disabled={connectLoading}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-              >
-                {connectLoading ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Landmark className="w-4 h-4" />
-                )}
-                Connect Bank Account
-              </button>
-            )}
-            {/* eBay Connect badge / button */}
-            {ebayStatus?.connected && !ebayStatus.tokenExpired ? (
-              <span className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-yellow-50 border border-yellow-200 text-sm font-medium text-yellow-800">
-                <CheckCircle className="w-4 h-4 text-yellow-600" />
-                eBay Connected
-              </span>
-            ) : (
-              <a
-                href="/api/ebay/auth"
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-yellow-400 text-yellow-900 text-sm font-semibold hover:bg-yellow-500 transition-colors"
-              >
-                <Store className="w-4 h-4" />
-                {ebayStatus?.connected && ebayStatus.tokenExpired
-                  ? "Reconnect eBay"
-                  : "Connect eBay"}
-              </a>
-            )}
-            <button
-              onClick={exportCsv}
-              disabled={listings.length === 0}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-white border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        </div>
+
+        {loading ? (
+          <div className="flex justify-center py-10">
+            <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : !data ? (
+          <p className="text-sm text-gray-500 text-center">
+            Dashboard is unavailable right now.
+          </p>
+        ) : (
+          <>
+            {/* Next best action */}
+            <Link
+              href={nextBestAction(data).href}
+              className="block bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-2xl shadow-lg shadow-blue-600/25 p-4 hover:from-blue-700 hover:to-indigo-700 transition-all"
             >
-              <Download className="w-4 h-4" />
-              Export CSV
-            </button>
-          </div>
-        </div>
-
-        {/* ── Metric cards ────────────────────────────────────────────────── */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 flex items-center gap-4">
-            <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
-              <Package className="w-5 h-5 text-blue-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Total Scans</p>
-              {loading ? (
-                <Skeleton className="h-7 w-12 mt-0.5" />
-              ) : (
-                <p className="text-2xl font-bold text-gray-900">
-                  {totalScans}
-                </p>
-              )}
-            </div>
-          </div>
-          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 flex items-center gap-4">
-            <div className="w-10 h-10 bg-green-50 rounded-lg flex items-center justify-center">
-              <DollarSign className="w-5 h-5 text-green-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Inventory Value</p>
-              {loading ? (
-                <Skeleton className="h-7 w-20 mt-0.5" />
-              ) : (
-                <p className="text-2xl font-bold text-gray-900">
-                  ${totalValue.toFixed(2)}
-                </p>
-              )}
-            </div>
-          </div>
-          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 flex items-center gap-4">
-            <div className="w-10 h-10 bg-purple-50 rounded-lg flex items-center justify-center">
-              <Eye className="w-5 h-5 text-purple-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Published</p>
-              {loading ? (
-                <Skeleton className="h-7 w-12 mt-0.5" />
-              ) : (
-                <p className="text-2xl font-bold text-gray-900">
-                  {publishedCount}
-                </p>
-              )}
-            </div>
-          </div>
-          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 flex items-center gap-4">
-            <div className="w-10 h-10 bg-red-50 rounded-lg flex items-center justify-center">
-              <CheckCircle className="w-5 h-5 text-red-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Sold</p>
-              {loading ? (
-                <Skeleton className="h-7 w-12 mt-0.5" />
-              ) : (
-                <p className="text-2xl font-bold text-gray-900">
-                  {soldCount}
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* ── Listings table ──────────────────────────────────────────────── */}
-        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
-          {loading ? (
-            <div className="p-5 flex flex-col gap-3">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <Skeleton key={i} className="h-12 w-full" />
-              ))}
-            </div>
-          ) : listings.length === 0 ? (
-            <div className="p-12 text-center">
-              <Package className="w-10 h-10 text-gray-300 mx-auto mb-3" />
-              <p className="font-medium text-gray-700">No scans yet</p>
-              <p className="text-sm text-gray-500 mt-1">
-                Go to the Scanner to analyze your first item.
+              <p className="text-xs opacity-80">Next best action</p>
+              <p className="font-semibold text-sm mt-0.5">
+                {nextBestAction(data).text} →
               </p>
+            </Link>
+
+            {/* Attention */}
+            {data.endFailedCount > 0 && (
+              <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
+                ⚠ {data.endFailedCount} listing
+                {data.endFailedCount === 1 ? "" : "s"} could not be delisted —
+                retry from{" "}
+                <Link href="/inventory" className="underline">
+                  inventory
+                </Link>{" "}
+                before they oversell.
+              </p>
+            )}
+
+            {/* Money */}
+            <div className="grid grid-cols-2 gap-3">
+              <Tile
+                label="Live inventory value"
+                value={`$${data.listedValue.toFixed(2)}`}
+                sub={`${data.items.listed} listed item${data.items.listed === 1 ? "" : "s"}`}
+              />
+              <Tile
+                label="Sales to date"
+                value={`$${data.soldValue.toFixed(2)}`}
+                sub={`${data.soldCount} sold`}
+                tone="good"
+              />
+              <Tile
+                label="Profit (tracked)"
+                value={`$${data.knownProfit.toFixed(2)}`}
+                sub={
+                  data.soldCount > 0
+                    ? `cost known for ${data.soldWithCostCount}/${data.soldCount} sales`
+                    : "add cost of goods to track margin"
+                }
+                tone={data.knownProfit >= 0 ? "good" : "warn"}
+              />
+              <Tile
+                label="AI credits"
+                value={data.creditsRemaining !== null ? String(data.creditsRemaining) : "—"}
+                sub={
+                  data.creditsRenewAt
+                    ? `renews ${new Date(data.creditsRenewAt).toLocaleDateString()}`
+                    : undefined
+                }
+                tone={data.creditsRemaining === 0 ? "warn" : "default"}
+              />
             </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-100 bg-gray-50/50">
-                    <th className="text-left px-4 py-3 font-medium text-gray-500">
-                      Title
-                    </th>
-                    <th className="text-left px-4 py-3 font-medium text-gray-500 hidden sm:table-cell">
-                      Category
-                    </th>
-                    <th className="text-left px-4 py-3 font-medium text-gray-500">
-                      Condition
-                    </th>
-                    <th className="text-right px-4 py-3 font-medium text-gray-500">
-                      Price
-                    </th>
-                    <th className="text-center px-4 py-3 font-medium text-gray-500">
-                      Status
-                    </th>
-                    <th className="text-right px-4 py-3 font-medium text-gray-500 hidden sm:table-cell">
-                      Date
-                    </th>
-                    <th className="text-center px-4 py-3 font-medium text-gray-500 hidden md:table-cell">
-                      eBay
-                    </th>
-                    <th className="w-12" />
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {listings.map((l) => (
-                    <tr
-                      key={l.id}
-                      className="hover:bg-gray-50/50 transition-colors"
+
+            {/* Channels */}
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-gray-700">Channels</p>
+                <Link
+                  href="/channels"
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  Manage →
+                </Link>
+              </div>
+              {(["ebay", "etsy", "shopify"] as const).map((p) => (
+                <div key={p} className="flex items-center justify-between text-sm">
+                  <span className="text-gray-600">
+                    {p === "ebay" ? "eBay" : p === "etsy" ? "Etsy" : "Shopify"}
+                  </span>
+                  {data.connections[p] ? (
+                    <span className="text-green-600 font-medium">✓ Connected</span>
+                  ) : (
+                    <a
+                      href={p === "shopify" ? "/channels" : `/api/oauth/${p}/start`}
+                      className="text-blue-600 hover:underline font-medium"
                     >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          <ListingThumb listing={l} />
-                          <span className="font-medium text-gray-900 truncate max-w-[180px]">
-                            {l.title}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-gray-600 max-w-[150px] truncate hidden sm:table-cell">
-                        {l.category}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
-                          {l.condition}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right font-medium text-gray-900">
-                        {l.suggested_price != null
-                          ? `$${l.suggested_price.toFixed(2)}`
-                          : "---"}
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        {l.status === "sold" ? (
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700">
-                            Sold
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() =>
-                              void handleTogglePublish(l.id, l.is_published ?? false)
-                            }
-                            disabled={togglingIds.has(l.id)}
-                            className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-colors disabled:opacity-50 ${
-                              l.is_published
-                                ? "bg-green-100 text-green-700 hover:bg-green-200"
-                                : "bg-gray-100 text-gray-500 hover:bg-gray-200"
-                            }`}
-                          >
-                            {l.is_published ? (
-                              <>
-                                <Eye className="w-3 h-3" />
-                                Published
-                              </>
-                            ) : (
-                              <>
-                                <EyeOff className="w-3 h-3" />
-                                Draft
-                              </>
-                            )}
-                          </button>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right text-gray-500 hidden sm:table-cell">
-                        {new Date(l.created_at).toLocaleDateString()}
-                      </td>
-                      {/* Post to eBay — only for published listings */}
-                      <td className="px-2 py-3 text-center hidden md:table-cell">
-                        {l.is_published && l.status !== "sold" ? (
-                          <button
-                            onClick={() => void handlePostToEbay(l.id)}
-                            disabled={postingEbayIds.has(l.id)}
-                            title="Post to eBay"
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-yellow-50 text-yellow-800 border border-yellow-200 hover:bg-yellow-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                          >
-                            {postingEbayIds.has(l.id) ? (
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                            ) : (
-                              <ExternalLink className="w-3 h-3" />
-                            )}
-                            Post
-                          </button>
-                        ) : (
-                          <span className="text-gray-300 text-xs">—</span>
-                        )}
-                      </td>
-                      <td className="px-2 py-3">
-                        <button
-                          onClick={() => void handleDelete(l.id)}
-                          disabled={deletingId === l.id}
-                          title="Delete listing"
-                          className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                      Connect →
+                    </a>
+                  )}
+                </div>
+              ))}
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-600">Facebook / OfferUp</span>
+                <span className="text-purple-600 text-xs font-medium">
+                  assisted at publish
+                </span>
+              </div>
             </div>
-          )}
-        </div>
+
+            {/* Quick links */}
+            <div className="grid grid-cols-2 gap-2 text-center text-sm">
+              <Link
+                href="/"
+                className="py-2.5 rounded-xl bg-white border border-gray-100 shadow-sm text-gray-700 font-medium hover:bg-gray-50"
+              >
+                + List item
+              </Link>
+              <Link
+                href="/inventory"
+                className="py-2.5 rounded-xl bg-white border border-gray-100 shadow-sm text-gray-700 font-medium hover:bg-gray-50"
+              >
+                Inventory
+              </Link>
+              <Link
+                href="/channels"
+                className="py-2.5 rounded-xl bg-white border border-gray-100 shadow-sm text-gray-700 font-medium hover:bg-gray-50"
+              >
+                Channels
+              </Link>
+              <Link
+                href="/billing"
+                className="py-2.5 rounded-xl bg-white border border-gray-100 shadow-sm text-gray-700 font-medium hover:bg-gray-50"
+              >
+                Billing
+              </Link>
+            </div>
+          </>
+        )}
       </div>
     </main>
   );

@@ -1,54 +1,72 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useRouter } from "next/navigation";
-import { X, Plus, Camera, ImagePlus } from "lucide-react";
 import type { ExtractionResult } from "@/lib/types/extraction";
 import {
   CONFIDENCE_THRESHOLD,
   CRITICAL_FIELDS,
   SHIPPING_DISPLAY_NAMES,
 } from "@/lib/types/extraction";
-import { getAllFlatRates } from "@/lib/shipping";
+import { getAllFlatRates, getShippingRate } from "@/lib/shipping";
 import { prepareImageForUpload } from "@/lib/image-validation";
-import { createClient } from "@/utils/supabase/client";
-import { usePostHog } from "posthog-js/react";
+import type { AcceptedMimeType } from "@/lib/image-validation";
+import { PLATFORM_DISPLAY_NAMES } from "@/lib/platforms/types";
+import type { ApiPlatform } from "@/lib/platforms/types";
+import {
+  createSupabaseBrowserClient,
+  isSupabaseAuthConfigured,
+} from "@/lib/supabase/client";
+import { BrandWordmark } from "@/app/brand";
 
 // ─── Stage machine ────────────────────────────────────────────────────────────
 
 type Stage =
-  | "idle"       // condition selection + photo upload
+  | "idle"       // upload prompt
   | "preparing"  // HEIC conversion + compression (client-side)
   | "analyzing"  // API call in flight
   | "review"     // extraction result, editable
-  | "generating" // Stripe link creation
-  | "done"       // link ready
+  | "publishing" // multi-platform publish in flight
+  | "published"  // per-platform results ready
   | "error";     // terminal error
 
-// ─── Condition options ────────────────────────────────────────────────────────
+// ─── Publish targets ──────────────────────────────────────────────────────────
 
-const CONDITIONS: ExtractionResult["condition"][] = [
-  "New",
-  "Like New",
-  "Good",
-  "Fair",
-  "Poor",
-];
+type PublishTarget =
+  | "ebay"
+  | "etsy"
+  | "shopify"
+  | "facebook"
+  | "offerup"
+  | "direct";
 
-const CONDITION_COLORS: Record<string, string> = {
-  New: "bg-green-100 text-green-700 border-green-300",
-  "Like New": "bg-blue-100 text-blue-700 border-blue-300",
-  Good: "bg-yellow-100 text-yellow-700 border-yellow-300",
-  Fair: "bg-orange-100 text-orange-700 border-orange-300",
-  Poor: "bg-red-100 text-red-700 border-red-300",
+const TARGET_LABELS: Record<PublishTarget, string> = {
+  ...PLATFORM_DISPLAY_NAMES,
+  direct: "Direct payment link",
 };
 
+// Mirrors the /api/publish response shape.
+type TargetResult =
+  | { platform: PublishTarget; status: "live"; url: string }
+  | {
+      platform: PublishTarget;
+      status: "assist";
+      postUrl: string;
+      copyText: string;
+      title: string;
+      description: string;
+      price: number;
+    }
+  | { platform: PublishTarget; status: "not_connected"; connectUrl: string }
+  | { platform: PublishTarget; status: "error"; message: string };
+
 // ─── Loading progress stages ──────────────────────────────────────────────────
+// Time-based — not tied to real API progress. Each label reinforces the
+// product value proposition while the user waits.
 
 const ANALYSIS_STAGES = [
-  { text: "Analyzing photos...", ms: 2_000 },
+  { text: "Analyzing photo...", ms: 2_000 },
   { text: "Identifying specs...", ms: 5_000 },
-  { text: "Researching market price...", ms: 9_000 },
+  { text: "Estimating shipping...", ms: 9_000 },
   { text: "Almost there...", ms: Infinity },
 ];
 
@@ -56,15 +74,21 @@ function useLoadingStage(active: boolean) {
   const [index, setIndex] = useState(0);
 
   useEffect(() => {
-    if (!active) {
+    if (!active) return;
+    // Advance through the stage labels on a fixed schedule; each stage's ms is
+    // the time spent in that stage, so timers fire at the cumulative offsets.
+    let elapsed = 0;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    ANALYSIS_STAGES.forEach((stage, i) => {
+      if (stage.ms === Infinity) return;
+      elapsed += stage.ms;
+      timers.push(setTimeout(() => setIndex(i + 1), elapsed));
+    });
+    return () => {
+      for (const t of timers) clearTimeout(t);
       setIndex(0);
-      return;
-    }
-    const stage = ANALYSIS_STAGES[index];
-    if (stage.ms === Infinity) return;
-    const id = setTimeout(() => setIndex((i) => i + 1), stage.ms);
-    return () => clearTimeout(id);
-  }, [active, index]);
+    };
+  }, [active]);
 
   return ANALYSIS_STAGES[Math.min(index, ANALYSIS_STAGES.length - 1)].text;
 }
@@ -119,40 +143,57 @@ function Field({
 const inputClass =
   "w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500";
 
+// ─── Clipboard helper ─────────────────────────────────────────────────────────
+
+async function writeClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Fallback for browsers that block the Clipboard API
+    const el = document.createElement("textarea");
+    el.value = text;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand("copy");
+    document.body.removeChild(el);
+  }
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Page() {
-  const router = useRouter();
-  const posthog = usePostHog();
-  const [authChecked, setAuthChecked] = useState(false);
-
-  // ── Auth gate ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const supabase = createClient();
-    void supabase.auth.getUser().then(({ data: { user } }) => {
-      if (!user) {
-        router.replace("/login");
-      } else {
-        setAuthChecked(true);
-      }
-    });
-  }, [router]);
-
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string>("");
-
-  // Phase 3: condition-first + multi-image state
-  const [selectedCondition, setSelectedCondition] =
-    useState<ExtractionResult["condition"] | null>(null);
-  const [selectedFiles, setSelectedFiles] = useState<
-    Array<{ file: File; preview: string }>
-  >([]);
-
-  // Extraction result + editable fields
+  const [preview, setPreview] = useState<string>("");
   const [extraction, setExtraction] = useState<ExtractionResult | null>(null);
-  const [listingUrl, setListingUrl] = useState<string>("");
-  const [copied, setCopied] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string>("");
 
+  // The processed photo, kept for the publish call (eBay/Etsy need the bytes).
+  const [imageBase64, setImageBase64] = useState<string>("");
+  const [imageMime, setImageMime] = useState<AcceptedMimeType>("image/jpeg");
+
+  // Marketplace connection state + publish selection
+  const [connections, setConnections] = useState<Record<ApiPlatform, boolean>>({
+    ebay: false,
+    etsy: false,
+    shopify: false,
+  });
+  const [targets, setTargets] = useState<Set<PublishTarget>>(
+    new Set(["facebook", "offerup", "direct"])
+  );
+  const [results, setResults] = useState<TargetResult[]>([]);
+  const [banner, setBanner] = useState<{
+    kind: "success" | "error";
+    text: string;
+  } | null>(null);
+  // Signed-in user's email for the account header; null in legacy beta mode.
+  const [accountEmail, setAccountEmail] = useState<string | null>(null);
+  // AI credits remaining; null → unknown (signed out / billing not migrated).
+  const [creditsLeft, setCreditsLeft] = useState<number | null>(null);
+  // Set when analysis failed specifically for lack of credits → upgrade CTA.
+  const [outOfCredits, setOutOfCredits] = useState(false);
+
+  // Editable extraction fields — initialised from API response, user can change
   const [title, setTitle] = useState("");
   const [brand, setBrand] = useState("");
   const [model, setModel] = useState("");
@@ -165,485 +206,436 @@ export default function Page() {
       "MANUAL_ESTIMATE_NEEDED"
     );
   const [price, setPrice] = useState("");
-  const [priceRationale, setPriceRationale] = useState<string | null>(null);
 
-  // Phase 9: Dual-image state — stock thumbnail + original user gallery
-  const [stockImageUrl, setStockImageUrl] = useState<string | null>(null);
-  const [originalImageUrls, setOriginalImageUrls] = useState<string[]>([]);
-
-  const cameraInputRef = useRef<HTMLInputElement>(null);
-  const galleryInputRef = useRef<HTMLInputElement>(null);
-  const addMoreInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingText = useLoadingStage(stage === "analyzing");
 
+  // ── Connections + OAuth redirect banner ─────────────────────────────────────
+
+  useEffect(() => {
+    // Toast from OAuth callback redirects (?connected=ebay / ?connect_error=…)
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("connected");
+    const connectError = params.get("connect_error");
+    if (connected || connectError) {
+      // Deferred so the effect body stays free of synchronous setState.
+      queueMicrotask(() =>
+        setBanner(
+          connected
+            ? {
+                kind: "success",
+                text: `${TARGET_LABELS[connected as PublishTarget] ?? connected} connected!`,
+              }
+            : { kind: "error", text: connectError ?? "" }
+        )
+      );
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+
+    // Who's signed in (session cookie flows automatically).
+    void fetch("/api/auth/status")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { email?: string | null } | null) => {
+        if (data?.email) setAccountEmail(data.email);
+      })
+      .catch(() => undefined);
+
+    // Credits remaining for the header chip (401 in legacy mode → ignored).
+    void fetch("/api/billing/status")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { creditsRemaining?: number | null } | null) => {
+        if (typeof data?.creditsRemaining === "number") {
+          setCreditsLeft(data.creditsRemaining);
+        }
+      })
+      .catch(() => undefined);
+
+    void fetch("/api/connections", {
+      headers: {
+        "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
+      },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { connections?: Record<ApiPlatform, boolean> } | null) => {
+        if (!data?.connections) return;
+        setConnections(data.connections);
+        // Pre-select connected marketplaces — the point of the product is
+        // "one tap, listed everywhere you can be".
+        setTargets((prev) => {
+          const next = new Set(prev);
+          if (data.connections?.ebay) next.add("ebay");
+          if (data.connections?.etsy) next.add("etsy");
+          if (data.connections?.shopify) next.add("shopify");
+          return next;
+        });
+      })
+      .catch(() => undefined);
+  }, []);
+
+  // Reset back to idle so the user can start a new listing
   const reset = useCallback(() => {
-    selectedFiles.forEach((f) => URL.revokeObjectURL(f.preview));
-    setSelectedFiles([]);
-    setSelectedCondition(null);
+    if (preview) URL.revokeObjectURL(preview);
     setStage("idle");
     setError("");
+    setOutOfCredits(false);
+    setPreview("");
     setExtraction(null);
-    setListingUrl("");
-    setCopied(false);
+    setResults([]);
+    setCopiedKey("");
     setPrice("");
-    setPriceRationale(null);
-    setStockImageUrl(null);
-    setOriginalImageUrls([]);
-    if (cameraInputRef.current) cameraInputRef.current.value = "";
-    if (galleryInputRef.current) galleryInputRef.current.value = "";
-    if (addMoreInputRef.current) addMoreInputRef.current.value = "";
-  }, [selectedFiles]);
+    setImageBase64("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, [preview]);
 
-  // ── File selection (multi-image, max 5) ───────────────────────────────────
+  // ── Photo selection + upload pipeline ──────────────────────────────────────
 
-  function handleFilesSelected(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    const remaining = 5 - selectedFiles.length;
-    const newFiles = Array.from(files).slice(0, remaining);
-    const additions = newFiles.map((file) => ({
-      file,
-      preview: URL.createObjectURL(file),
-    }));
-    setSelectedFiles((prev) => [...prev, ...additions].slice(0, 5));
-    // Reset whichever input triggered the selection so the same file can be re-added
-    e.target.value = "";
-  }
-
-  function removeFile(index: number) {
-    setSelectedFiles((prev) => {
-      const copy = [...prev];
-      URL.revokeObjectURL(copy[index].preview);
-      copy.splice(index, 1);
-      return copy;
-    });
-  }
-
-  // ── Analyze all images ────────────────────────────────────────────────────
-
-  async function handleAnalyze() {
-    if (selectedFiles.length === 0 || !selectedCondition) return;
+  async function handleFile(file: File) {
     setStage("preparing");
     setError("");
 
-    const prepared: Array<{ data: string; mimeType: string }> = [];
+    // Client-side pipeline: HEIC → JPEG, resize to 2048px, re-encode at 0.85 quality
+    const {
+      blob,
+      mimeType,
+      error: prepError,
+    } = await prepareImageForUpload(file);
 
-    for (const sf of selectedFiles) {
-      const {
-        blob,
-        mimeType,
-        error: prepError,
-      } = await prepareImageForUpload(sf.file);
-
-      if (prepError) {
-        setError(prepError);
-        setStage("error");
-        return;
-      }
-
-      const arrayBuffer = await blob.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
-      let binary = "";
-      for (let i = 0; i < bytes.length; i++)
-        binary += String.fromCharCode(bytes[i]);
-      const base64 = btoa(binary);
-      prepared.push({ data: base64, mimeType });
+    if (prepError) {
+      setError(prepError);
+      setStage("error");
+      return;
     }
 
+    // Show a local preview immediately for visual feedback during the API call
+    const objectUrl = URL.createObjectURL(blob);
+    setPreview(objectUrl);
     setStage("analyzing");
+
+    // Encode to base64 for the JSON body sent to /api/analyze
+    const arrayBuffer = await blob.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const base64 = btoa(binary);
+    setImageBase64(base64);
+    setImageMime(mimeType);
 
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          images: prepared,
-          condition: selectedCondition,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
+        },
+        body: JSON.stringify({ image: base64, mimeType }),
       });
 
       const data = await res.json();
 
       if (!res.ok) {
+        setOutOfCredits(res.status === 402);
         setError(
-          data.error ?? "Analysis failed. Please try different photos."
+          data.error ?? "Analysis failed. Please try a different photo."
         );
         setStage("error");
         return;
       }
 
-      const result = data as ExtractionResult & {
-        stockImageUrl?: string | null;
-        originalImageUrls?: string[];
-      };
+      setOutOfCredits(false);
+      // One credit consumed — reflect it without waiting for a refetch.
+      setCreditsLeft((c) => (c !== null && c > 0 ? c - 1 : c));
+      const result = data as ExtractionResult;
       setExtraction(result);
       setTitle(result.title);
       setBrand(result.brand ?? "");
       setModel(result.model ?? "");
       setUpc(result.upc ?? "");
-      setCondition(selectedCondition);
+      setCondition(result.condition);
       setCategory(result.category);
       setShippingService(result.suggestedShippingService);
-      if (
-        result.suggestedPrice !== null &&
-        result.suggestedPrice !== undefined
-      ) {
-        setPrice(result.suggestedPrice.toFixed(2));
-      }
-      setPriceRationale(result.priceRationale ?? null);
-      setStockImageUrl(result.stockImageUrl ?? null);
-      setOriginalImageUrls(result.originalImageUrls ?? []);
       setStage("review");
-
-      try {
-        posthog?.capture("item_analyzed", {
-          condition: selectedCondition,
-          category: result.category,
-        });
-      } catch {
-        // Analytics blocked (ad-blocker) — non-critical
-      }
     } catch {
       setError("Connection failed. Please check your network and try again.");
       setStage("error");
     }
   }
 
-  // ── Stripe listing link creation ──────────────────────────────────────────
+  function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) void handleFile(file);
+  }
 
-  async function handleGenerateLink() {
+  // ── Multi-platform publish ──────────────────────────────────────────────────
+
+  function toggleTarget(target: PublishTarget) {
+    setTargets((prev) => {
+      const next = new Set(prev);
+      if (next.has(target)) next.delete(target);
+      else next.add(target);
+      return next;
+    });
+  }
+
+  async function handlePublish() {
     if (!price || isNaN(parseFloat(price)) || parseFloat(price) <= 0) {
-      setError(
-        "Please enter a valid price before generating your listing link."
-      );
+      setError("Please enter a valid price before publishing.");
+      return;
+    }
+    if (targets.size === 0) {
+      setError("Pick at least one place to list.");
       return;
     }
     setError("");
-    setStage("generating");
-
-    const parts: string[] = [];
-    if (brand) parts.push(`Brand: ${brand}`);
-    if (model) parts.push(`Model: ${model}`);
-    parts.push(`Condition: ${condition}`);
-    if (extraction?.specs) {
-      Object.entries(extraction.specs)
-        .slice(0, 5)
-        .forEach(([k, v]) => parts.push(`${k}: ${v}`));
-    }
-    parts.push(`Shipping: ${SHIPPING_DISPLAY_NAMES[shippingService]}`);
+    setStage("publishing");
 
     try {
-      const res = await fetch("/api/create-link", {
+      const res = await fetch("/api/publish", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
         },
         body: JSON.stringify({
-          title,
-          price: parseFloat(price),
-          description: parts.join(" · "),
+          listing: {
+            title,
+            brand: brand || null,
+            model: model || null,
+            upc: upc || null,
+            condition,
+            category,
+            specs: extraction?.specs ?? {},
+            price: parseFloat(price),
+            shippingCost: getShippingRate(shippingService).cost,
+          },
+          image: imageBase64,
+          mimeType: imageMime,
+          targets: [...targets],
         }),
       });
 
       const data = await res.json();
 
-      if (!res.ok || !data.url) {
-        setError(
-          data.error ??
-            "Could not create your listing link. Please try again."
-        );
-        setStage("review");
+      if (!res.ok || !Array.isArray(data.results)) {
+        setError(data.error ?? "Publishing failed. Please try again.");
+        setStage("review"); // let them retry without starting over
         return;
       }
 
-      setListingUrl(data.url);
-      setStage("done");
+      setResults(data.results as TargetResult[]);
+      setStage("published");
     } catch {
       setError("Connection failed. Please try again.");
       setStage("review");
     }
   }
 
-  // ── Copy link ─────────────────────────────────────────────────────────────
+  // ── Copy helper with per-button feedback ────────────────────────────────────
 
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(listingUrl);
-    } catch {
-      const el = document.createElement("textarea");
-      el.value = listingUrl;
-      document.body.appendChild(el);
-      el.select();
-      document.execCommand("copy");
-      document.body.removeChild(el);
+  async function copyWithFeedback(key: string, text: string) {
+    await writeClipboard(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(""), 2000);
+  }
+
+  // ── Sign out ────────────────────────────────────────────────────────────────
+
+  async function handleSignOut() {
+    if (isSupabaseAuthConfigured()) {
+      await createSupabaseBrowserClient().auth.signOut();
     }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    window.location.assign("/login");
   }
 
-  // ─── Render ─────────────────────────────────────────────────────────────────
-
-  if (!authChecked) {
-    return (
-      <main className="flex-1 bg-gray-50 flex items-center justify-center">
-        <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-      </main>
-    );
-  }
+  // ─── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <main className="flex-1 bg-gray-50 flex flex-col items-center px-4 py-8 pb-16">
+    <main className="min-h-screen bg-gray-50 flex flex-col items-center px-4 py-8 pb-16">
       <div className="w-full max-w-lg flex flex-col gap-6">
+
         {/* Header */}
         <div className="text-center">
+          <div className="flex justify-center">
+            <BrandWordmark />
+          </div>
           <p className="text-sm text-gray-500 mt-1">
-            Photograph an item. Get a listing in seconds.
+            Photograph an item. List it everywhere in seconds.
           </p>
+          {accountEmail && (
+            <p className="text-xs text-gray-400 mt-2">
+              {accountEmail}
+              {" · "}
+              <a href="/dashboard" className="text-blue-600 hover:underline">
+                Dashboard
+              </a>
+              {" · "}
+              <a href="/inventory" className="text-blue-600 hover:underline">
+                Inventory
+              </a>
+              {creditsLeft !== null && (
+                <>
+                  {" · "}
+                  <a href="/billing" className="hover:underline">
+                    <span
+                      className={
+                        creditsLeft === 0 ? "text-red-600 font-medium" : ""
+                      }
+                    >
+                      {creditsLeft} credit{creditsLeft === 1 ? "" : "s"} left
+                    </span>
+                  </a>
+                </>
+              )}
+              {" · "}
+              <button
+                onClick={() => void handleSignOut()}
+                className="text-blue-600 hover:underline"
+              >
+                Sign out
+              </button>
+            </p>
+          )}
         </div>
 
-        {/* Hidden file inputs — camera capture + gallery picker + add more */}
+        {/* OAuth result banner */}
+        {banner && (
+          <div
+            className={`text-sm rounded-lg px-3 py-2 flex justify-between items-center ${
+              banner.kind === "success"
+                ? "bg-green-50 text-green-700"
+                : "bg-red-50 text-red-600"
+            }`}
+          >
+            <span>{banner.text}</span>
+            <button
+              onClick={() => setBanner(null)}
+              className="ml-2 font-bold opacity-60 hover:opacity-100"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* ── Idle: upload prompt ─────────────────────────────────────────── */}
+        {stage === "idle" && (
+          <>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="flex flex-col items-center justify-center gap-3 w-full h-56 rounded-2xl border-2 border-dashed border-gray-300 bg-white text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors cursor-pointer"
+            >
+              <svg
+                className="w-12 h-12"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
+                />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"
+                />
+              </svg>
+              <span className="font-medium text-base">
+                Take a photo or choose a file
+              </span>
+              <span className="text-xs">JPEG · PNG · WebP · HEIC up to 5 MB</span>
+            </button>
+
+            {/* Marketplace connections — connect once, publish forever */}
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex flex-col gap-2">
+              <p className="text-sm font-medium text-gray-700">
+                Marketplace accounts
+              </p>
+              {(["ebay", "etsy", "shopify"] as const).map((p) => (
+                <div
+                  key={p}
+                  className="flex items-center justify-between text-sm"
+                >
+                  <span className="text-gray-600">{TARGET_LABELS[p]}</span>
+                  {connections[p] ? (
+                    <span className="text-green-600 font-medium">
+                      ✓ Connected
+                    </span>
+                  ) : (
+                    <a
+                      // Shopify connect needs a shop domain — collected on the hub.
+                      href={p === "shopify" ? "/channels" : `/api/oauth/${p}/start`}
+                      className="text-blue-600 hover:underline font-medium"
+                    >
+                      Connect →
+                    </a>
+                  )}
+                </div>
+              ))}
+              <p className="text-xs text-gray-400 mt-1">
+                Facebook Marketplace and OfferUp don&apos;t offer listing APIs —
+                you&apos;ll get a one-tap assisted post instead.{" "}
+                <a href="/channels" className="text-blue-600 hover:underline">
+                  Manage channels →
+                </a>
+              </p>
+            </div>
+          </>
+        )}
+
+        {/* Hidden file input — capture="environment" opens the rear camera on mobile */}
         <input
-          ref={cameraInputRef}
+          ref={fileInputRef}
           type="file"
           accept="image/jpeg,image/png,image/webp,image/heic,.heic"
           capture="environment"
           className="hidden"
-          onChange={handleFilesSelected}
-        />
-        <input
-          ref={galleryInputRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp,image/heic,.heic"
-          multiple
-          className="hidden"
-          onChange={handleFilesSelected}
-        />
-        <input
-          ref={addMoreInputRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp,image/heic,.heic"
-          multiple
-          className="hidden"
-          onChange={handleFilesSelected}
+          onChange={handleInputChange}
         />
 
-        {/* ── Idle: Condition-first → Photos → Analyze ───────────────────── */}
-        {stage === "idle" && (
-          <div className="flex flex-col gap-4">
-            {/* Step 1: Condition selector (always visible) */}
-            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold">
-                  1
-                </span>
-                <label className="text-sm font-semibold text-gray-800">
-                  Select item condition
-                </label>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {CONDITIONS.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => setSelectedCondition(c)}
-                    className={`px-4 py-2 rounded-full text-sm font-medium border transition-all ${
-                      selectedCondition === c
-                        ? `${CONDITION_COLORS[c]} ring-2 ring-offset-1 ring-blue-400`
-                        : "bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100"
-                    }`}
-                  >
-                    {c}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Step 2: Photo upload (only appears after condition selected) */}
-            {selectedCondition && (
-              <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
-                <div className="flex items-center gap-2 mb-3">
-                  <span className="flex items-center justify-center w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold">
-                    2
-                  </span>
-                  <label className="text-sm font-semibold text-gray-800">
-                    Add photos{" "}
-                    <span className="font-normal text-gray-400">
-                      (up to 5)
-                    </span>
-                  </label>
-                </div>
-
-                {selectedFiles.length === 0 ? (
-                  <div className="grid grid-cols-2 gap-3">
-                    {/* Take Photo — opens camera on mobile */}
-                    <button
-                      onClick={() => cameraInputRef.current?.click()}
-                      className="flex flex-col items-center justify-center gap-2.5 h-36 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors cursor-pointer"
-                    >
-                      <Camera className="w-8 h-8" />
-                      <span className="font-medium text-sm">Take Photo</span>
-                      <span className="text-xs">Open camera</span>
-                    </button>
-                    {/* Upload Gallery — opens file picker */}
-                    <button
-                      onClick={() => galleryInputRef.current?.click()}
-                      className="flex flex-col items-center justify-center gap-2.5 h-36 rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 text-gray-400 hover:border-purple-400 hover:text-purple-500 transition-colors cursor-pointer"
-                    >
-                      <ImagePlus className="w-8 h-8" />
-                      <span className="font-medium text-sm">Upload Gallery</span>
-                      <span className="text-xs">Choose files</span>
-                    </button>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <p className="text-xs text-gray-500">
-                        {selectedFiles.length} of 5 photos
-                      </p>
-                      <button
-                        onClick={() => {
-                          selectedFiles.forEach((f) =>
-                            URL.revokeObjectURL(f.preview)
-                          );
-                          setSelectedFiles([]);
-                        }}
-                        className="text-xs text-red-500 hover:text-red-700"
-                      >
-                        Clear all
-                      </button>
-                    </div>
-                    <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
-                      {selectedFiles.map((sf, i) => (
-                        <div key={i} className="relative aspect-square">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={sf.preview}
-                            alt={`Photo ${i + 1}`}
-                            className="w-full h-full object-cover rounded-lg border border-gray-200"
-                          />
-                          <button
-                            onClick={() => removeFile(i)}
-                            className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center shadow-sm hover:bg-red-600 transition-colors"
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
-                      ))}
-                      {selectedFiles.length < 5 && (
-                        <button
-                          onClick={() => addMoreInputRef.current?.click()}
-                          className="aspect-square rounded-lg border-2 border-dashed border-gray-300 flex items-center justify-center text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors"
-                        >
-                          <Plus className="w-5 h-5" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Step 3: Analyze button (only when condition + photos ready) */}
-            {selectedCondition && selectedFiles.length > 0 && (
-              <button
-                onClick={() => void handleAnalyze()}
-                disabled={stage !== "idle"}
-                className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                Analyze {selectedFiles.length} photo
-                {selectedFiles.length !== 1 ? "s" : ""} as &quot;
-                {selectedCondition}&quot; →
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* ── Preparing / Analyzing: progress ────────────────────────────── */}
+        {/* ── Preparing / Analyzing: progress ─────────────────────────────── */}
         {(stage === "preparing" || stage === "analyzing") && (
           <div className="flex flex-col items-center gap-5 py-12">
-            <div className="flex gap-2 justify-center">
-              {selectedFiles.map((sf, i) => (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  key={i}
-                  src={sf.preview}
-                  alt={`Photo ${i + 1}`}
-                  className="w-16 h-16 object-cover rounded-lg shadow-sm"
-                />
-              ))}
-            </div>
+            {preview && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={preview}
+                alt="Your photo"
+                className="w-32 h-32 object-cover rounded-xl shadow"
+              />
+            )}
             <div className="flex flex-col items-center gap-2">
               <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
               <p className="text-sm font-medium text-gray-700">
-                {stage === "preparing" ? "Processing photos..." : loadingText}
+                {stage === "preparing" ? "Processing photo..." : loadingText}
               </p>
-              {selectedCondition && (
-                <span
-                  className={`text-xs px-2 py-0.5 rounded-full ${CONDITION_COLORS[selectedCondition]}`}
-                >
-                  {selectedCondition}
-                </span>
-              )}
             </div>
           </div>
         )}
 
-        {/* ── Review: editable extraction result ─────────────────────────── */}
-        {(stage === "review" || stage === "generating") && extraction && (
+        {/* ── Review: editable extraction result ──────────────────────────── */}
+        {(stage === "review" || stage === "publishing") && extraction && (
           <div className="flex flex-col gap-5">
-            {/* Image preview panel — stock thumbnail + user gallery */}
-            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
-              {/* Stock image — primary marketplace thumbnail */}
-              {stockImageUrl && (
-                <div className="mb-3">
-                  <p className="text-xs font-medium text-gray-500 mb-1.5 flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-green-400 inline-block" />
-                    Marketplace Thumbnail
-                  </p>
-                  <div className="relative h-40 bg-gray-50 rounded-lg overflow-hidden">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={stockImageUrl}
-                      alt="Stock product image"
-                      className="w-full h-full object-contain p-2"
-                    />
-                  </div>
-                </div>
+            <div className="flex items-center gap-4">
+              {preview && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={preview}
+                  alt="Your photo"
+                  className="w-16 h-16 object-cover rounded-lg shadow-sm flex-shrink-0"
+                />
               )}
-
-              {/* User's actual photos — condition gallery */}
               <div>
-                <p className="text-xs font-medium text-gray-500 mb-1.5 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-blue-400 inline-block" />
-                  Your Photos ({selectedFiles.length})
-                </p>
-                <div className="flex gap-2 overflow-x-auto pb-1">
-                  {selectedFiles.map((sf, i) => (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      key={i}
-                      src={sf.preview}
-                      alt={`Your photo ${i + 1}`}
-                      className="w-16 h-16 object-cover rounded-lg border border-gray-200 flex-shrink-0"
-                    />
-                  ))}
-                </div>
-                {originalImageUrls.length > 0 && (
-                  <p className="text-xs text-green-600 mt-1">
-                    ✓ {originalImageUrls.length} photo{originalImageUrls.length !== 1 ? "s" : ""} uploaded and saved
-                  </p>
-                )}
-              </div>
-
-              <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
                 <p className="text-xs text-gray-500">
                   Review and edit, then set your price.
                 </p>
                 <button
                   onClick={reset}
-                  className="text-xs text-blue-600 hover:underline"
+                  className="text-xs text-blue-600 hover:underline mt-0.5"
                 >
-                  Start over
+                  Use a different photo
                 </button>
               </div>
             </div>
@@ -652,10 +644,7 @@ export default function Page() {
               <Field
                 label="Title"
                 indicator={
-                  <NeedsReview
-                    field="title"
-                    confidence={extraction.confidence}
-                  />
+                  <NeedsReview field="title" confidence={extraction.confidence} />
                 }
               >
                 <input
@@ -669,10 +658,7 @@ export default function Page() {
                 <Field
                   label="Brand"
                   indicator={
-                    <NeedsReview
-                      field="brand"
-                      confidence={extraction.confidence}
-                    />
+                    <NeedsReview field="brand" confidence={extraction.confidence} />
                   }
                 >
                   <input
@@ -685,10 +671,7 @@ export default function Page() {
                 <Field
                   label="Model"
                   indicator={
-                    <NeedsReview
-                      field="model"
-                      confidence={extraction.confidence}
-                    />
+                    <NeedsReview field="model" confidence={extraction.confidence} />
                   }
                 >
                   <input
@@ -704,10 +687,7 @@ export default function Page() {
                 <Field
                   label="UPC"
                   indicator={
-                    <NeedsReview
-                      field="upc"
-                      confidence={extraction.confidence}
-                    />
+                    <NeedsReview field="upc" confidence={extraction.confidence} />
                   }
                 >
                   <input
@@ -717,7 +697,15 @@ export default function Page() {
                     placeholder="—"
                   />
                 </Field>
-                <Field label="Condition">
+                <Field
+                  label="Condition"
+                  indicator={
+                    <NeedsReview
+                      field="condition"
+                      confidence={extraction.confidence}
+                    />
+                  }
+                >
                   <select
                     className={inputClass}
                     value={condition}
@@ -727,7 +715,15 @@ export default function Page() {
                       )
                     }
                   >
-                    {CONDITIONS.map((c) => (
+                    {(
+                      [
+                        "New",
+                        "Like New",
+                        "Very Good",
+                        "Good",
+                        "Acceptable",
+                      ] as const
+                    ).map((c) => (
                       <option key={c} value={c}>
                         {c}
                       </option>
@@ -814,16 +810,8 @@ export default function Page() {
                 )}
               </Field>
 
-              {/* Price — pre-filled by Claude, editable by seller */}
-              <div className="flex flex-col gap-1">
-                <label className="text-sm font-medium text-gray-600 flex items-center gap-2">
-                  Asking price (USD)
-                  {priceRationale && (
-                    <span className="text-xs font-medium px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">
-                      AI suggested
-                    </span>
-                  )}
-                </label>
+              {/* Price — required to publish anywhere */}
+              <Field label="Your asking price (USD)">
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">
                     $
@@ -838,20 +826,71 @@ export default function Page() {
                     onChange={(e) => setPrice(e.target.value)}
                   />
                 </div>
-                {priceRationale && (
-                  <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
-                    {priceRationale}
-                  </p>
-                )}
-                {!priceRationale && (
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    Claude couldn&apos;t estimate a price — enter one manually.
-                  </p>
-                )}
-              </div>
+              </Field>
             </div>
 
-            {/* Inline error from a failed link-creation retry */}
+            {/* Platform selection */}
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 flex flex-col gap-3">
+              <p className="text-sm font-medium text-gray-700">List on</p>
+              {(
+                [
+                  "ebay",
+                  "etsy",
+                  "shopify",
+                  "facebook",
+                  "offerup",
+                  "direct",
+                ] as const
+              ).map((t) => {
+                const isApi = t === "ebay" || t === "etsy" || t === "shopify";
+                const needsConnect = isApi && !connections[t as ApiPlatform];
+                return (
+                  <label
+                    key={t}
+                    className="flex items-center justify-between text-sm py-1 cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 accent-blue-600"
+                        checked={targets.has(t)}
+                        disabled={needsConnect}
+                        onChange={() => toggleTarget(t)}
+                      />
+                      <span
+                        className={
+                          needsConnect ? "text-gray-400" : "text-gray-700"
+                        }
+                      >
+                        {TARGET_LABELS[t]}
+                      </span>
+                      {(t === "facebook" || t === "offerup") && (
+                        <span className="text-xs bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded">
+                          assisted
+                        </span>
+                      )}
+                    </span>
+                    {needsConnect && (
+                      <a
+                        href={
+                          t === "shopify" ? "/channels" : `/api/oauth/${t}/start`
+                        }
+                        className="text-blue-600 hover:underline text-xs font-medium"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        Connect →
+                      </a>
+                    )}
+                  </label>
+                );
+              })}
+              <p className="text-xs text-gray-400">
+                Facebook Marketplace and OfferUp have no listing APIs — assisted
+                posting copies your listing and opens their post page.
+              </p>
+            </div>
+
+            {/* Inline error from a failed publish retry */}
             {error && stage === "review" && (
               <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
                 {error}
@@ -859,101 +898,190 @@ export default function Page() {
             )}
 
             <button
-              onClick={() => void handleGenerateLink()}
-              disabled={stage === "generating" || !price}
-              className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              onClick={() => void handlePublish()}
+              disabled={stage === "publishing" || !price || targets.size === 0}
+              className="w-full py-3 rounded-xl btn-primary font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              {stage === "generating"
-                ? "Creating listing link..."
-                : "Generate listing link →"}
+              {stage === "publishing"
+                ? "Publishing..."
+                : `Publish to ${targets.size} ${targets.size === 1 ? "place" : "places"} →`}
             </button>
           </div>
         )}
 
-        {/* ── Done: payment link ready ────────────────────────────────────── */}
-        {stage === "done" && (
-          <div className="flex flex-col gap-5">
-            <div className="bg-white rounded-2xl border border-green-200 shadow-sm p-5 flex flex-col gap-4">
-              <div className="flex items-center gap-2 text-green-700">
-                <svg
-                  className="w-5 h-5"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M5 13l4 4L19 7"
-                  />
-                </svg>
-                <span className="font-semibold">Listing link ready!</span>
-              </div>
+        {/* ── Published: per-platform results ─────────────────────────────── */}
+        {stage === "published" && (
+          <div className="flex flex-col gap-4">
+            {results.map((r) => (
+              <div
+                key={r.platform}
+                className={`bg-white rounded-2xl border shadow-sm p-5 flex flex-col gap-3 ${
+                  r.status === "live"
+                    ? "border-green-200"
+                    : r.status === "assist"
+                      ? "border-purple-200"
+                      : "border-red-100"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-gray-900">
+                    {TARGET_LABELS[r.platform]}
+                  </span>
+                  {r.status === "live" && (
+                    <span className="text-xs font-medium text-green-700 bg-green-50 px-2 py-0.5 rounded">
+                      ● Live
+                    </span>
+                  )}
+                  {r.status === "assist" && (
+                    <span className="text-xs font-medium text-purple-700 bg-purple-50 px-2 py-0.5 rounded">
+                      Ready to post
+                    </span>
+                  )}
+                  {(r.status === "error" || r.status === "not_connected") && (
+                    <span className="text-xs font-medium text-red-600 bg-red-50 px-2 py-0.5 rounded">
+                      {r.status === "error" ? "Failed" : "Not connected"}
+                    </span>
+                  )}
+                </div>
 
-              <div className="bg-gray-50 rounded-lg p-3 text-sm text-gray-700 break-all font-mono">
-                {listingUrl}
-              </div>
+                {r.status === "live" && (
+                  <>
+                    <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-700 break-all font-mono">
+                      {r.url}
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() =>
+                          void copyWithFeedback(r.platform, r.url)
+                        }
+                        className="flex-1 py-2 rounded-lg btn-primary font-medium text-sm transition-colors"
+                      >
+                        {copiedKey === r.platform ? "Copied!" : "Copy link"}
+                      </button>
+                      <a
+                        href={r.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex-1 py-2 rounded-lg border border-gray-200 text-gray-700 font-medium text-sm text-center hover:bg-gray-50 transition-colors"
+                      >
+                        View ↗
+                      </a>
+                    </div>
+                  </>
+                )}
 
-              <div className="flex flex-col gap-2">
-                <button
-                  onClick={() => void copyLink()}
-                  className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
-                >
-                  {copied ? "Copied!" : "Copy link"}
-                </button>
+                {r.status === "assist" && (
+                  <>
+                    <p className="text-xs text-gray-500">
+                      1. Copy your listing &nbsp;2. Save the photo &nbsp;3. Open{" "}
+                      {TARGET_LABELS[r.platform]} and paste.
+                    </p>
+                    <div className="flex flex-col gap-2">
+                      <button
+                        onClick={() =>
+                          void copyWithFeedback(r.platform, r.copyText)
+                        }
+                        className="w-full py-2 rounded-lg btn-primary font-medium text-sm transition-colors"
+                      >
+                        {copiedKey === r.platform
+                          ? "Copied!"
+                          : "Copy listing text"}
+                      </button>
+                      <div className="flex gap-2">
+                        <a
+                          href={preview}
+                          download="listing-photo.jpg"
+                          className="flex-1 py-2 rounded-lg border border-gray-200 text-gray-700 font-medium text-sm text-center hover:bg-gray-50 transition-colors"
+                        >
+                          Save photo
+                        </a>
+                        <a
+                          href={r.postUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex-1 py-2 rounded-lg bg-purple-600 text-white font-medium text-sm text-center hover:bg-purple-700 transition-colors"
+                        >
+                          Open & paste ↗
+                        </a>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {r.status === "not_connected" && (
+                  <a
+                    href={r.connectUrl}
+                    className="w-full py-2 rounded-lg btn-primary font-medium text-sm text-center transition-colors"
+                  >
+                    Connect {TARGET_LABELS[r.platform]} →
+                  </a>
+                )}
+
+                {r.status === "error" && (
+                  <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
+                    {r.message}
+                  </p>
+                )}
+              </div>
+            ))}
+
+            <div className="flex flex-col gap-1">
+              {accountEmail && (
                 <a
-                  href={listingUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full py-3 rounded-xl border border-gray-200 text-gray-700 font-medium text-sm text-center hover:bg-gray-50 transition-colors"
+                  href="/inventory"
+                  className="text-sm text-blue-600 hover:underline text-center py-1"
                 >
-                  Open payment page
+                  Saved to your inventory — manage it there →
                 </a>
-              </div>
+              )}
+              <button
+                onClick={reset}
+                className="text-sm text-gray-500 hover:text-gray-700 text-center py-2"
+              >
+                List another item
+              </button>
             </div>
-
-            <button
-              onClick={reset}
-              className="text-sm text-gray-500 hover:text-gray-700 text-center"
-            >
-              List another item
-            </button>
           </div>
         )}
 
-        {/* ── Error: terminal (analysis failed) ──────────────────────────── */}
+        {/* ── Error: terminal (analysis failed / out of credits) ──────────── */}
         {stage === "error" && (
           <div className="bg-white rounded-2xl border border-red-100 shadow-sm p-5 flex flex-col gap-4">
-            {selectedFiles.length > 0 && (
-              <div className="flex gap-2 justify-center">
-                {selectedFiles.slice(0, 3).map((sf, i) => (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    key={i}
-                    src={sf.preview}
-                    alt={`Photo ${i + 1}`}
-                    className="w-16 h-16 object-cover rounded-lg opacity-60"
-                  />
-                ))}
-              </div>
+            {preview && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={preview}
+                alt="Your photo"
+                className="w-20 h-20 object-cover rounded-lg mx-auto opacity-60"
+              />
             )}
             <div className="text-center">
               <p className="font-semibold text-gray-900">
-                Could not analyze these photos
+                {outOfCredits
+                  ? "You're out of AI credits"
+                  : "Could not analyze this photo"}
               </p>
               <p className="text-sm text-gray-500 mt-1">{error}</p>
             </div>
             <div className="flex flex-col gap-2">
-              <button
-                onClick={() => {
-                  reset();
-                  setTimeout(() => galleryInputRef.current?.click(), 50);
-                }}
-                className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition-colors"
-              >
-                Try different photos
-              </button>
+              {outOfCredits ? (
+                <a
+                  href="/pricing"
+                  className="w-full py-3 rounded-xl btn-primary font-semibold text-sm text-center transition-colors"
+                >
+                  View plans →
+                </a>
+              ) : (
+                <button
+                  onClick={() => {
+                    reset();
+                    setTimeout(() => fileInputRef.current?.click(), 50);
+                  }}
+                  className="w-full py-3 rounded-xl btn-primary font-semibold text-sm transition-colors"
+                >
+                  Try a different photo
+                </button>
+              )}
               <button
                 onClick={reset}
                 className="w-full py-3 rounded-xl border border-gray-200 text-gray-700 font-medium text-sm hover:bg-gray-50 transition-colors"
@@ -963,6 +1091,7 @@ export default function Page() {
             </div>
           </div>
         )}
+
       </div>
     </main>
   );

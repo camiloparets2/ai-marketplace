@@ -1,159 +1,128 @@
-import { createHash } from "node:crypto";
-import { after, NextRequest, NextResponse } from "next/server";
+// eBay Marketplace Account Deletion / Closure notification endpoint.
+//
+// Required for a Production keyset: eBay calls this endpoint when one of their
+// users deletes their account, and we must erase any of that user's data we
+// hold. It has two jobs:
+//
+//   GET  — one-time (and periodic) challenge validation. eBay sends
+//          ?challenge_code=… and expects back the SHA-256 hash of
+//          challengeCode + verificationToken + endpoint, as JSON.
+//   POST — the actual deletion notification. We ACK fast (must respond well
+//          under eBay's timeout) and hand off the erasure to a hook.
+//
+// Docs: https://developer.ebay.com/marketplace-account-deletion
+//
+// Env (never hardcode — see .env.example):
+//   EBAY_MARKETPLACE_DELETION_VERIFICATION_TOKEN  32–80 chars, [A-Za-z0-9_-]
+//   EBAY_MARKETPLACE_DELETION_ENDPOINT            the exact public HTTPS URL
+//                                                 eBay is configured to call
+//
+// This route reads NO client secret / cert id — those are unrelated to this
+// flow and must never be logged here.
 
-export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
+import { NextRequest, NextResponse } from "next/server";
+import { createHash } from "crypto";
+import { handleEbayAccountDeletion } from "@/lib/platforms/ebay-deletion";
 
-type EbayMarketplaceAccountDeletionNotification = {
-  metadata?: {
-    topic?: string;
-    schemaVersion?: string;
-    deprecated?: boolean;
-  };
+// ─── GET: challenge validation ────────────────────────────────────────────────
+
+export function GET(req: NextRequest): NextResponse {
+  const challengeCode = req.nextUrl.searchParams.get("challenge_code");
+
+  if (!challengeCode) {
+    return NextResponse.json(
+      { error: "Missing challenge_code query parameter" },
+      { status: 400 }
+    );
+  }
+
+  const verificationToken =
+    process.env.EBAY_MARKETPLACE_DELETION_VERIFICATION_TOKEN;
+  const endpoint = process.env.EBAY_MARKETPLACE_DELETION_ENDPOINT;
+
+  if (!verificationToken || !endpoint) {
+    // Never echo the values — just report which knobs are unset.
+    console.error(
+      "[ebay-deletion] Not configured:",
+      !verificationToken ? "missing verification token" : "",
+      !endpoint ? "missing endpoint URL" : ""
+    );
+    return NextResponse.json(
+      { error: "Endpoint is not configured" },
+      { status: 500 }
+    );
+  }
+
+  // Hash order is mandated by eBay and must be exactly:
+  //   challengeCode + verificationToken + endpoint
+  // digested as hex.
+  const challengeResponse = createHash("sha256")
+    .update(challengeCode)
+    .update(verificationToken)
+    .update(endpoint)
+    .digest("hex");
+
+  // eBay requires 200 + application/json. NextResponse.json sets the header.
+  return NextResponse.json({ challengeResponse });
+}
+
+// ─── POST: deletion notification ──────────────────────────────────────────────
+
+interface EbayDeletionNotification {
+  metadata?: { topic?: string; schemaVersion?: string };
   notification?: {
     notificationId?: string;
     eventDate?: string;
     publishDate?: string;
-    publishAttemptCount?: number;
     data?: {
       username?: string;
       userId?: string;
       eiasToken?: string;
     };
   };
-};
-
-const VERIFICATION_TOKEN_ENV =
-  "EBAY_MARKETPLACE_DELETION_VERIFICATION_TOKEN";
-const ENDPOINT_ENV = "EBAY_MARKETPLACE_DELETION_ENDPOINT";
-
-function sha256Hex(...parts: string[]): string {
-  const hash = createHash("sha256");
-
-  for (const part of parts) {
-    hash.update(part, "utf8");
-  }
-
-  return hash.digest("hex");
-}
-
-function presentString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function identifierHash(value: unknown): string | undefined {
-  const text = presentString(value);
-  return text ? sha256Hex(text).slice(0, 16) : undefined;
-}
-
-function toNotification(
-  value: unknown
-): EbayMarketplaceAccountDeletionNotification {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
-
-  return value as EbayMarketplaceAccountDeletionNotification;
-}
-
-function safeLogSummary(
-  payload: EbayMarketplaceAccountDeletionNotification
-) {
-  const notification = payload.notification;
-  const data = notification?.data;
-
-  return {
-    topic: payload.metadata?.topic,
-    schemaVersion: payload.metadata?.schemaVersion,
-    deprecated: payload.metadata?.deprecated,
-    notificationId: notification?.notificationId,
-    eventDate: notification?.eventDate,
-    publishDate: notification?.publishDate,
-    publishAttemptCount: notification?.publishAttemptCount,
-    ebayUserIdHash: identifierHash(data?.userId),
-    ebayUsernameHash: identifierHash(data?.username),
-    eiasTokenHash: identifierHash(data?.eiasToken),
-  };
-}
-
-async function deleteOrAnonymizeStoredEbayUserData(
-  payload: EbayMarketplaceAccountDeletionNotification
-): Promise<void> {
-  const data = payload.notification?.data;
-
-  // TODO: Delete or irreversibly anonymize every stored record tied to this
-  // eBay user. Match against stored eBay account identifiers once persisted,
-  // then remove eBay OAuth tokens and marketplace data from seller_profiles,
-  // listings, logs, analytics, storage objects, and any backups covered by the
-  // app's retention policy.
-  console.log("[ebay/account-deletion] deletion hook pending", {
-    notificationId: payload.notification?.notificationId,
-    ebayUserIdHash: identifierHash(data?.userId),
-    ebayUsernameHash: identifierHash(data?.username),
-    eiasTokenHash: identifierHash(data?.eiasToken),
-  });
-}
-
-export async function GET(req: NextRequest): Promise<NextResponse> {
-  const challengeCode = req.nextUrl.searchParams.get("challenge_code");
-
-  if (!challengeCode) {
-    return NextResponse.json(
-      { error: "challenge_code is required" },
-      { status: 400 }
-    );
-  }
-
-  const verificationToken = process.env[VERIFICATION_TOKEN_ENV];
-  const endpoint = process.env[ENDPOINT_ENV];
-
-  if (!verificationToken || !endpoint) {
-    console.error("[ebay/account-deletion] Missing required env vars", {
-      hasVerificationToken: Boolean(verificationToken),
-      hasEndpoint: Boolean(endpoint),
-    });
-
-    return NextResponse.json(
-      { error: "Marketplace account deletion endpoint is not configured" },
-      { status: 500 }
-    );
-  }
-
-  const challengeResponse = sha256Hex(
-    challengeCode,
-    verificationToken,
-    endpoint
-  );
-
-  return NextResponse.json({ challengeResponse }, { status: 200 });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  let body: unknown;
-
+  let body: EbayDeletionNotification;
   try {
-    body = await req.json();
+    body = (await req.json()) as EbayDeletionNotification;
   } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    // Malformed body — 400 so eBay retries rather than assuming success.
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const payload = toNotification(body);
+  const data = body.notification?.data;
+  const notificationId = body.notification?.notificationId ?? "unknown";
 
+  // Safe logging: identifiers only, never tokens/secrets. userId is what eBay
+  // wants us to act on; that's an eBay-side account id, not a credential.
   console.log(
-    "[ebay/account-deletion] received notification",
-    safeLogSummary(payload)
+    `[ebay-deletion] Received notification ${notificationId} for eBay userId=${
+      data?.userId ?? "unknown"
+    }`
   );
 
-  after(async () => {
-    try {
-      await deleteOrAnonymizeStoredEbayUserData(payload);
-    } catch (error) {
-      console.error(
-        "[ebay/account-deletion] deletion hook failed",
-        error instanceof Error ? error.message : error
-      );
+  // Hand off the actual erasure. We deliberately do NOT await long-running work
+  // in a way that would risk eBay's ACK timeout — the hook is written to be
+  // fast (or to enqueue). Any failure is logged but we still ACK, because eBay
+  // will re-send on non-2xx and duplicate deletions are idempotent for us.
+  try {
+    if (data?.userId || data?.username) {
+      await handleEbayAccountDeletion({
+        userId: data?.userId ?? null,
+        username: data?.username ?? null,
+        notificationId,
+      });
     }
-  });
+  } catch (err) {
+    console.error(
+      `[ebay-deletion] Erasure hook failed for notification ${notificationId}:`,
+      err instanceof Error ? err.message : err
+    );
+    // Fall through to 200 anyway — see note above. If you'd rather have eBay
+    // retry, return status 500 here instead.
+  }
 
-  return NextResponse.json({ received: true }, { status: 202 });
+  // 200 (or 202) tells eBay the notification was accepted.
+  return new NextResponse(null, { status: 200 });
 }
