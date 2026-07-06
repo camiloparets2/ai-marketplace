@@ -4,8 +4,9 @@
 
 Everything below is configuration/ops, not code. Work top to bottom.
 
-### [ ] 1. Apply all migrations + set all env vars
-`supabase db push` (connections, billing, inventory, sync_state, shopify, rate_limits) and fill every var in `.env.example` in the Vercel panel. The app degrades gracefully without them, but launch needs all of it live.
+### [~] 1. Apply all migrations + set all env vars — DATABASE HALF DONE
+**Done (2026-07-06, via the Supabase connector):** all six launch migrations are applied and registered on the production project (`eunnwzggubyhvvatxnyy` / "camiloparets2's Project"): per-user connections, billing + credits (with atomic spend/refund functions), inventory, sync_state, shopify, rate_limits. Three conflicting tables from the July-5 prototype build were renamed to `legacy_*` (16 test inventory rows preserved — delete `legacy_inventory_items`, `legacy_marketplace_listings`, `legacy_publish_attempts` whenever you're done with them). Note: this Supabase project is shared with the la_patrona OSHA app and the older prototype tables (`marketplace_connections`, `seller_profiles`, `listing_drafts`, `listings_log`, `sale_events`, `inventory_sync_actions`) — none were touched.
+**Still to do:** (a) run `supabase/migrations/20260706500000_revoke_browser_role_grants.sql` (security hardening; the connector stream kept dropping on this one call), (b) enable "leaked password protection" in Supabase → Authentication (advisor recommendation, dashboard toggle), (c) fill every var in `.env.example` into the Vercel panel.
 
 ### [ ] 2. Auth + email
 Google provider, Site/redirect URLs, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and **production SMTP** (Supabase's built-in sender is rate-limited to a handful/hour — not enough for real signups).
