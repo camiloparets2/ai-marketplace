@@ -22,6 +22,7 @@ interface Item {
   photo_url: string | null;
   quantity: number;
   price: number;
+  cost_of_goods: number | null;
   status: "draft" | "listed" | "sold" | "archived";
   sold_at: string | null;
   sold_price: number | null;
@@ -52,6 +53,9 @@ export default function InventoryPage() {
   const [syncing, setSyncing] = useState(false);
   // Item id whose "mark sold" platform picker is open
   const [soldPicker, setSoldPicker] = useState<string>("");
+  // Item id whose cost editor is open, and its in-progress value
+  const [costEditor, setCostEditor] = useState<string>("");
+  const [costValue, setCostValue] = useState<string>("");
 
   const load = useCallback(async () => {
     try {
@@ -76,11 +80,12 @@ export default function InventoryPage() {
 
   async function runAction(
     itemId: string,
-    body: { action: string; platform?: string }
+    body: { action: string; platform?: string; costOfGoods?: number }
   ) {
     setBusyItem(itemId);
     setNotice("");
     setSoldPicker("");
+    setCostEditor("");
     try {
       const res = await fetch(`/api/inventory/${itemId}/actions`, {
         method: "POST",
@@ -222,6 +227,88 @@ export default function InventoryPage() {
                   >
                     {item.status}
                   </span>
+                  {/* Cost of goods → per-item profit */}
+                  <p className="text-xs text-gray-400 mt-1">
+                    {costEditor === item.id ? (
+                      <span className="inline-flex items-center gap-1">
+                        cost $
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          autoFocus
+                          className="w-20 rounded border border-gray-200 px-1.5 py-0.5 text-xs"
+                          value={costValue}
+                          onChange={(e) => setCostValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              const cost = parseFloat(costValue);
+                              if (isFinite(cost) && cost >= 0) {
+                                void runAction(item.id, {
+                                  action: "set_cost",
+                                  costOfGoods: cost,
+                                });
+                              }
+                            }
+                            if (e.key === "Escape") setCostEditor("");
+                          }}
+                        />
+                        <button
+                          onClick={() => {
+                            const cost = parseFloat(costValue);
+                            if (isFinite(cost) && cost >= 0) {
+                              void runAction(item.id, {
+                                action: "set_cost",
+                                costOfGoods: cost,
+                              });
+                            }
+                          }}
+                          className="text-blue-600 hover:underline"
+                        >
+                          Save
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          setCostEditor(item.id);
+                          setCostValue(
+                            item.cost_of_goods !== null
+                              ? String(item.cost_of_goods)
+                              : ""
+                          );
+                        }}
+                        className="hover:underline"
+                      >
+                        {item.cost_of_goods !== null ? (
+                          <>
+                            cost ${Number(item.cost_of_goods).toFixed(2)}
+                            {item.status === "sold" &&
+                              item.sold_price !== null && (
+                                <span
+                                  className={
+                                    Number(item.sold_price) -
+                                      Number(item.cost_of_goods) >=
+                                    0
+                                      ? " text-green-700"
+                                      : " text-red-600"
+                                  }
+                                >
+                                  {" "}· profit $
+                                  {(
+                                    Number(item.sold_price) -
+                                    Number(item.cost_of_goods)
+                                  ).toFixed(2)}
+                                </span>
+                              )}
+                            {" ✎"}
+                          </>
+                        ) : (
+                          "+ add cost for profit tracking"
+                        )}
+                      </button>
+                    )}
+                  </p>
                 </div>
               </div>
 

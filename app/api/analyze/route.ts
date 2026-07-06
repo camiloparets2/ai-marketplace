@@ -17,6 +17,7 @@ import { authenticateRequest } from "@/lib/auth/guard";
 import { randomUUID } from "crypto";
 import { spendCredits, refundCredits } from "@/lib/billing/credits";
 import { CREDIT_COST_AI_EXTRACTION } from "@/lib/billing/plans";
+import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
 
 // Lazily initialised — avoids import-time crash when ANTHROPIC_API_KEY is absent
 // in local dev before .env.local is configured.
@@ -64,6 +65,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const { authorized, user } = await authenticateRequest(req);
   if (!authorized) {
     return errorResponse("Unauthorized", false, 401);
+  }
+
+  // Abuse protection ahead of the expensive Claude call (credits already gate
+  // signed-in volume; this blunts scripted bursts and beta-key abuse).
+  const allowed = await checkRateLimit(
+    RATE_RULES.analyze,
+    requestIdentity(req, user?.id ?? null)
+  );
+  if (!allowed) {
+    return errorResponse(
+      "Too many photos too fast — please wait a bit and try again.",
+      true,
+      429
+    );
   }
 
   // ── Parse body ──────────────────────────────────────────────────────────────

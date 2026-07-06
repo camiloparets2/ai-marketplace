@@ -14,6 +14,16 @@ everywhere in one tap.
 | OfferUp | **Assisted post** | OfferUp has no public API. Same one-tap copy + photo + deep link into `offerup.com/post`. |
 | Direct link | **Stripe Payment Link** | No-fee direct checkout link you can share anywhere. |
 
+## Public pages
+
+`/welcome` (marketing landing — the ad destination; signed-out visitors to `/`
+land here), `/pricing`, `/help` (support docs + troubleshooting), `/privacy`,
+`/terms`, `/login`. Everything else requires sign-in.
+
+Abuse protection: expensive routes (`/api/analyze`, `/api/publish`,
+`/api/billing/checkout`) are rate-limited per user/IP via an atomic Postgres
+counter (`lib/rate-limit.ts`, fail-open).
+
 ## Pipeline
 
 1. **Sign in** — Supabase Auth: Google or email/password (`/login`), with forgot/reset password flows. Marketplace connections are per-user.

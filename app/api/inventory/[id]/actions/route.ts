@@ -7,6 +7,8 @@
 //       → end all listings, return the item to draft
 //   { action: "archive" }
 //       → archive the item (no marketplace calls)
+//   { action: "set_cost", costOfGoods: number }
+//       → record what the item cost — feeds profit analytics
 //
 // Sold/delist are idempotent: repeating retries any listing whose end failed.
 
@@ -14,12 +16,18 @@ export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
-import { markItemSold, delistItem, archiveItem } from "@/lib/inventory";
+import {
+  markItemSold,
+  delistItem,
+  archiveItem,
+  setItemCost,
+} from "@/lib/inventory";
 
 interface ActionBody {
   action?: unknown;
   platform?: unknown;
   soldPrice?: unknown;
+  costOfGoods?: unknown;
 }
 
 export async function POST(
@@ -72,9 +80,26 @@ export async function POST(
         }
         return NextResponse.json({ ok: true, endResults: [] });
       }
+      case "set_cost": {
+        if (
+          typeof body.costOfGoods !== "number" ||
+          !isFinite(body.costOfGoods) ||
+          body.costOfGoods < 0
+        ) {
+          return NextResponse.json(
+            { error: "costOfGoods must be a non-negative number" },
+            { status: 400 }
+          );
+        }
+        const ok = await setItemCost(user.id, id, body.costOfGoods);
+        if (!ok) {
+          return NextResponse.json({ error: "Item not found" }, { status: 404 });
+        }
+        return NextResponse.json({ ok: true, endResults: [] });
+      }
       default:
         return NextResponse.json(
-          { error: "action must be sold, delist, or archive" },
+          { error: "action must be sold, delist, archive, or set_cost" },
           { status: 400 }
         );
     }

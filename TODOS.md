@@ -1,5 +1,33 @@
 # TODOS
 
+## Consumer-Launch Checklist (code is ready — this list gets you to advertising)
+
+Everything below is configuration/ops, not code. Work top to bottom.
+
+### [ ] 1. Apply all migrations + set all env vars
+`supabase db push` (connections, billing, inventory, sync_state, shopify, rate_limits) and fill every var in `.env.example` in the Vercel panel. The app degrades gracefully without them, but launch needs all of it live.
+
+### [ ] 2. Auth + email
+Google provider, Site/redirect URLs, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and **production SMTP** (Supabase's built-in sender is rate-limited to a handful/hour — not enough for real signups).
+
+### [ ] 3. Billing live-mode test
+Stripe webhook endpoint + `STRIPE_WEBHOOK_SECRET`, confirm final prices in `lib/billing/plans.ts`, one end-to-end test-mode then live-mode subscription.
+
+### [ ] 4. Marketplace approvals
+eBay production keyset (test in SANDBOX first), Etsy API key, Shopify app credentials. Reconnect any early-connected accounts (new OAuth scopes for sale polling).
+
+### [ ] 5. Error monitoring + product analytics
+Add Sentry (or Vercel's error monitoring) for auth/AI/marketplace/Stripe failures, and PostHog for the core funnel (photo → draft → publish → sale). Roadmap Gate 2 requirement; currently only console logs + Vercel logs exist.
+
+### [ ] 6. Ops basics before ads
+Supabase backup schedule (PITR or daily dumps), a rollback note (Vercel instant rollback + `git revert`), spend alerts: Anthropic ($25 soft/$50 hard — see Phase 1 list), Stripe email alerts, Vercel usage alerts.
+
+### [ ] 7. Legal review
+/privacy and /terms are honest working drafts written by an AI, not lawyer-reviewed. Fine for beta; review before paid public launch.
+
+### [ ] 8. Advertise
+The ad destination is `/welcome` (public landing, OG tags set). Good first channels: reseller communities (r/Flipping, r/eBaySellerAdvice), TikTok/Reels demo of snap→listed-everywhere, and Google Ads on "crosslisting app" keywords. Track signups via PostHog before spending.
+
 ## Phase 3 Follow-ups (Shopify + channel hub are built — these complete the phase)
 
 ### [ ] Create the Shopify app and set credentials

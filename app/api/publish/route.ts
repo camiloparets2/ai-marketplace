@@ -29,6 +29,7 @@ import { publishToEtsy } from "@/lib/platforms/etsy";
 import { publishToShopify } from "@/lib/platforms/shopify";
 import { createPaymentLink } from "@/lib/stripe-link";
 import { authenticateRequest } from "@/lib/auth/guard";
+import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
 import {
   createInventoryItem,
   recordLiveListing,
@@ -102,6 +103,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const { authorized, user } = await authenticateRequest(req);
   if (!authorized) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const allowed = await checkRateLimit(
+    RATE_RULES.publish,
+    requestIdentity(req, user?.id ?? null)
+  );
+  if (!allowed) {
+    return NextResponse.json(
+      { error: "Too many publishes too fast — please wait a bit and try again." },
+      { status: 429 }
+    );
   }
 
   let raw: unknown;

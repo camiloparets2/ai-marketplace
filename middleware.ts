@@ -53,13 +53,17 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   } = await supabase.auth.getUser();
 
   if (!user && PROTECTED_PAGES.includes(req.nextUrl.pathname)) {
-    const loginUrl = req.nextUrl.clone();
-    loginUrl.pathname = "/login";
-    loginUrl.search =
-      req.nextUrl.pathname === "/"
-        ? ""
-        : `?next=${encodeURIComponent(req.nextUrl.pathname)}`;
-    return NextResponse.redirect(loginUrl);
+    const redirectUrl = req.nextUrl.clone();
+    if (req.nextUrl.pathname === "/") {
+      // Signed-out visitors to the root get the marketing landing — the ad
+      // destination — rather than a login wall.
+      redirectUrl.pathname = "/welcome";
+      redirectUrl.search = "";
+    } else {
+      redirectUrl.pathname = "/login";
+      redirectUrl.search = `?next=${encodeURIComponent(req.nextUrl.pathname)}`;
+    }
+    return NextResponse.redirect(redirectUrl);
   }
 
   return res;

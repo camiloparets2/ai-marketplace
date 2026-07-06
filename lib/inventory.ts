@@ -42,6 +42,7 @@ export interface InventoryItemRow {
   photo_url: string | null;
   quantity: number;
   price: number;
+  cost_of_goods: number | null;
   status: "draft" | "listed" | "sold" | "archived";
   sold_at: string | null;
   sold_price: number | null;
@@ -136,7 +137,7 @@ export async function listInventory(userId: string): Promise<InventoryItemRow[]>
   const { data: items, error } = await supabase
     .from("inventory_items")
     .select(
-      "id, title, condition, photo_url, quantity, price, status, sold_at, sold_price, sold_platform, created_at"
+      "id, title, condition, photo_url, quantity, price, cost_of_goods, status, sold_at, sold_price, sold_platform, created_at"
     )
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
@@ -322,6 +323,22 @@ export async function delistItem(
       .eq("user_id", userId);
   }
   return { ok: endResults.every((r) => r.ok), endResults };
+}
+
+/** Record what the item cost — the input profit analytics is built on. */
+export async function setItemCost(
+  userId: string,
+  itemId: string,
+  costOfGoods: number
+): Promise<boolean> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({ cost_of_goods: costOfGoods, updated_at: new Date().toISOString() })
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .select("id");
+  if (error) throw new Error(`set cost failed: ${error.message}`);
+  return (data?.length ?? 0) > 0;
 }
 
 export async function archiveItem(userId: string, itemId: string): Promise<boolean> {

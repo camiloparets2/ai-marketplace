@@ -6,11 +6,23 @@ export const maxDuration = 30;
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
 import { createSubscriptionCheckout } from "@/lib/billing/stripe";
+import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const user = await requireUser();
   if (!user) {
     return NextResponse.json({ error: "Sign in to subscribe" }, { status: 401 });
+  }
+
+  const allowed = await checkRateLimit(
+    RATE_RULES.billing,
+    requestIdentity(req, user.id)
+  );
+  if (!allowed) {
+    return NextResponse.json(
+      { error: "Too many attempts — please wait a moment." },
+      { status: 429 }
+    );
   }
 
   let plan: unknown;
