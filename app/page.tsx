@@ -453,6 +453,10 @@ export default function Page() {
             <p className="text-xs text-gray-400 mt-2">
               {accountEmail}
               {" · "}
+              <a href="/dashboard" className="text-blue-600 hover:underline">
+                Dashboard
+              </a>
+              {" · "}
               <a href="/inventory" className="text-blue-600 hover:underline">
                 Inventory
               </a>
