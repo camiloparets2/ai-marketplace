@@ -23,6 +23,8 @@ import type { GuardrailVerdict } from "@/lib/guardrails";
 import { recordAudit } from "@/lib/audit";
 import { decidePrice, recordPriceDecision } from "@/lib/pricing";
 import type { PriceDecision, PriceRequest } from "@/lib/pricing";
+import { fetchEbayComps } from "@/lib/comps";
+import type { CompsSummary } from "@/lib/comps";
 import { publishToEbay, buildEbayInventoryItemPayload } from "@/lib/platforms/ebay";
 import type { EbayPublishResult, EbayInventoryItemPayload } from "@/lib/platforms/ebay";
 import { publishToEtsy } from "@/lib/platforms/etsy";
@@ -102,6 +104,8 @@ export interface PipelineDeps {
     photoUrl: string | null
   ): Promise<string>;
   price(req: PriceRequest): PriceDecision;
+  // Market comps — best-effort; null means "price conservatively".
+  fetchComps(userId: string, query: string): Promise<CompsSummary | null>;
   recordPrice(
     userId: string,
     itemId: string,
@@ -151,6 +155,15 @@ const defaultDeps: PipelineDeps = {
   hostPhoto: hostListingPhoto,
   createDraft: createDraftItem,
   price: decidePrice,
+  async fetchComps(userId, query) {
+    try {
+      const conn = await getConnection(userId, "ebay");
+      if (!conn) return null;
+      return await fetchEbayComps(conn.accessToken, query);
+    } catch {
+      return null;
+    }
+  },
   recordPrice: recordPriceDecision,
   setPrice: setItemPrice,
   setReview: setItemReview,
@@ -208,10 +221,13 @@ export async function runPipeline(
   );
 
   // 4. Price it; the decision and its rationale go to price_history.
+  //    Comps are best-effort — a failed lookup means conservative pricing.
+  const comps = await deps.fetchComps(input.userId, extraction.title);
   const decision = deps.price({
     costBasis: input.costBasis,
     shippingCost: extraction.estimatedShippingCost,
     targetPrice: input.targetPrice,
+    comps,
   });
   await deps.recordPrice(input.userId, itemId, decision);
   await deps.setPrice(input.userId, itemId, decision.price);

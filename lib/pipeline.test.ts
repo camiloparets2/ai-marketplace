@@ -55,6 +55,7 @@ function fakeDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
     hostPhoto: vi.fn().mockResolvedValue("https://cdn.example/p.jpg"),
     createDraft: vi.fn().mockResolvedValue("item-1"),
     price: decidePrice,
+    fetchComps: vi.fn().mockResolvedValue(null),
     recordPrice: vi.fn().mockResolvedValue(undefined),
     setPrice: vi.fn().mockResolvedValue(undefined),
     getEbayConnection: vi.fn().mockResolvedValue({
