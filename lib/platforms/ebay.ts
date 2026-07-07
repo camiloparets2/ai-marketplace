@@ -115,6 +115,33 @@ async function tokenRequest(body: URLSearchParams): Promise<TokenResponse> {
   return (await res.json()) as TokenResponse;
 }
 
+// ─── Application token (client credentials) ───────────────────────────────────
+
+export interface EbayAppToken {
+  accessToken: string;
+  // Epoch milliseconds when the token expires.
+  expiresAt: number;
+}
+
+/**
+ * Mints an application access token via the client-credentials grant against
+ * the environment-appropriate token endpoint (production by default). App
+ * tokens cover application-scope APIs (e.g. Taxonomy) that don't need a
+ * seller's consent, and minting one is the cheapest end-to-end proof that
+ * the keyset + secret are valid.
+ */
+export async function mintEbayAppToken(
+  scope = "https://api.ebay.com/oauth/api_scope"
+): Promise<EbayAppToken> {
+  const token = await tokenRequest(
+    new URLSearchParams({ grant_type: "client_credentials", scope })
+  );
+  return {
+    accessToken: token.access_token,
+    expiresAt: Date.now() + token.expires_in * 1000,
+  };
+}
+
 // Returns an unowned token bundle — the OAuth callback stamps the signed-in
 // user's id before saving.
 export async function ebayExchangeCode(code: string): Promise<UnownedConnection> {
