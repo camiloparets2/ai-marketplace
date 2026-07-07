@@ -4,7 +4,7 @@
 > from the first unchecked item in the highest-priority section.
 > Design doc: `docs/design/launch.md`.
 
-**Last updated:** 2026-07-07 · Phase 4 complete (routing, review queue, comps — PR pending merge)
+**Last updated:** 2026-07-07 · **Phases 0–5 complete** — all P0/P1 pipeline work built and tested; PRs #6–#11 await merge (stacked, merge in order)
 
 ## Pipeline stage status
 
@@ -33,7 +33,7 @@
 - [x] **P1-2** Review queue: held items show their failing gates on /inventory with **Approve & post** (releases + publishes via the same safe publish step, optional price override recorded in price_history) and **Reject** (archives); `review_approve`/`review_reject` audit rows; 3 tests — *Phase 4 ✅*
 - [x] **P1-3** `lib/comps.ts`: Marketplace Insights sold comps (403 = limited release → graceful degrade) + Browse active-listing context; `decidePrice` gains a `comps` strategy (median clamped to floor) and ignores sparse comps (<3 sold) with a lower-confidence note; 9 tests — *Phase 4 ✅*
 - [x] **P1-4** Cost basis: manual entry at intake (`costBasis` on /api/pipeline; `set_cost` action after) + assumed-cost fallback (30% ⚑ of comp median) when absent — *Phase 4 ✅*
-- [ ] **P1-5** /qa pass across capture → list → review; atomic fixes + regression tests; tsc/tests/lint/build clean — *Phase 5*
+- [x] **P1-5** QA pass (Chromium, phone 390px + desktop 1280px, 12 routes): zero page errors, zero horizontal overflow, auth gating verified end-to-end, API contract sweep (401/400/challenge-hash/ACK paths all correct). One bug found & fixed: `/` and `/login` had **no h1** (bare wordmark spans) → wrapped in `<h1>` (visually inert), regression-locked in `tests/regression/page-headings.test.ts`. Gate: `tsc --noEmit` ✓ · **162/162 tests** ✓ · lint ✓ · production build ✓ — *Phase 5 ✅*
 
 ### P2 — stretch
 - [ ] Second flip channel scaffold behind the routing table
@@ -58,7 +58,18 @@ See the defaults table in `docs/design/launch.md` — confidence 0.80, min_margi
 - (Phase 1) `feature/pipeline-happy-path` — vision wrapper, intake persistence, pricing engine, auto-list pipeline (PR #7, stacked on #6)
 - (Phase 2) `feature/auto-post-guardrails` — guardrail gates + review routing (PR #8, stacked on #7)
 - (Phase 3) `feature/sync-auto-delist` — sold_events queue, atomic claim, webhook intake, audit trail (PR #9, stacked on #8)
-- (Phase 4) `feature/routing-review-pricing` — routing table, review queue, comps + cost-basis depth (stacked on #9)
+- (Phase 4) `feature/routing-review-pricing` — routing table, review queue, comps + cost-basis depth (PR #10, stacked on #9)
+- (Phase 5) `fix/qa-launch-pass` — QA fixes + regression tests (stacked on #10)
+
+## Deploy checklist (updated after Phase 5)
+1. Merge PRs **in stack order**: #6 → #7 → #8 → #9 → #10 → #11 (plus standalone #3 telemetry, #4 eBay prod config, #5 schema-vocab docs).
+2. Apply the three new migrations to production Supabase (in timestamp order): `20260707100000_pipeline_intake`, `20260707200000_review_reasons`, `20260707300000_sold_events_audit`.
+3. Vercel env: everything in `.env.example` **plus new** `PIPELINE_LIVE_PUBLISH` (leave `false`!), `EBAY_ORDER_WEBHOOK_VERIFICATION_TOKEN`, `EBAY_ORDER_WEBHOOK_ENDPOINT`.
+4. Flip Vercel Production Branch → `master`, redeploy.
+5. Supervised sandbox run: `EBAY_ENV=sandbox` + a sandbox seller connection → POST /api/pipeline with a real photo → confirm sandbox listing + inventory rows + price_history + audit rows.
+6. Register the order-notification endpoint in the eBay dev portal (challenge will pass once env is set).
+7. Only after 5–6 look right: consider `PIPELINE_LIVE_PUBLISH=true`.
+8. Note: Next 16 warns `middleware.ts` → `proxy.ts` rename is coming; harmless today, track for a future chore PR.
 
 ## New migrations awaiting live apply
 - `20260707100000_pipeline_intake.sql` (price nullable, defects/id_confidence, review status, price_history)
