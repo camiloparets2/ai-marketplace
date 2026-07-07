@@ -13,6 +13,11 @@ export const JPEG_QUALITY = 0.85;
 // while retaining enough resolution for spec text and barcode OCR.
 export const MAX_DIMENSION_PX = 2048;
 
+// Photos per listing (capture UI and publish API enforce the same cap).
+// The FIRST photo is the primary: it drives AI identification and is the
+// hero image on every marketplace.
+export const MAX_LISTING_PHOTOS = 8;
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type ImageFormat = "jpeg" | "png" | "webp" | "heic";

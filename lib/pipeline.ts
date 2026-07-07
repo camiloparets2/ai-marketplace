@@ -123,7 +123,7 @@ export interface PipelineDeps {
   publishEbay(
     conn: PlatformConnection,
     listing: ListingInput,
-    imageUrl: string
+    imageUrls: string[]
   ): Promise<EbayPublishResult>;
   getEtsyConnection(userId: string): Promise<PlatformConnection | null>;
   publishEtsy(
@@ -433,10 +433,9 @@ async function publishStep(
     return {
       mode: "dry_run",
       status: "dry_run",
-      payload: buildEbayInventoryItemPayload(
-        listing,
-        photoUrl ?? "https://dry-run.invalid/photo.jpg"
-      ),
+      payload: buildEbayInventoryItemPayload(listing, [
+        photoUrl ?? "https://dry-run.invalid/photo.jpg",
+      ]),
     };
   }
 
@@ -457,7 +456,7 @@ async function publishStep(
   }
 
   try {
-    const published = await deps.publishEbay(conn, listing, photoUrl);
+    const published = await deps.publishEbay(conn, listing, [photoUrl]);
     await deps.recordListing(
       userId,
       itemId,

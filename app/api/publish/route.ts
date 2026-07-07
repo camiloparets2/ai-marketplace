@@ -13,7 +13,7 @@
 export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from "next/server";
-import { validateImageBytes } from "@/lib/image-validation";
+import { validateImageBytes, MAX_LISTING_PHOTOS } from "@/lib/image-validation";
 import type { AcceptedMimeType } from "@/lib/image-validation";
 import type {
   ListingInput,
@@ -42,9 +42,12 @@ type PublishTarget = Platform | "direct";
 
 interface PublishBody {
   listing: ListingInput;
-  image: string; // base64, same pre-processed photo sent to /api/analyze
+  image: string; // base64 primary photo — same one sent to /api/analyze
   mimeType: AcceptedMimeType;
   targets: PublishTarget[];
+  // Up to MAX_LISTING_PHOTOS - 1 additional base64 photos (same mimeType).
+  // eBay lists them all; Etsy/Shopify currently use the primary only.
+  extraImages?: string[];
 }
 
 // "direct" produces the same result shapes as platforms; widen the platform
@@ -69,7 +72,16 @@ function parseBody(raw: unknown): PublishBody | string {
   const body = raw as Partial<PublishBody> | null;
   if (!body || typeof body !== "object") return "Invalid request body";
 
-  const { listing, image, mimeType, targets } = body;
+  const { listing, image, mimeType, targets, extraImages } = body;
+  if (extraImages !== undefined) {
+    if (
+      !Array.isArray(extraImages) ||
+      extraImages.some((i) => typeof i !== "string" || !i)
+    )
+      return "extraImages must be an array of base64 strings";
+    if (extraImages.length > MAX_LISTING_PHOTOS - 1)
+      return `At most ${MAX_LISTING_PHOTOS} photos per listing`;
+  }
   if (!listing || typeof listing !== "object") return "Missing listing";
   if (typeof listing.title !== "string" || !listing.title.trim())
     return "A listing title is required";
@@ -93,7 +105,7 @@ function parseBody(raw: unknown): PublishBody | string {
   )
     return "targets must be a non-empty array of: ebay, etsy, shopify, facebook, offerup, direct";
 
-  return { listing, image, mimeType, targets };
+  return { listing, image, mimeType, targets, extraImages };
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -126,7 +138,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (typeof parsed === "string") {
     return NextResponse.json({ error: parsed }, { status: 400 });
   }
-  const { listing, image, mimeType, targets } = parsed;
+  const { listing, image, mimeType, targets, extraImages } = parsed;
 
   const imageBytes = new Uint8Array(Buffer.from(image, "base64"));
   const validation = validateImageBytes(imageBytes);
@@ -136,14 +148,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 400 }
     );
   }
-
-  // eBay needs the photo at a public URL. Host it once, lazily, and share the
-  // upload across targets.
-  let hostedUrlPromise: Promise<string> | null = null;
-  function hostedUrl(): Promise<string> {
-    hostedUrlPromise ??= hostListingPhoto(imageBytes, mimeType);
-    return hostedUrlPromise;
+  const extraBytes: Uint8Array[] = [];
+  for (const extra of extraImages ?? []) {
+    const bytes = new Uint8Array(Buffer.from(extra, "base64"));
+    const check = validateImageBytes(bytes);
+    if (!check.valid) {
+      return NextResponse.json(
+        { error: `One of the extra photos is invalid: ${check.error ?? ""}` },
+        { status: 400 }
+      );
+    }
+    extraBytes.push(bytes);
   }
+
+  // eBay needs the photos at public URLs. Host once, lazily, shared across
+  // targets; the primary photo is first (the marketplace hero image).
+  let hostedUrlsPromise: Promise<string[]> | null = null;
+  function hostedUrls(): Promise<string[]> {
+    hostedUrlsPromise ??= Promise.all([
+      hostListingPhoto(imageBytes, mimeType),
+      ...extraBytes.map((bytes) => hostListingPhoto(bytes, mimeType)),
+    ]);
+    return hostedUrlsPromise;
+  }
+  const hostedUrl = async (): Promise<string> => (await hostedUrls())[0];
 
   // Live publishes carry platform-side ids the inventory layer needs to end
   // the listing later (anti-oversell). Collected during fan-out, written after.
@@ -175,7 +203,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             };
           }
           if (target === "ebay") {
-            const published = await publishToEbay(conn, listing, await hostedUrl());
+            const published = await publishToEbay(conn, listing, await hostedUrls());
             liveRecords.push({
               platform: "ebay",
               url: published.url,

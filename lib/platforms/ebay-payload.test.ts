@@ -19,7 +19,7 @@ const listing: ListingInput = {
 
 describe("buildEbayInventoryItemPayload", () => {
   it("maps title, description, aspects, image, UPC, and condition", () => {
-    const p = buildEbayInventoryItemPayload(listing, "https://cdn.example/p.jpg");
+    const p = buildEbayInventoryItemPayload(listing, ["https://cdn.example/p.jpg"]);
     expect(p.product.title).toContain("Sony WH-1000XM4");
     expect(p.product.title.length).toBeLessThanOrEqual(80); // eBay limit
     expect(p.product.aspects).toMatchObject({
@@ -37,9 +37,16 @@ describe("buildEbayInventoryItemPayload", () => {
   it("omits the upc key entirely when there is none", () => {
     const p = buildEbayInventoryItemPayload(
       { ...listing, upc: null },
-      "https://cdn.example/p.jpg"
+      ["https://cdn.example/p.jpg"]
     );
     expect("upc" in p.product).toBe(false);
+  });
+
+  it("lists every photo in order, primary first, capped at eBay's 12", () => {
+    const urls = Array.from({ length: 14 }, (_, i) => `https://cdn.example/${i}.jpg`);
+    const p = buildEbayInventoryItemPayload(listing, urls);
+    expect(p.product.imageUrls).toHaveLength(12);
+    expect(p.product.imageUrls[0]).toBe("https://cdn.example/0.jpg");
   });
 });
 

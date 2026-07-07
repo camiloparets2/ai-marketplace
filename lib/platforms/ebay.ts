@@ -335,7 +335,7 @@ export interface EbayInventoryItemPayload {
 
 export function buildEbayInventoryItemPayload(
   input: ListingInput,
-  imageUrl: string
+  imageUrls: string[]
 ): EbayInventoryItemPayload {
   const composed = composeListing("ebay", input);
 
@@ -352,7 +352,9 @@ export function buildEbayInventoryItemPayload(
       title: composed.title,
       description: composed.description,
       aspects,
-      imageUrls: [imageUrl],
+      // eBay accepts up to 12 picture URLs; our product cap is 8 (first =
+      // hero). Defensive slice in case a caller ever exceeds it.
+      imageUrls: imageUrls.slice(0, 12),
       ...(input.upc ? { upc: [input.upc] } : {}),
     },
     condition: EBAY_CONDITION_MAP[input.condition],
@@ -397,7 +399,7 @@ export function buildEbayOfferPayload(
 export async function publishToEbay(
   connection: PlatformConnection,
   input: ListingInput,
-  imageUrl: string
+  imageUrls: string[]
 ): Promise<EbayPublishResult> {
   const conn = await freshConnection(connection);
   const composed = composeListing("ebay", input);
@@ -416,7 +418,7 @@ export async function publishToEbay(
     `/sell/inventory/v1/inventory_item/${sku}`,
     {
       method: "PUT",
-      body: buildEbayInventoryItemPayload(input, imageUrl),
+      body: buildEbayInventoryItemPayload(input, imageUrls),
     }
   );
   if (!itemRes.ok) throw await ebayError(itemRes, "inventory item creation");

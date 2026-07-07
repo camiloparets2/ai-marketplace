@@ -141,7 +141,7 @@ describe("runPipeline — happy path (sandbox)", () => {
     expect(deps.publishEbay).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ price: result.price.price }),
-      "https://cdn.example/p.jpg"
+      ["https://cdn.example/p.jpg"]
     );
     expect(deps.recordListing).toHaveBeenCalledWith(
       "user-1",
