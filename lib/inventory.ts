@@ -7,6 +7,7 @@
 // this module executes them against eBay/Etsy/Stripe.
 
 import { getSupabaseAdmin, getConnection } from "@/lib/connections";
+import { recordAudit } from "@/lib/audit";
 import { endEbayListing } from "@/lib/platforms/ebay";
 import { endEtsyListing } from "@/lib/platforms/etsy";
 import { endShopifyListing } from "@/lib/platforms/shopify";
@@ -288,6 +289,7 @@ async function endOneListing(userId: string, listing: ListingRow): Promise<void>
 
 async function endListings(
   userId: string,
+  itemId: string,
   listings: ListingRow[],
   soldPlatform: string | null
 ): Promise<EndResult[]> {
@@ -317,6 +319,11 @@ async function endListings(
             last_error: null,
           })
           .eq("id", listing.id);
+        // P0-8: every automated delist leaves an audit row.
+        await recordAudit(userId, itemId, "auto_delist", listing.platform, {
+          listingId: listing.external_id,
+          trigger: soldPlatform ? `sold on ${soldPlatform}` : "delist",
+        });
         results.push({ platform: listing.platform, ok: true });
       } catch (err) {
         const message = err instanceof Error ? err.message : "end failed";
@@ -384,8 +391,23 @@ export async function markItemSold(
     if (error) throw new Error(`mark sold failed: ${error.message}`);
   }
 
-  const endResults = await endListings(userId, item.listings, soldPlatform);
+  const endResults = await endListings(userId, itemId, item.listings, soldPlatform);
   return { ok: endResults.every((r) => r.ok), endResults };
+}
+
+/**
+ * End every listing on channels other than the one that sold (P0-7's
+ * delist-everywhere step). Used by the sold_events processor after a won
+ * claim; the claim itself already stamped the sale facts atomically.
+ */
+export async function endOtherListings(
+  userId: string,
+  itemId: string,
+  soldPlatform: string
+): Promise<EndResult[]> {
+  const item = await getItemWithListings(userId, itemId);
+  if (!item) return [];
+  return endListings(userId, itemId, item.listings, soldPlatform);
 }
 
 /** End all listings without a sale (pull the item back to draft). */
@@ -396,7 +418,7 @@ export async function delistItem(
   const item = await getItemWithListings(userId, itemId);
   if (!item) return null;
 
-  const endResults = await endListings(userId, item.listings, null);
+  const endResults = await endListings(userId, itemId, item.listings, null);
   if (endResults.every((r) => r.ok) && item.status === "listed") {
     await getSupabaseAdmin()
       .from("inventory_items")
