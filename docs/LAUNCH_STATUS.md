@@ -4,7 +4,7 @@
 > from the first unchecked item in the highest-priority section.
 > Design doc: `docs/design/launch.md`.
 
-**Last updated:** 2026-07-07 · Phase 2 complete (guardrails, PR pending merge)
+**Last updated:** 2026-07-07 · Phase 3 complete (sold_events + atomic delist, PR pending merge)
 
 ## Pipeline stage status
 
@@ -24,9 +24,9 @@
 - [x] **P0-3** `lib/pricing.ts`: floor = cost+fees+shipping+max($3,15%); strategies user_target/floor_markup; `price_history` rows w/ rationale + inputs; 8 tests — *Phase 1 ✅*
 - [x] **P0-4** `lib/pipeline.ts` + `POST /api/pipeline`: identify → draft → price → publish. Sandbox real, production **dry-run unless `PIPELINE_LIVE_PUBLISH=true`** (ships off). Pure eBay payload builders extracted + tested; 7 pipeline tests — *Phase 1 ✅*
 - [x] **P0-5** `lib/guardrails.ts`: 6 gates (confidence ≥0.80, price ≥ floor, sane range $5–$2k, prohibited-item regexes, VeRO brand watch list, photo quality bar) → any-fail parks the item `status=review` with `review_reasons`; migration `20260707200000_review_reasons.sql` (repo only); 13 gate tests + 3 pipeline-routing tests — *Phase 2 ✅*
-- [ ] **P0-6** eBay order event intake normalized into new `sold_events` queue (polling backstop feeds it too) — *Phase 3*
-- [ ] **P0-7** Atomic DB-locked sold transition, qty decrement, delist-all at 0, double-sale race: first committed wins, loser → out-of-stock cancel/refund stub; race test — *Phase 3*
-- [ ] **P0-8** `pipeline_audit` row for every auto-publish and auto-delist — *Phase 3*
+- [x] **P0-6** `sold_events` queue (dedupe on platform+order+listing, NULLS NOT DISTINCT) + `POST /api/webhooks/ebay-orders` intake (challenge GET, tolerant parse, listing-based seller attribution) + polling backstop enqueues instead of direct-marking. Migration `20260707300000_sold_events_audit.sql` (repo only) — *Phase 3 ✅*
+- [x] **P0-7** `claim_item_sale` SQL fn: single guarded UPDATE (row lock serializes; `quantity > 0` makes overselling impossible); qty decrement; delist-everywhere at 0 via `endOtherListings`; race loser → `oversellAction` **stub** (cancel/refund API call is a follow-up) + `oos_cancel` audit; race test in `lib/sold-events.test.ts` — *Phase 3 ✅*
+- [x] **P0-8** `pipeline_audit`: auto_publish, auto_delist (in endListings), sold_event, oos_cancel, review_hold all write rows — *Phase 3 ✅*
 
 ### P1
 - [ ] **P1-1** Routing table: eBay default; Etsy ONLY handmade / vintage ≥20yr / craft supply; never otherwise — *Phase 4*
@@ -56,8 +56,15 @@ See the defaults table in `docs/design/launch.md` — confidence 0.80, min_margi
 ## PRs opened this run
 - (Phase 0) `chore/launch-audit` — audit + design doc (PR #6)
 - (Phase 1) `feature/pipeline-happy-path` — vision wrapper, intake persistence, pricing engine, auto-list pipeline (PR #7, stacked on #6)
-- (Phase 2) `feature/auto-post-guardrails` — guardrail gates + review routing (stacked on #7)
+- (Phase 2) `feature/auto-post-guardrails` — guardrail gates + review routing (PR #8, stacked on #7)
+- (Phase 3) `feature/sync-auto-delist` — sold_events queue, atomic claim, webhook intake, audit trail (stacked on #8)
 
 ## New migrations awaiting live apply
 - `20260707100000_pipeline_intake.sql` (price nullable, defects/id_confidence, review status, price_history)
 - `20260707200000_review_reasons.sql` (review_reasons on inventory_items)
+- `20260707300000_sold_events_audit.sql` (sold_events, pipeline_audit, claim_item_sale fn)
+
+## Known follow-ups (deliberate stubs)
+- Oversell loser path logs + audits but does NOT yet call the platform cancel/refund API — operator acts on the `oos_cancel` audit row until wired.
+- eBay Notification API payloads are parsed tolerantly but signature verification of the webhook body is not yet implemented (endpoint is unguessable + challenge-verified; polling backstop covers gaps). Add signature checks before scale.
+- Direct (Stripe) sales still use the legacy `markItemSold` path — safe (idempotent) but bypasses the queue; migrate for uniform audit.
