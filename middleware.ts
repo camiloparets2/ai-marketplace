@@ -18,6 +18,7 @@ const PROTECTED_PAGES = [
   "/reset-password",
   "/billing",
   "/inventory",
+  "/review",
   "/dashboard",
   "/channels",
 ];
@@ -77,6 +78,7 @@ export const config = {
     "/reset-password",
     "/billing",
     "/inventory",
+    "/review",
     "/dashboard",
     "/channels",
   ],

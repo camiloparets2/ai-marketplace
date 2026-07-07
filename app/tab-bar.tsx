@@ -11,6 +11,7 @@ import { usePathname } from "next/navigation";
 const APP_PAGES = new Set([
   "/",
   "/inventory",
+  "/review",
   "/dashboard",
   "/channels",
   "/billing",
