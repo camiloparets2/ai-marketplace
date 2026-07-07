@@ -4,7 +4,7 @@
 > from the first unchecked item in the highest-priority section.
 > Design doc: `docs/design/launch.md`.
 
-**Last updated:** 2026-07-07 · Phase 3 complete (sold_events + atomic delist, PR pending merge)
+**Last updated:** 2026-07-07 · Phase 4 complete (routing, review queue, comps — PR pending merge)
 
 ## Pipeline stage status
 
@@ -29,10 +29,10 @@
 - [x] **P0-8** `pipeline_audit`: auto_publish, auto_delist (in endListings), sold_event, oos_cancel, review_hold all write rows — *Phase 3 ✅*
 
 ### P1
-- [ ] **P1-1** Routing table: eBay default; Etsy ONLY handmade / vintage ≥20yr / craft supply; never otherwise — *Phase 4*
-- [ ] **P1-2** Review queue endpoint + minimal view (approve → publish, reject → archive) — *Phase 4*
-- [ ] **P1-3** Pricing comps via eBay Marketplace Insights w/ conservative fallback + lowered confidence when sparse (Insights is limited-release — fallback is default) — *Phase 4*
-- [ ] **P1-4** Cost-basis capture at intake: manual entry + default-markup fallback — *Phase 4*
+- [x] **P1-1** `lib/routing.ts`: eBay always; Etsy ONLY handmade / vintage ≥20yr / craft supply (Vision now emits `handmade`/`estimatedYearMade`/`craftSupply`); pipeline enforces it — the Etsy leg also only fires in live mode since Etsy has no sandbox; 7 routing + 4 enforcement tests — *Phase 4 ✅*
+- [x] **P1-2** Review queue: held items show their failing gates on /inventory with **Approve & post** (releases + publishes via the same safe publish step, optional price override recorded in price_history) and **Reject** (archives); `review_approve`/`review_reject` audit rows; 3 tests — *Phase 4 ✅*
+- [x] **P1-3** `lib/comps.ts`: Marketplace Insights sold comps (403 = limited release → graceful degrade) + Browse active-listing context; `decidePrice` gains a `comps` strategy (median clamped to floor) and ignores sparse comps (<3 sold) with a lower-confidence note; 9 tests — *Phase 4 ✅*
+- [x] **P1-4** Cost basis: manual entry at intake (`costBasis` on /api/pipeline; `set_cost` action after) + assumed-cost fallback (30% ⚑ of comp median) when absent — *Phase 4 ✅*
 - [ ] **P1-5** /qa pass across capture → list → review; atomic fixes + regression tests; tsc/tests/lint/build clean — *Phase 5*
 
 ### P2 — stretch
@@ -57,7 +57,8 @@ See the defaults table in `docs/design/launch.md` — confidence 0.80, min_margi
 - (Phase 0) `chore/launch-audit` — audit + design doc (PR #6)
 - (Phase 1) `feature/pipeline-happy-path` — vision wrapper, intake persistence, pricing engine, auto-list pipeline (PR #7, stacked on #6)
 - (Phase 2) `feature/auto-post-guardrails` — guardrail gates + review routing (PR #8, stacked on #7)
-- (Phase 3) `feature/sync-auto-delist` — sold_events queue, atomic claim, webhook intake, audit trail (stacked on #8)
+- (Phase 3) `feature/sync-auto-delist` — sold_events queue, atomic claim, webhook intake, audit trail (PR #9, stacked on #8)
+- (Phase 4) `feature/routing-review-pricing` — routing table, review queue, comps + cost-basis depth (stacked on #9)
 
 ## New migrations awaiting live apply
 - `20260707100000_pipeline_intake.sql` (price nullable, defects/id_confidence, review status, price_history)
