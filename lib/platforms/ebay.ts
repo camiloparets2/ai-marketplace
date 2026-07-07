@@ -11,7 +11,8 @@
 // Required env:
 //   EBAY_CLIENT_ID / EBAY_CLIENT_SECRET — keyset from developer.ebay.com
 //   EBAY_RU_NAME                        — the RuName tied to the OAuth redirect
-//   EBAY_ENV                            — "SANDBOX" (default) or "PRODUCTION"
+//   EBAY_ENV                            — "production" (default) or "sandbox",
+//                                          case-insensitive
 //   EBAY_POSTAL_CODE                    — ship-from ZIP for the merchant location
 // Optional policy overrides (otherwise the seller's first policy is used):
 //   EBAY_FULFILLMENT_POLICY_ID, EBAY_PAYMENT_POLICY_ID, EBAY_RETURN_POLICY_ID
@@ -31,7 +32,11 @@ import { saveConnection, isExpired } from "@/lib/connections";
 // ─── Environment ──────────────────────────────────────────────────────────────
 
 function isProduction(): boolean {
-  return process.env.EBAY_ENV === "PRODUCTION";
+  // Production is the default now that the Production keyset is enabled;
+  // only an explicit EBAY_ENV=sandbox (any casing) targets the sandbox.
+  // Previously this required the exact string "PRODUCTION", so an unset or
+  // lowercase value silently fell back to sandbox.
+  return (process.env.EBAY_ENV ?? "production").toLowerCase() !== "sandbox";
 }
 
 function apiBase(): string {
