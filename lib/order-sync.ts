@@ -1,20 +1,22 @@
-// Order sync — detects sales that happened ON eBay/Etsy and routes them
-// through markItemSold, which already handles cross-channel delisting.
-// This closes the oversell window the manual "Mark sold" button left open.
+// Order sync — the POLLING BACKSTOP for sold-item detection. Sales found by
+// polling are normalized into the sold_events queue (same path as the
+// order-notification webhook) and the queue is drained: atomic claim →
+// cross-channel delist → audit. See lib/sold-events.ts.
 //
 // Trigger paths:
 //   - Vercel Cron → POST /api/sync/orders with the CRON_SECRET (all users)
 //   - opportunistic: loading /api/inventory syncs the viewer (throttled)
 //   - manual: the "Check for new sales" button on /inventory
 //
-// Safety: markItemSold is idempotent and the query window overlaps the last
-// sync generously, so double-processing a sale is a harmless no-op.
+// Safety: the queue deduplicates on (platform, order, listing), so poll
+// overlap and webhook/poll double-delivery are harmless no-ops.
 
 import { getSupabaseAdmin, getConnection } from "@/lib/connections";
 import { fetchEbaySales } from "@/lib/platforms/ebay";
 import { fetchEtsySales } from "@/lib/platforms/etsy";
 import { fetchShopifySales } from "@/lib/platforms/shopify";
-import { markItemSold } from "@/lib/inventory";
+import { recordSoldEvent, processPendingSoldEvents } from "@/lib/sold-events";
+import type { ProcessSummary } from "@/lib/sold-events";
 import { API_PLATFORMS } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
 
@@ -29,6 +31,8 @@ export const OPPORTUNISTIC_MIN_INTERVAL_MS = 10 * 60 * 1000;
 // ─── Pure matching (unit tested) ──────────────────────────────────────────────
 
 export interface SaleKey {
+  // platform order/receipt id — the dedupe key for the sold_events queue
+  orderId: string;
   listingId: string | null;
   sku: string | null;
   price: number | null;
@@ -44,6 +48,10 @@ export interface OpenListing {
 export interface SaleMatch {
   inventoryItemId: string;
   price: number | null;
+  // carried through so the match can be enqueued as a sold event
+  orderId: string;
+  listingId: string | null;
+  sku: string | null;
 }
 
 // Match platform sales to our open listings by external id, falling back to
@@ -65,7 +73,13 @@ export function matchSales(
     );
     if (hit) {
       taken.add(hit.inventoryItemId);
-      matches.push({ inventoryItemId: hit.inventoryItemId, price: sale.price });
+      matches.push({
+        inventoryItemId: hit.inventoryItemId,
+        price: sale.price,
+        orderId: sale.orderId,
+        listingId: sale.listingId,
+        sku: sale.sku,
+      });
     }
   }
   return matches;
@@ -157,17 +171,33 @@ async function syncPlatform(
         ? await fetchEbaySales(conn, since.toISOString())
         : platform === "shopify"
           ? (await fetchShopifySales(conn, since.toISOString())).map((s) => ({
+              orderId: s.orderId,
               listingId: s.productId,
               sku: null,
               price: s.price,
             }))
           : (await fetchEtsySales(conn, Math.floor(since.getTime() / 1000))).map(
-              (s) => ({ listingId: s.listingId, sku: null, price: s.price })
+              (s) => ({
+                orderId: s.receiptId,
+                listingId: s.listingId,
+                sku: null,
+                price: s.price,
+              })
             );
 
+    // Enqueue matches; the queue deduplicates against webhook deliveries and
+    // earlier polls, and processing does the atomic claim + delist + audit.
     const matches = matchSales(sales, listings);
     for (const match of matches) {
-      await markItemSold(userId, match.inventoryItemId, platform, match.price);
+      await recordSoldEvent({
+        userId,
+        platform,
+        externalOrderId: match.orderId,
+        listingExternalId: match.listingId,
+        sku: match.sku,
+        salePrice: match.price,
+        source: "poll",
+      });
     }
 
     await stampSynced(userId, platform);
@@ -183,6 +213,17 @@ export async function syncUserSales(userId: string): Promise<SyncSummary[]> {
   const results: SyncSummary[] = [];
   for (const platform of API_PLATFORMS) {
     results.push(await syncPlatform(userId, platform));
+  }
+  // Drain everything the passes above enqueued (plus any webhook leftovers).
+  try {
+    const summary: ProcessSummary = await processPendingSoldEvents(userId);
+    if (summary.oversold > 0) {
+      console.warn(
+        `[order-sync] ${summary.oversold} oversold event(s) for ${userId} — see pipeline_audit`
+      );
+    }
+  } catch (err) {
+    console.error(`[order-sync] queue drain failed for ${userId}:`, err);
   }
   return results;
 }

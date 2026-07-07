@@ -20,6 +20,7 @@ import { createDraftItem, setItemPrice, setItemReview, recordLiveListing, markIt
 import type { DraftItemInput, LiveListing } from "@/lib/inventory";
 import { evaluateGuardrails } from "@/lib/guardrails";
 import type { GuardrailVerdict } from "@/lib/guardrails";
+import { recordAudit } from "@/lib/audit";
 import { decidePrice, recordPriceDecision } from "@/lib/pricing";
 import type { PriceDecision, PriceRequest } from "@/lib/pricing";
 import { publishToEbay, buildEbayInventoryItemPayload } from "@/lib/platforms/ebay";
@@ -98,6 +99,7 @@ export interface PipelineDeps {
     reasons: Array<{ gate: string; reason: string }>
   ): Promise<void>;
   guardrails(input: Parameters<typeof evaluateGuardrails>[0]): GuardrailVerdict;
+  audit: typeof recordAudit;
   getEbayConnection(userId: string): Promise<PlatformConnection | null>;
   publishEbay(
     conn: PlatformConnection,
@@ -130,6 +132,7 @@ const defaultDeps: PipelineDeps = {
   setPrice: setItemPrice,
   setReview: setItemReview,
   guardrails: evaluateGuardrails,
+  audit: recordAudit,
   getEbayConnection: (userId) => getConnection(userId, "ebay"),
   publishEbay: publishToEbay,
   recordListing: recordLiveListing,
@@ -217,6 +220,7 @@ export async function runPipeline(
   if (!verdict.autoPost) {
     const failures = verdict.failures.map(({ gate, reason }) => ({ gate, reason }));
     await deps.setReview(input.userId, itemId, failures);
+    await deps.audit(input.userId, itemId, "review_hold", null, { failures });
     publish = { mode: deps.publishMode(), status: "review", failures };
   } else {
     // 6. Publish — sandbox for real, dry-run when production isn't opted in.
@@ -288,6 +292,11 @@ async function publishStep(
     );
     await deps.markListed(itemId);
     await deps.recordAttempt(userId, itemId, "ebay", "live");
+    // P0-8: every automated publish leaves an audit row.
+    await deps.audit(userId, itemId, "auto_publish", "ebay", {
+      listingId: published.listingId,
+      mode,
+    });
     return {
       mode,
       status: "live",

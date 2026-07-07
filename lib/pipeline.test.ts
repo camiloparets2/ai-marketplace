@@ -72,6 +72,7 @@ function fakeDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
     recordAttempt: vi.fn().mockResolvedValue(undefined),
     setReview: vi.fn().mockResolvedValue(undefined),
     guardrails: evaluateGuardrails,
+    audit: vi.fn().mockResolvedValue(undefined),
     publishMode: () => "sandbox" as const,
     ...over,
   };
@@ -128,6 +129,15 @@ describe("runPipeline — happy path (sandbox)", () => {
       listingId: "123",
     });
     expect(result.price.price).toBeGreaterThanOrEqual(result.price.floor);
+
+    // P0-8: the automated publish left an audit row
+    expect(deps.audit).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "auto_publish",
+      "ebay",
+      expect.objectContaining({ listingId: "123" })
+    );
   });
 });
 
@@ -222,9 +232,17 @@ describe("runPipeline — guardrail routing", () => {
     expect(deps.recordListing).not.toHaveBeenCalled();
     expect(deps.markListed).not.toHaveBeenCalled();
 
-    // but the draft and its price decision still persisted
+    // but the draft and its price decision still persisted, and the hold
+    // itself is audited
     expect(deps.createDraft).toHaveBeenCalled();
     expect(deps.recordPrice).toHaveBeenCalled();
+    expect(deps.audit).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "review_hold",
+      null,
+      expect.objectContaining({ failures: expect.any(Array) })
+    );
   });
 
   it("holds VeRO-listed brands for a human authenticity check", async () => {
