@@ -454,9 +454,11 @@ export default function Page() {
 
         {/* Header */}
         <div className="text-center">
-          <div className="flex justify-center">
+          {/* h1 for the document outline; Tailwind preflight keeps it
+              visually identical to the bare wordmark */}
+          <h1 className="flex justify-center">
             <BrandWordmark />
-          </div>
+          </h1>
           <p className="text-sm text-gray-500 mt-1">
             Photograph an item. List it everywhere in seconds.
           </p>

@@ -204,7 +204,9 @@ export default function LoginPage() {
     <main className="min-h-screen bg-gray-50 flex flex-col items-center px-4 py-16">
       <div className="w-full max-w-sm flex flex-col gap-6">
         <div className="text-center flex flex-col items-center gap-1">
-          <BrandWordmark />
+          <h1>
+            <BrandWordmark />
+          </h1>
           <p className="text-sm text-gray-500">
             Sign in to list everywhere from one photo.
           </p>
