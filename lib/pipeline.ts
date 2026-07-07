@@ -1,0 +1,265 @@
+// The auto-list pipeline (docs/design/launch.md, Phase 1 happy path):
+//
+//   photo → identify (lib/ai/vision.ts) → persist draft → price (floor +
+//   strategy, price_history row) → build eBay payload → publish → record
+//   the live listing.
+//
+// SAFETY: production auto-publish sits behind PIPELINE_LIVE_PUBLISH, which
+// ships OFF. With the flag off and EBAY_ENV != sandbox, the publish step is
+// a dry run: the exact payload is built and returned, no eBay call happens,
+// nothing is written to marketplace_listings. Sandbox publishes are always
+// allowed. The user-initiated /api/publish flow is unaffected by this flag.
+//
+// Every step's dependencies are injectable so tests exercise the real
+// orchestration with fakes — no network, no DB.
+
+import { identifyItem } from "@/lib/ai/vision";
+import type { IdentifiedItem } from "@/lib/ai/vision";
+import { hostListingPhoto } from "@/lib/storage";
+import { createDraftItem, setItemPrice, recordLiveListing, markItemListed, recordPublishAttempt } from "@/lib/inventory";
+import type { DraftItemInput, LiveListing } from "@/lib/inventory";
+import { decidePrice, recordPriceDecision } from "@/lib/pricing";
+import type { PriceDecision, PriceRequest } from "@/lib/pricing";
+import { publishToEbay, buildEbayInventoryItemPayload } from "@/lib/platforms/ebay";
+import type { EbayPublishResult, EbayInventoryItemPayload } from "@/lib/platforms/ebay";
+import { getConnection } from "@/lib/connections";
+import type { ListingInput, PlatformConnection } from "@/lib/platforms/types";
+import type { AcceptedMimeType } from "@/lib/image-validation";
+
+// ─── Publish mode ─────────────────────────────────────────────────────────────
+
+export type PublishMode = "sandbox" | "live" | "dry_run";
+
+export function resolvePublishMode(
+  env: Record<string, string | undefined> = process.env
+): PublishMode {
+  if ((env.EBAY_ENV ?? "").toLowerCase() === "sandbox") return "sandbox";
+  // Production requires the explicit opt-in flag — shipped OFF.
+  return env.PIPELINE_LIVE_PUBLISH === "true" ? "live" : "dry_run";
+}
+
+// ─── Result contract ──────────────────────────────────────────────────────────
+
+export type PipelinePublishOutcome =
+  | { mode: PublishMode; status: "live"; url: string; listingId: string }
+  | { mode: "dry_run"; status: "dry_run"; payload: EbayInventoryItemPayload }
+  | { mode: PublishMode; status: "not_connected"; connectUrl: string }
+  | { mode: PublishMode; status: "error"; message: string };
+
+export interface PipelineResult {
+  itemId: string;
+  identification: {
+    title: string;
+    confidence: number;
+    defects: string[];
+  };
+  price: PriceDecision;
+  publish: PipelinePublishOutcome;
+}
+
+export interface PipelineInput {
+  userId: string;
+  imageBase64: string;
+  mimeType: AcceptedMimeType;
+  // Seller-entered cost basis at intake (P1-4); null → floor assumes $0.
+  costBasis: number | null;
+  // Optional seller target price; null → floor-markup strategy.
+  targetPrice: number | null;
+}
+
+// ─── Injectable dependencies ──────────────────────────────────────────────────
+
+export interface PipelineDeps {
+  identify(image: string, mime: AcceptedMimeType): Promise<IdentifiedItem>;
+  hostPhoto(bytes: Uint8Array, mime: AcceptedMimeType): Promise<string>;
+  createDraft(
+    userId: string,
+    input: DraftItemInput,
+    photoUrl: string | null
+  ): Promise<string>;
+  price(req: PriceRequest): PriceDecision;
+  recordPrice(
+    userId: string,
+    itemId: string,
+    decision: PriceDecision
+  ): Promise<void>;
+  setPrice(userId: string, itemId: string, price: number): Promise<void>;
+  getEbayConnection(userId: string): Promise<PlatformConnection | null>;
+  publishEbay(
+    conn: PlatformConnection,
+    listing: ListingInput,
+    imageUrl: string
+  ): Promise<EbayPublishResult>;
+  recordListing(
+    userId: string,
+    itemId: string,
+    listing: LiveListing,
+    price: number
+  ): Promise<void>;
+  markListed(itemId: string): Promise<void>;
+  recordAttempt(
+    userId: string,
+    itemId: string | null,
+    platform: string,
+    status: "live" | "assist" | "not_connected" | "error",
+    error?: string
+  ): Promise<void>;
+  publishMode(): PublishMode;
+}
+
+const defaultDeps: PipelineDeps = {
+  identify: identifyItem,
+  hostPhoto: hostListingPhoto,
+  createDraft: createDraftItem,
+  price: decidePrice,
+  recordPrice: recordPriceDecision,
+  setPrice: setItemPrice,
+  getEbayConnection: (userId) => getConnection(userId, "ebay"),
+  publishEbay: publishToEbay,
+  recordListing: recordLiveListing,
+  markListed: markItemListed,
+  recordAttempt: recordPublishAttempt,
+  publishMode: resolvePublishMode,
+};
+
+// ─── Orchestration ────────────────────────────────────────────────────────────
+
+export async function runPipeline(
+  input: PipelineInput,
+  deps: PipelineDeps = defaultDeps
+): Promise<PipelineResult> {
+  // 1. Identify. A VisionError here aborts the pipeline — the route maps it.
+  const identified = await deps.identify(input.imageBase64, input.mimeType);
+  const extraction = identified.extraction;
+
+  // 2. Host the photo (eBay requires a public URL). Photo hosting failure
+  //    shouldn't lose the identification — the draft persists without it and
+  //    the publish step reports the problem.
+  const bytes = new Uint8Array(Buffer.from(input.imageBase64, "base64"));
+  let photoUrl: string | null = null;
+  let photoError: string | null = null;
+  try {
+    photoUrl = await deps.hostPhoto(bytes, input.mimeType);
+  } catch (err) {
+    photoError = err instanceof Error ? err.message : "photo hosting failed";
+  }
+
+  // 3. Persist the draft the moment identification succeeds.
+  const itemId = await deps.createDraft(
+    input.userId,
+    {
+      title: extraction.title,
+      brand: extraction.brand,
+      model: extraction.model,
+      upc: extraction.upc,
+      condition: extraction.condition,
+      category: extraction.category,
+      specs: extraction.specs,
+      defects: identified.defects,
+      idConfidence: identified.confidence,
+      costOfGoods: input.costBasis,
+    },
+    photoUrl
+  );
+
+  // 4. Price it; the decision and its rationale go to price_history.
+  const decision = deps.price({
+    costBasis: input.costBasis,
+    shippingCost: extraction.estimatedShippingCost,
+    targetPrice: input.targetPrice,
+  });
+  await deps.recordPrice(input.userId, itemId, decision);
+  await deps.setPrice(input.userId, itemId, decision.price);
+
+  const listing: ListingInput = {
+    title: extraction.title,
+    brand: extraction.brand,
+    model: extraction.model,
+    upc: extraction.upc,
+    condition: extraction.condition,
+    category: extraction.category,
+    specs: extraction.specs,
+    price: decision.price,
+    shippingCost: extraction.estimatedShippingCost,
+  };
+
+  // 5. Publish — sandbox for real, dry-run when production isn't opted in.
+  const publish = await publishStep(input.userId, itemId, listing, photoUrl, photoError, deps);
+
+  return {
+    itemId,
+    identification: {
+      title: extraction.title,
+      confidence: identified.confidence,
+      defects: identified.defects,
+    },
+    price: decision,
+    publish,
+  };
+}
+
+async function publishStep(
+  userId: string,
+  itemId: string,
+  listing: ListingInput,
+  photoUrl: string | null,
+  photoError: string | null,
+  deps: PipelineDeps
+): Promise<PipelinePublishOutcome> {
+  const mode = deps.publishMode();
+
+  if (mode === "dry_run") {
+    // Build the exact payload eBay would receive; touch nothing.
+    return {
+      mode: "dry_run",
+      status: "dry_run",
+      payload: buildEbayInventoryItemPayload(
+        listing,
+        photoUrl ?? "https://dry-run.invalid/photo.jpg"
+      ),
+    };
+  }
+
+  if (photoUrl === null) {
+    const message = `Photo hosting failed — cannot publish: ${photoError ?? "unknown error"}`;
+    await deps.recordAttempt(userId, itemId, "ebay", "error", message);
+    return { mode, status: "error", message };
+  }
+
+  const conn = await deps.getEbayConnection(userId);
+  if (!conn) {
+    await deps.recordAttempt(userId, itemId, "ebay", "not_connected");
+    return {
+      mode,
+      status: "not_connected",
+      connectUrl: "/api/oauth/ebay/start",
+    };
+  }
+
+  try {
+    const published = await deps.publishEbay(conn, listing, photoUrl);
+    await deps.recordListing(
+      userId,
+      itemId,
+      {
+        platform: "ebay",
+        url: published.url,
+        externalId: published.listingId,
+        meta: { offerId: published.offerId, sku: published.sku },
+      },
+      listing.price
+    );
+    await deps.markListed(itemId);
+    await deps.recordAttempt(userId, itemId, "ebay", "live");
+    return {
+      mode,
+      status: "live",
+      url: published.url,
+      listingId: published.listingId,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "publish failed";
+    await deps.recordAttempt(userId, itemId, "ebay", "error", message);
+    return { mode, status: "error", message };
+  }
+}
