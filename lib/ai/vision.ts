@@ -45,19 +45,10 @@ export interface IdentifiedItem {
   defects: string[];
 }
 
-// The fields that decide whether we trust the identification itself.
-// Shipping/dimension scores don't gate auto-posting; wrong titles do.
-const IDENTITY_FIELDS = ["title", "category", "condition"] as const;
-
-// A field Claude populated but didn't score counts as a coin-flip, not a pass.
-const UNSCORED_FIELD_SCORE = 50;
-
-export function overallConfidence(extraction: ExtractionResult): number {
-  const scores = IDENTITY_FIELDS.map(
-    (field) => extraction.confidence[field] ?? UNSCORED_FIELD_SCORE
-  );
-  return Math.min(1, Math.max(0, Math.min(...scores) / 100));
-}
+// Pure math lives in lib/ai/confidence.ts (client-safe); re-exported so
+// existing imports keep working.
+export { overallConfidence } from "@/lib/ai/confidence";
+import { overallConfidence } from "@/lib/ai/confidence";
 
 // ─── The Vision call ──────────────────────────────────────────────────────────
 
