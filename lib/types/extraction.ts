@@ -26,6 +26,10 @@ export interface ExtractionResult {
   // UPC extracted via OCR from visible barcode or label text.
   upc: string | null;
   condition: "New" | "Like New" | "Very Good" | "Good" | "Acceptable";
+  // Visible flaws that justify the condition grade (scratches, missing parts,
+  // stains, cracked screen…). Empty when nothing is visibly wrong. Buyers see
+  // honest defect lists; sellers avoid INAD returns.
+  defects: string[];
   // eBay-style category path, e.g. "Electronics > Headphones"
   category: string;
   // Open-ended key-value spec pairs (wattage, color, size, material, etc.).
@@ -93,6 +97,12 @@ export const EXTRACTION_TOOL_SCHEMA = {
         enum: ["New", "Like New", "Very Good", "Good", "Acceptable"],
         description: "Condition assessment based on visible wear",
       },
+      defects: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Every visible flaw: scratches, dents, stains, missing parts, damage. Empty array when the item looks flawless.",
+      },
       category: {
         type: "string",
         description:
@@ -153,6 +163,7 @@ export const EXTRACTION_TOOL_SCHEMA = {
       "model",
       "upc",
       "condition",
+      "defects",
       "category",
       "specs",
       "estimatedDimensions",
