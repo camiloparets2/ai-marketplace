@@ -4,17 +4,18 @@
 > from the first unchecked item in the highest-priority section.
 > Design doc: `docs/design/launch.md`.
 
-**Last updated:** 2026-07-07 · **Phases 0–5 complete** — all P0/P1 pipeline work built and tested; PRs #6–#11 await merge (stacked, merge in order)
+**Last updated:** 2026-07-07 · **Phases 0–5 + continuation run complete** — all P0/P1 backend built + tested, plus the full UI/UX track. PRs #6–#16 await merge (stacked, merge in order).
 
-## Pipeline stage status
+## Pipeline stage status (after all runs)
 
-| Stage | Status | What exists | What's left |
-|---|---|---|---|
-| Capture | 🟢 | validation, auth, credits, rate limit | photo quality bar (P0-5), multi-photo (P2) |
-| Identify | 🟡 | Claude Vision tool_use, per-field confidence | `lib/ai/vision.ts` wrapper w/ confidence 0–1 + defects (P0-1); persist at intake (P0-2) |
-| Price | 🔴 | nothing (user types price) | floor engine + `price_history` (P0-3); comps + cost-basis intake (P1) |
-| List | 🟡 | full eBay/Etsy/Shopify publishers, tested | dry-run mode (P0-4); guardrails + review status (P0-5); routing table (P1) |
-| Sync/Delist | 🟡 | polling sync, idempotent markItemSold, cross-channel ends | `sold_events` queue + webhook intake (P0-6); atomic transition + race handling (P0-7); `pipeline_audit` (P0-8) |
+| Stage | Status | Now built |
+|---|---|---|
+| Capture | 🟢 | validation, auth, credits, rate limit, **8-photo publishing**, capture-flow UI |
+| Identify | 🟢 | `lib/ai/vision.ts` (0–1 confidence + defects), persisted at intake, **ConfidenceMeter + defect chips UI** |
+| Price | 🟢 | floor engine + `price_history`, comps w/ fallback, cost-basis intake, **PricingPanel (floor + comps + unprofitable warning)** |
+| List | 🟢 | eBay/Etsy/Shopify publishers, **dry-run gate**, guardrails → review, routing table |
+| Sync/Delist | 🟢 | `sold_events` queue (webhook + poll + **direct Stripe**), atomic `claim_item_sale` + race handling, `pipeline_audit` |
+| UI/UX | 🟢 | design system (`app/ui/*`), capture/review/inventory/channels screens, review queue, error boundary + 404, toasts, a11y pass |
 
 ## Gap list (work top to bottom)
 
@@ -75,6 +76,20 @@ See the defaults table in `docs/design/launch.md` — confidence 0.80, min_margi
 - `20260707100000_pipeline_intake.sql` (price nullable, defects/id_confidence, review status, price_history)
 - `20260707200000_review_reasons.sql` (review_reasons on inventory_items)
 - `20260707300000_sold_events_audit.sql` (sold_events, pipeline_audit, claim_item_sale fn)
+
+## Continuation run — Track A (backend) + Track B (UI/UX), PRs #12–#16
+
+Stacked on the Phase 0–5 stack; **merge #6→#16 in order**.
+
+- **#12** `feature/direct-sales-queue` — direct Stripe sales through the `sold_events` queue (dedupe on checkout session id, atomic claim, uniform audit).
+- **#13** `feature/design-system` — `app/ui/*` (Button, Card, StatusBadge, Input/Select, Modal, Toast, Skeleton, EmptyState, ConfidenceMeter) + `@theme` tokens + a11y globals; `docs/design/design-system.md`.
+- **#14** `feature/capture-flow-ui` — ConfidenceMeter (0.80 bar marked), defect chips, PricingPanel (floor + comps + unprofitable warning), 8-photo eBay publishing, pure `pricing-core`/`ai/confidence` split, `GET /api/comps`.
+- **#15** `feature/inventory-review-ui` — first-class `/review` screen (reasons + approve/reject/batch), inventory filters + StatusBadge + review nudge.
+- **#16** `feature/connections-polish` — connection token health (`needsReconnect`) on channels/settings, `app/error.tsx` + `app/not-found.tsx`.
+
+**QA (continuation):** Chromium phone sweep of /, /inventory, /review, /channels, /dashboard, 404 → auth gating correct, every page has an h1, zero horizontal overflow, zero page errors, 404 renders. No new bugs found (the Phase-5 heading fix holds). `tsc`/tests(169)/lint/build all clean.
+
+**a11y notes:** every control ≥44px (`min-h-touch`), `:focus-visible` brand ring globally, form controls labeled, toasts `aria-live`, ConfidenceMeter `role=meter`+`aria-valuetext`, StatusBadge carries text not color-only, `prefers-reduced-motion` honored. Full WCAG AA audit tooling (axe) not run in this environment — recommend an axe pass before launch.
 
 ## Known follow-ups (deliberate stubs)
 - Oversell loser path logs + audits but does NOT yet call the platform cancel/refund API — operator acts on the `oos_cancel` audit row until wired. **Blocked on a supervised eBay sandbox session** (post-order v2 cancellation semantics need a live check before we trust code to cancel real orders).
