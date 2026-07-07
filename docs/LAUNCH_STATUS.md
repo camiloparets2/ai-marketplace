@@ -4,7 +4,7 @@
 > from the first unchecked item in the highest-priority section.
 > Design doc: `docs/design/launch.md`.
 
-**Last updated:** 2026-07-07 · Phase 1 complete (happy path, PR pending merge)
+**Last updated:** 2026-07-07 · Phase 2 complete (guardrails, PR pending merge)
 
 ## Pipeline stage status
 
@@ -23,7 +23,7 @@
 - [x] **P0-2** `createDraftItem` persists at intake (defects, id_confidence, cost basis; `price` now nullable; `review` status added). Migration `20260707100000_pipeline_intake.sql` — **repo only, NOT yet applied to the live DB** — *Phase 1 ✅*
 - [x] **P0-3** `lib/pricing.ts`: floor = cost+fees+shipping+max($3,15%); strategies user_target/floor_markup; `price_history` rows w/ rationale + inputs; 8 tests — *Phase 1 ✅*
 - [x] **P0-4** `lib/pipeline.ts` + `POST /api/pipeline`: identify → draft → price → publish. Sandbox real, production **dry-run unless `PIPELINE_LIVE_PUBLISH=true`** (ships off). Pure eBay payload builders extracted + tested; 7 pipeline tests — *Phase 1 ✅*
-- [ ] **P0-5** Auto-post guardrails (confidence ≥0.80, price ≥ floor + sane range, prohibited-item check, VeRO flag, photo quality bar) → all-pass publishes, any-fail → `status=review`; tests per gate — *Phase 2*
+- [x] **P0-5** `lib/guardrails.ts`: 6 gates (confidence ≥0.80, price ≥ floor, sane range $5–$2k, prohibited-item regexes, VeRO brand watch list, photo quality bar) → any-fail parks the item `status=review` with `review_reasons`; migration `20260707200000_review_reasons.sql` (repo only); 13 gate tests + 3 pipeline-routing tests — *Phase 2 ✅*
 - [ ] **P0-6** eBay order event intake normalized into new `sold_events` queue (polling backstop feeds it too) — *Phase 3*
 - [ ] **P0-7** Atomic DB-locked sold transition, qty decrement, delist-all at 0, double-sale race: first committed wins, loser → out-of-stock cancel/refund stub; race test — *Phase 3*
 - [ ] **P0-8** `pipeline_audit` row for every auto-publish and auto-delist — *Phase 3*
@@ -55,7 +55,9 @@ See the defaults table in `docs/design/launch.md` — confidence 0.80, min_margi
 
 ## PRs opened this run
 - (Phase 0) `chore/launch-audit` — audit + design doc (PR #6)
-- (Phase 1) `feature/pipeline-happy-path` — vision wrapper, intake persistence, pricing engine, auto-list pipeline (stacked on #6)
+- (Phase 1) `feature/pipeline-happy-path` — vision wrapper, intake persistence, pricing engine, auto-list pipeline (PR #7, stacked on #6)
+- (Phase 2) `feature/auto-post-guardrails` — guardrail gates + review routing (stacked on #7)
 
 ## New migrations awaiting live apply
 - `20260707100000_pipeline_intake.sql` (price nullable, defects/id_confidence, review status, price_history)
+- `20260707200000_review_reasons.sql` (review_reasons on inventory_items)
