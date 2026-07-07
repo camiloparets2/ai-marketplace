@@ -318,6 +318,82 @@ export interface EbayPublishResult {
   sku: string;
 }
 
+// Pure payload builders — exported so the pipeline's dry-run mode and unit
+// tests can exercise the exact bodies eBay would receive without a network.
+
+export interface EbayInventoryItemPayload {
+  product: {
+    title: string;
+    description: string;
+    aspects: Record<string, string[]>;
+    imageUrls: string[];
+    upc?: string[];
+  };
+  condition: string;
+  availability: { shipToLocationAvailability: { quantity: number } };
+}
+
+export function buildEbayInventoryItemPayload(
+  input: ListingInput,
+  imageUrl: string
+): EbayInventoryItemPayload {
+  const composed = composeListing("ebay", input);
+
+  // Item specifics (aspects) from brand/model/specs. eBay expects string arrays.
+  const aspects: Record<string, string[]> = {};
+  if (input.brand) aspects["Brand"] = [input.brand];
+  if (input.model) aspects["Model"] = [input.model];
+  for (const [key, value] of Object.entries(input.specs)) {
+    aspects[key] = [value];
+  }
+
+  return {
+    product: {
+      title: composed.title,
+      description: composed.description,
+      aspects,
+      imageUrls: [imageUrl],
+      ...(input.upc ? { upc: [input.upc] } : {}),
+    },
+    condition: EBAY_CONDITION_MAP[input.condition],
+    availability: { shipToLocationAvailability: { quantity: 1 } },
+  };
+}
+
+export interface EbayOfferPayload {
+  sku: string;
+  marketplaceId: "EBAY_US";
+  format: "FIXED_PRICE";
+  availableQuantity: number;
+  categoryId: string;
+  listingDescription: string;
+  merchantLocationKey: string;
+  pricingSummary: { price: { value: string; currency: "USD" } };
+  listingPolicies: PolicyIds;
+}
+
+export function buildEbayOfferPayload(
+  input: ListingInput,
+  sku: string,
+  categoryId: string,
+  merchantLocationKey: string,
+  policies: PolicyIds
+): EbayOfferPayload {
+  return {
+    sku,
+    marketplaceId: "EBAY_US",
+    format: "FIXED_PRICE",
+    availableQuantity: 1,
+    categoryId,
+    listingDescription: ebayHtmlDescription(input),
+    merchantLocationKey,
+    pricingSummary: {
+      price: { value: input.price.toFixed(2), currency: "USD" },
+    },
+    listingPolicies: policies,
+  };
+}
+
 export async function publishToEbay(
   connection: PlatformConnection,
   input: ListingInput,
@@ -335,49 +411,19 @@ export async function publishToEbay(
     resolvePolicies(conn.accessToken),
   ]);
 
-  // Item specifics (aspects) from brand/model/specs. eBay expects string arrays.
-  const aspects: Record<string, string[]> = {};
-  if (input.brand) aspects["Brand"] = [input.brand];
-  if (input.model) aspects["Model"] = [input.model];
-  for (const [key, value] of Object.entries(input.specs)) {
-    aspects[key] = [value];
-  }
-
   const itemRes = await ebayFetch(
     conn.accessToken,
     `/sell/inventory/v1/inventory_item/${sku}`,
     {
       method: "PUT",
-      body: {
-        product: {
-          title: composed.title,
-          description: composed.description,
-          aspects,
-          imageUrls: [imageUrl],
-          ...(input.upc ? { upc: [input.upc] } : {}),
-        },
-        condition: EBAY_CONDITION_MAP[input.condition],
-        availability: { shipToLocationAvailability: { quantity: 1 } },
-      },
+      body: buildEbayInventoryItemPayload(input, imageUrl),
     }
   );
   if (!itemRes.ok) throw await ebayError(itemRes, "inventory item creation");
 
   const offerRes = await ebayFetch(conn.accessToken, "/sell/inventory/v1/offer", {
     method: "POST",
-    body: {
-      sku,
-      marketplaceId: "EBAY_US",
-      format: "FIXED_PRICE",
-      availableQuantity: 1,
-      categoryId,
-      listingDescription: ebayHtmlDescription(input),
-      merchantLocationKey,
-      pricingSummary: {
-        price: { value: input.price.toFixed(2), currency: "USD" },
-      },
-      listingPolicies: policies,
-    },
+    body: buildEbayOfferPayload(input, sku, categoryId, merchantLocationKey, policies),
   });
   if (!offerRes.ok) throw await ebayError(offerRes, "offer creation");
   const offer = (await offerRes.json()) as { offerId: string };
