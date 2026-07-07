@@ -8,12 +8,14 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { StatusBadge } from "@/app/ui/status-badge";
 
 interface ChannelStatus {
   platform: "ebay" | "etsy" | "shopify";
   connected: boolean;
   accountLabel: string | null;
   lastSyncedAt: string | null;
+  needsReconnect?: boolean;
 }
 
 const CHANNEL_META: Record<
@@ -98,15 +100,22 @@ export default function ChannelsPage() {
                       {CHANNEL_META[ch.platform].blurb}
                     </p>
                   </div>
-                  {ch.connected ? (
-                    <span className="text-xs font-medium text-green-700 bg-green-50 px-2 py-0.5 rounded">
-                      ● Connected
-                    </span>
-                  ) : (
-                    <span className="text-xs font-medium text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
-                      Not connected
-                    </span>
-                  )}
+                  <StatusBadge
+                    status={
+                      ch.needsReconnect
+                        ? "expired"
+                        : ch.connected
+                          ? "connected"
+                          : "not_connected"
+                    }
+                    label={
+                      ch.needsReconnect
+                        ? "Reconnect needed"
+                        : ch.connected
+                          ? "Connected"
+                          : "Not connected"
+                    }
+                  />
                 </div>
 
                 {ch.connected && (
@@ -115,6 +124,13 @@ export default function ChannelsPage() {
                     {ch.lastSyncedAt
                       ? `Sales last synced ${new Date(ch.lastSyncedAt).toLocaleString()}`
                       : "Sales not synced yet"}
+                  </p>
+                )}
+
+                {ch.needsReconnect && (
+                  <p className="text-xs text-warn bg-warn-surface border border-amber-200 rounded-lg px-2.5 py-1.5">
+                    This connection&apos;s access expired. Reconnect to keep
+                    publishing and sale-sync working.
                   </p>
                 )}
 

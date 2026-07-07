@@ -2,14 +2,27 @@
 // "Connect eBay" vs a ready-to-publish checkbox.
 
 import { NextResponse } from "next/server";
-import { getConnection } from "@/lib/connections";
+import { getConnection, isExpired } from "@/lib/connections";
 import { API_PLATFORMS } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
 import { requireUser } from "@/lib/auth/guard";
 
+export interface ConnectionHealth {
+  connected: boolean;
+  // access token is past (near) its expiry
+  expired: boolean;
+  // a refresh token is stored → expiry self-heals on next use
+  canRefresh: boolean;
+  // connected but expired with no way to refresh → the seller must reconnect
+  needsReconnect: boolean;
+}
+
 export interface ConnectionsResponse {
-  // Only API platforms appear here — assist platforms need no connection.
+  // Legacy boolean map — assist platforms need no connection, so only API
+  // platforms appear. Kept for existing consumers (snap page, channels page).
   connections: Record<ApiPlatform, boolean>;
+  // Richer per-platform token health for the settings screen.
+  health: Record<ApiPlatform, ConnectionHealth>;
 }
 
 export async function GET(): Promise<NextResponse> {
@@ -17,19 +30,30 @@ export async function GET(): Promise<NextResponse> {
   const user = await requireUser();
 
   const connections = {} as Record<ApiPlatform, boolean>;
+  const health = {} as Record<ApiPlatform, ConnectionHealth>;
+
   for (const platform of API_PLATFORMS) {
-    if (!user) {
-      connections[platform] = false;
-      continue;
+    let conn = null;
+    if (user) {
+      try {
+        conn = await getConnection(user.id, platform);
+      } catch {
+        // Supabase not configured yet — treat as disconnected so the UI
+        // (and the assist platforms) still work.
+        conn = null;
+      }
     }
-    try {
-      connections[platform] = (await getConnection(user.id, platform)) !== null;
-    } catch {
-      // Supabase not configured yet — report disconnected rather than erroring
-      // so the UI (and the assist platforms) still work.
-      connections[platform] = false;
-    }
+    const connected = conn !== null;
+    const expired = conn !== null && isExpired(conn);
+    const canRefresh = conn?.refreshToken != null && conn.refreshToken !== "";
+    connections[platform] = connected;
+    health[platform] = {
+      connected,
+      expired,
+      canRefresh,
+      needsReconnect: connected && expired && !canRefresh,
+    };
   }
 
-  return NextResponse.json({ connections } satisfies ConnectionsResponse);
+  return NextResponse.json({ connections, health } satisfies ConnectionsResponse);
 }
