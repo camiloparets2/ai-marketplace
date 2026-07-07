@@ -25,6 +25,10 @@ import { decidePrice, recordPriceDecision } from "@/lib/pricing";
 import type { PriceDecision, PriceRequest } from "@/lib/pricing";
 import { publishToEbay, buildEbayInventoryItemPayload } from "@/lib/platforms/ebay";
 import type { EbayPublishResult, EbayInventoryItemPayload } from "@/lib/platforms/ebay";
+import { publishToEtsy } from "@/lib/platforms/etsy";
+import type { EtsyPublishResult } from "@/lib/platforms/etsy";
+import { routeChannels } from "@/lib/routing";
+import type { RoutingDecision } from "@/lib/routing";
 import { getConnection } from "@/lib/connections";
 import type { ListingInput, PlatformConnection } from "@/lib/platforms/types";
 import type { AcceptedMimeType } from "@/lib/image-validation";
@@ -55,6 +59,14 @@ export type PipelinePublishOutcome =
       failures: Array<{ gate: string; reason: string }>;
     };
 
+// The optional Etsy leg (routing table P1-1). Etsy has no sandbox, so it
+// only actually publishes in live mode; otherwise it reports why it didn't.
+export type EtsyLegOutcome =
+  | { status: "live"; url: string; listingId: string }
+  | { status: "skipped"; reason: string }
+  | { status: "not_connected"; connectUrl: string }
+  | { status: "error"; message: string };
+
 export interface PipelineResult {
   itemId: string;
   identification: {
@@ -63,7 +75,10 @@ export interface PipelineResult {
     defects: string[];
   };
   price: PriceDecision;
+  routing: RoutingDecision;
   publish: PipelinePublishOutcome;
+  // Present only when the routing table adds Etsy.
+  etsy?: EtsyLegOutcome;
 }
 
 export interface PipelineInput {
@@ -106,6 +121,14 @@ export interface PipelineDeps {
     listing: ListingInput,
     imageUrl: string
   ): Promise<EbayPublishResult>;
+  getEtsyConnection(userId: string): Promise<PlatformConnection | null>;
+  publishEtsy(
+    conn: PlatformConnection,
+    listing: ListingInput,
+    imageBytes: Uint8Array,
+    mimeType: AcceptedMimeType
+  ): Promise<EtsyPublishResult>;
+  route(extraction: Parameters<typeof routeChannels>[0]): RoutingDecision;
   recordListing(
     userId: string,
     itemId: string,
@@ -135,6 +158,9 @@ const defaultDeps: PipelineDeps = {
   audit: recordAudit,
   getEbayConnection: (userId) => getConnection(userId, "ebay"),
   publishEbay: publishToEbay,
+  getEtsyConnection: (userId) => getConnection(userId, "etsy"),
+  publishEtsy: publishToEtsy,
+  route: routeChannels,
   recordListing: recordLiveListing,
   markListed: markItemListed,
   recordAttempt: recordPublishAttempt,
@@ -216,7 +242,12 @@ export async function runPipeline(
     photoBytes: photoUrl === null ? null : bytes,
   });
 
+  // The routing table decides WHERE this item may be auto-posted (P1-1):
+  // eBay always; Etsy only for handmade / vintage 20+yr / craft supply.
+  const routing = deps.route(extraction);
+
   let publish: PipelinePublishOutcome;
+  let etsy: EtsyLegOutcome | undefined;
   if (!verdict.autoPost) {
     const failures = verdict.failures.map(({ gate, reason }) => ({ gate, reason }));
     await deps.setReview(input.userId, itemId, failures);
@@ -225,6 +256,9 @@ export async function runPipeline(
   } else {
     // 6. Publish — sandbox for real, dry-run when production isn't opted in.
     publish = await publishStep(input.userId, itemId, listing, photoUrl, photoError, deps);
+    if (routing.etsyEligible) {
+      etsy = await etsyLeg(input, itemId, listing, bytes, deps);
+    }
   }
 
   return {
@@ -235,8 +269,57 @@ export async function runPipeline(
       defects: identified.defects,
     },
     price: decision,
+    routing,
     publish,
+    ...(etsy ? { etsy } : {}),
   };
+}
+
+// The optional Etsy leg. Etsy has no sandbox environment, so a real Etsy
+// publish only happens in live mode — never during sandbox/dry-run pipeline
+// exercise (same safety stance as the eBay production gate).
+async function etsyLeg(
+  input: PipelineInput,
+  itemId: string,
+  listing: ListingInput,
+  imageBytes: Uint8Array,
+  deps: PipelineDeps
+): Promise<EtsyLegOutcome> {
+  const mode = deps.publishMode();
+  if (mode !== "live") {
+    return {
+      status: "skipped",
+      reason: `Etsy-eligible, but Etsy has no sandbox — publishes only in live mode (current: ${mode}).`,
+    };
+  }
+  const conn = await deps.getEtsyConnection(input.userId);
+  if (!conn) {
+    return { status: "not_connected", connectUrl: "/api/oauth/etsy/start" };
+  }
+  try {
+    const published = await deps.publishEtsy(conn, listing, imageBytes, input.mimeType);
+    await deps.recordListing(
+      input.userId,
+      itemId,
+      {
+        platform: "etsy",
+        url: published.url,
+        externalId: published.listingId,
+        meta: { shopId: published.shopId },
+      },
+      listing.price
+    );
+    await deps.recordAttempt(input.userId, itemId, "etsy", "live");
+    await deps.audit(input.userId, itemId, "auto_publish", "etsy", {
+      listingId: published.listingId,
+      mode,
+    });
+    return { status: "live", url: published.url, listingId: published.listingId };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Etsy publish failed";
+    await deps.recordAttempt(input.userId, itemId, "etsy", "error", message);
+    return { status: "error", message };
+  }
 }
 
 async function publishStep(

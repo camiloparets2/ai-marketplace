@@ -32,6 +32,14 @@ export interface ExtractionResult {
   defects: string[];
   // eBay-style category path, e.g. "Electronics > Headphones"
   category: string;
+  // Channel-routing signals (Etsy only allows handmade / vintage 20+yr /
+  // craft supplies — see lib/routing.ts):
+  // The item appears handmade/artisan rather than mass-produced.
+  handmade: boolean;
+  // Approximate year of manufacture when inferable (vintage detection), else null.
+  estimatedYearMade: number | null;
+  // The item is a supply used to MAKE things (yarn, beads, fabric, tools-for-craft).
+  craftSupply: boolean;
   // Open-ended key-value spec pairs (wattage, color, size, material, etc.).
   // In Phase 2 these will be mapped to eBay/Etsy item specifics schemas.
   specs: Record<string, string>;
@@ -108,6 +116,21 @@ export const EXTRACTION_TOOL_SCHEMA = {
         description:
           "eBay-style category path, e.g. 'Electronics > Headphones'",
       },
+      handmade: {
+        type: "boolean",
+        description:
+          "True only when the item is clearly handmade/artisan rather than mass-produced",
+      },
+      estimatedYearMade: {
+        type: ["number", "null"],
+        description:
+          "Approximate year of manufacture when inferable from styling, labels, or model history; null when unknown",
+      },
+      craftSupply: {
+        type: "boolean",
+        description:
+          "True when the item is a supply used to make things (yarn, beads, fabric, leather blanks, craft tools)",
+      },
       specs: {
         type: "object",
         description:
@@ -165,6 +188,9 @@ export const EXTRACTION_TOOL_SCHEMA = {
       "condition",
       "defects",
       "category",
+      "handmade",
+      "estimatedYearMade",
+      "craftSupply",
       "specs",
       "estimatedDimensions",
       "estimatedWeightLbs",

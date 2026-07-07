@@ -5,6 +5,7 @@ import type { IdentifiedItem } from "@/lib/ai/vision";
 import type { ExtractionResult } from "@/lib/types/extraction";
 import { decidePrice } from "./pricing";
 import { evaluateGuardrails } from "./guardrails";
+import { routeChannels } from "./routing";
 
 // A base64 image that passes the photo quality gate: JPEG magic bytes, 30KB.
 function goodImageBase64(): string {
@@ -23,6 +24,9 @@ const extraction: ExtractionResult = {
   condition: "Very Good",
   defects: ["light scuff on right earcup"],
   category: "Electronics > Headphones",
+  handmade: false,
+  estimatedYearMade: 2020,
+  craftSupply: false,
   specs: { Color: "Black" },
   estimatedDimensions: null,
   estimatedWeightLbs: null,
@@ -73,6 +77,20 @@ function fakeDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
     setReview: vi.fn().mockResolvedValue(undefined),
     guardrails: evaluateGuardrails,
     audit: vi.fn().mockResolvedValue(undefined),
+    getEtsyConnection: vi.fn().mockResolvedValue({
+      userId: "user-1",
+      platform: "etsy",
+      accessToken: "tok",
+      refreshToken: "ref",
+      expiresAt: Date.now() + 3_600_000,
+      meta: {},
+    }),
+    publishEtsy: vi.fn().mockResolvedValue({
+      url: "https://www.etsy.com/listing/555",
+      listingId: "555",
+      shopId: "shop-1",
+    }),
+    route: routeChannels,
     publishMode: () => "sandbox" as const,
     ...over,
   };
@@ -268,6 +286,64 @@ describe("runPipeline — guardrail routing", () => {
     const result = await runPipeline(input, deps);
     expect(result.publish.status).toBe("live");
     expect(deps.setReview).not.toHaveBeenCalled();
+  });
+});
+
+describe("runPipeline — channel routing enforcement", () => {
+  const handmadeIdentified: IdentifiedItem = {
+    ...identified,
+    extraction: { ...extraction, handmade: true, brand: null, title: "Handmade ceramic mug" },
+  };
+
+  it("never touches Etsy for ordinary mass-produced items, even when connected", async () => {
+    const deps = fakeDeps({ publishMode: () => "live" as const });
+    const result = await runPipeline(input, deps);
+    expect(result.routing.channels).toEqual(["ebay"]);
+    expect(result.etsy).toBeUndefined();
+    expect(deps.publishEtsy).not.toHaveBeenCalled();
+  });
+
+  it("publishes the Etsy leg for handmade items in live mode", async () => {
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue(handmadeIdentified),
+      publishMode: () => "live" as const,
+    });
+    const result = await runPipeline(input, deps);
+    expect(result.routing.channels).toEqual(["ebay", "etsy"]);
+    expect(result.etsy).toMatchObject({ status: "live", listingId: "555" });
+    expect(deps.recordListing).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      expect.objectContaining({ platform: "etsy", externalId: "555" }),
+      expect.any(Number)
+    );
+    expect(deps.audit).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "auto_publish",
+      "etsy",
+      expect.objectContaining({ listingId: "555" })
+    );
+  });
+
+  it("skips the Etsy leg outside live mode (Etsy has no sandbox)", async () => {
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue(handmadeIdentified),
+      publishMode: () => "sandbox" as const,
+    });
+    const result = await runPipeline(input, deps);
+    expect(result.etsy).toMatchObject({ status: "skipped" });
+    expect(deps.publishEtsy).not.toHaveBeenCalled();
+  });
+
+  it("reports not_connected when eligible but Etsy is not linked", async () => {
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue(handmadeIdentified),
+      publishMode: () => "live" as const,
+      getEtsyConnection: vi.fn().mockResolvedValue(null),
+    });
+    const result = await runPipeline(input, deps);
+    expect(result.etsy).toMatchObject({ status: "not_connected" });
   });
 });
 
