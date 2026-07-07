@@ -17,6 +17,9 @@ import {
   isSupabaseAuthConfigured,
 } from "@/lib/supabase/client";
 import { BrandWordmark } from "@/app/brand";
+import { ConfidenceMeter } from "@/app/ui/confidence-meter";
+import { PricingPanel } from "@/app/ui/pricing-panel";
+import { overallConfidence } from "@/lib/ai/confidence";
 
 // ─── Stage machine ────────────────────────────────────────────────────────────
 
@@ -642,6 +645,30 @@ export default function Page() {
               </div>
             </div>
 
+            {/* Identification confidence — the 0.80 auto-post bar is marked */}
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+              <ConfidenceMeter value={overallConfidence(extraction)} />
+            </div>
+
+            {/* Defect chips — honest condition, fewer INAD returns */}
+            {extraction.defects && extraction.defects.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <p className="text-sm font-medium text-gray-700">
+                  Visible flaws
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {extraction.defects.map((d, i) => (
+                    <span
+                      key={i}
+                      className="text-xs bg-warn-surface text-warn border border-amber-200 px-2 py-0.5 rounded-badge"
+                    >
+                      {d}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 flex flex-col gap-4">
               <Field
                 label="Title"
@@ -812,23 +839,14 @@ export default function Page() {
                 )}
               </Field>
 
-              {/* Price — required to publish anywhere */}
-              <Field label="Your asking price (USD)">
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">
-                    $
-                  </span>
-                  <input
-                    type="number"
-                    min="0.01"
-                    step="0.01"
-                    className={`${inputClass} pl-7`}
-                    placeholder="0.00"
-                    value={price}
-                    onChange={(e) => setPrice(e.target.value)}
-                  />
-                </div>
-              </Field>
+              {/* Price + floor + comps + unprofitable warning */}
+              <PricingPanel
+                price={price}
+                onPriceChange={setPrice}
+                costBasis={null}
+                shippingCost={getShippingRate(shippingService).cost}
+                compsQuery={title}
+              />
             </div>
 
             {/* Platform selection */}
