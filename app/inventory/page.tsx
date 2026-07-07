@@ -21,9 +21,10 @@ interface Item {
   condition: string;
   photo_url: string | null;
   quantity: number;
-  price: number;
+  // null until the pricing engine (or the seller) prices the draft
+  price: number | null;
   cost_of_goods: number | null;
-  status: "draft" | "listed" | "sold" | "archived";
+  status: "draft" | "review" | "listed" | "sold" | "archived";
   sold_at: string | null;
   sold_price: number | null;
   sold_platform: string | null;
@@ -40,6 +41,7 @@ const PLATFORM_NAMES: Record<string, string> = {
 
 const STATUS_STYLES: Record<Item["status"], string> = {
   draft: "bg-gray-100 text-gray-600",
+  review: "bg-amber-50 text-amber-700",
   listed: "bg-blue-50 text-blue-700",
   sold: "bg-green-50 text-green-700",
   archived: "bg-gray-100 text-gray-400",
@@ -212,7 +214,9 @@ export default function InventoryPage() {
                     {item.title}
                   </p>
                   <p className="text-sm text-gray-500">
-                    ${Number(item.price).toFixed(2)}
+                    {item.price !== null
+                      ? `$${Number(item.price).toFixed(2)}`
+                      : "unpriced"}
                     {item.status === "sold" && item.sold_price !== null && (
                       <span className="text-green-700">
                         {" "}· sold ${Number(item.sold_price).toFixed(2)}

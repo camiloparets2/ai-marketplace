@@ -41,9 +41,10 @@ export interface InventoryItemRow {
   condition: string;
   photo_url: string | null;
   quantity: number;
-  price: number;
+  // null until the pricing engine (or the seller) prices the draft
+  price: number | null;
   cost_of_goods: number | null;
-  status: "draft" | "listed" | "sold" | "archived";
+  status: "draft" | "review" | "listed" | "sold" | "archived";
   sold_at: string | null;
   sold_price: number | null;
   sold_platform: string | null;
@@ -55,6 +56,64 @@ export interface EndResult {
   platform: string;
   ok: boolean;
   error?: string;
+}
+
+// ─── Intake (called from the auto-list pipeline the moment identification
+//     succeeds — before any price exists) ─────────────────────────────────────
+
+export interface DraftItemInput {
+  title: string;
+  brand: string | null;
+  model: string | null;
+  upc: string | null;
+  condition: string;
+  category: string;
+  specs: Record<string, string>;
+  defects: string[];
+  // 0-1 from lib/ai/vision.ts
+  idConfidence: number;
+  costOfGoods: number | null;
+}
+
+export async function createDraftItem(
+  userId: string,
+  input: DraftItemInput,
+  photoUrl: string | null
+): Promise<string> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .insert({
+      user_id: userId,
+      title: input.title,
+      brand: input.brand,
+      model: input.model,
+      upc: input.upc,
+      condition: input.condition,
+      category: input.category,
+      specs: input.specs,
+      defects: input.defects,
+      id_confidence: input.idConfidence,
+      cost_of_goods: input.costOfGoods,
+      photo_url: photoUrl,
+    })
+    .select("id")
+    .single<{ id: string }>();
+  if (error) throw new Error(`draft item insert failed: ${error.message}`);
+  return data.id;
+}
+
+/** Stamp the pricing engine's decision onto the item. */
+export async function setItemPrice(
+  userId: string,
+  itemId: string,
+  price: number
+): Promise<void> {
+  const { error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({ price, updated_at: new Date().toISOString() })
+    .eq("id", itemId)
+    .eq("user_id", userId);
+  if (error) throw new Error(`set price failed: ${error.message}`);
 }
 
 // ─── Creation (called from the publish fan-out) ───────────────────────────────
