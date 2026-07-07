@@ -102,6 +102,29 @@ export async function createDraftItem(
   return data.id;
 }
 
+/**
+ * Route an item to the human review queue with the guardrail failures that
+ * put it there (P0-5). Only drafts move — an already-listed/sold item is
+ * never pulled back into review by a late pipeline retry.
+ */
+export async function setItemReview(
+  userId: string,
+  itemId: string,
+  reasons: Array<{ gate: string; reason: string }>
+): Promise<void> {
+  const { error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({
+      status: "review",
+      review_reasons: reasons,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .eq("status", "draft");
+  if (error) throw new Error(`set review failed: ${error.message}`);
+}
+
 /** Stamp the pricing engine's decision onto the item. */
 export async function setItemPrice(
   userId: string,

@@ -4,6 +4,16 @@ import type { PipelineDeps, PipelineInput } from "./pipeline";
 import type { IdentifiedItem } from "@/lib/ai/vision";
 import type { ExtractionResult } from "@/lib/types/extraction";
 import { decidePrice } from "./pricing";
+import { evaluateGuardrails } from "./guardrails";
+
+// A base64 image that passes the photo quality gate: JPEG magic bytes, 30KB.
+function goodImageBase64(): string {
+  const bytes = Buffer.alloc(30 * 1024);
+  bytes[0] = 0xff;
+  bytes[1] = 0xd8;
+  bytes[2] = 0xff;
+  return bytes.toString("base64");
+}
 
 const extraction: ExtractionResult = {
   title: "Sony WH-1000XM4 Wireless Headphones",
@@ -29,7 +39,7 @@ const identified: IdentifiedItem = {
 
 const input: PipelineInput = {
   userId: "user-1",
-  imageBase64: "aGk=",
+  imageBase64: goodImageBase64(),
   mimeType: "image/jpeg",
   costBasis: 40,
   targetPrice: null,
@@ -60,6 +70,8 @@ function fakeDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
     recordListing: vi.fn().mockResolvedValue(undefined),
     markListed: vi.fn().mockResolvedValue(undefined),
     recordAttempt: vi.fn().mockResolvedValue(undefined),
+    setReview: vi.fn().mockResolvedValue(undefined),
+    guardrails: evaluateGuardrails,
     publishMode: () => "sandbox" as const,
     ...over,
   };
@@ -171,16 +183,73 @@ describe("runPipeline — publish edge cases", () => {
     );
   });
 
-  it("still persists the draft when photo hosting fails, then errors the publish", async () => {
+  it("still persists the draft when photo hosting fails, then routes to review", async () => {
     const deps = fakeDeps({
       hostPhoto: vi.fn().mockRejectedValue(new Error("bucket down")),
     });
     const result = await runPipeline(input, deps);
     expect(deps.createDraft).toHaveBeenCalledWith("user-1", expect.anything(), null);
-    expect(result.publish.status).toBe("error");
-    if (result.publish.status === "error") {
-      expect(result.publish.message).toContain("Photo hosting failed");
+    // no photo → the photo_quality guardrail holds the item for review
+    expect(result.publish.status).toBe("review");
+    if (result.publish.status === "review") {
+      expect(result.publish.failures.map((f) => f.gate)).toContain("photo_quality");
     }
+    expect(deps.publishEbay).not.toHaveBeenCalled();
+  });
+});
+
+describe("runPipeline — guardrail routing", () => {
+  it("parks a low-confidence identification in review instead of posting", async () => {
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue({
+        ...identified,
+        confidence: 0.55,
+      }),
+    });
+    const result = await runPipeline(input, deps);
+
+    expect(result.publish.status).toBe("review");
+    if (result.publish.status === "review") {
+      expect(result.publish.failures).toEqual([
+        expect.objectContaining({ gate: "confidence" }),
+      ]);
+    }
+    // review is recorded on the item, and nothing was published anywhere
+    expect(deps.setReview).toHaveBeenCalledWith("user-1", "item-1", [
+      expect.objectContaining({ gate: "confidence" }),
+    ]);
+    expect(deps.publishEbay).not.toHaveBeenCalled();
+    expect(deps.recordListing).not.toHaveBeenCalled();
+    expect(deps.markListed).not.toHaveBeenCalled();
+
+    // but the draft and its price decision still persisted
+    expect(deps.createDraft).toHaveBeenCalled();
+    expect(deps.recordPrice).toHaveBeenCalled();
+  });
+
+  it("holds VeRO-listed brands for a human authenticity check", async () => {
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue({
+        ...identified,
+        extraction: {
+          ...extraction,
+          title: "Louis Vuitton Neverfull MM Tote",
+          brand: "Louis Vuitton",
+        },
+      }),
+    });
+    const result = await runPipeline(input, deps);
+    expect(result.publish.status).toBe("review");
+    if (result.publish.status === "review") {
+      expect(result.publish.failures.map((f) => f.gate)).toEqual(["vero_brand"]);
+    }
+  });
+
+  it("does not let guardrail review block the sandbox happy path", async () => {
+    const deps = fakeDeps();
+    const result = await runPipeline(input, deps);
+    expect(result.publish.status).toBe("live");
+    expect(deps.setReview).not.toHaveBeenCalled();
   });
 });
 

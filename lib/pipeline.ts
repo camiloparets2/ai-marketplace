@@ -16,8 +16,10 @@
 import { identifyItem } from "@/lib/ai/vision";
 import type { IdentifiedItem } from "@/lib/ai/vision";
 import { hostListingPhoto } from "@/lib/storage";
-import { createDraftItem, setItemPrice, recordLiveListing, markItemListed, recordPublishAttempt } from "@/lib/inventory";
+import { createDraftItem, setItemPrice, setItemReview, recordLiveListing, markItemListed, recordPublishAttempt } from "@/lib/inventory";
 import type { DraftItemInput, LiveListing } from "@/lib/inventory";
+import { evaluateGuardrails } from "@/lib/guardrails";
+import type { GuardrailVerdict } from "@/lib/guardrails";
 import { decidePrice, recordPriceDecision } from "@/lib/pricing";
 import type { PriceDecision, PriceRequest } from "@/lib/pricing";
 import { publishToEbay, buildEbayInventoryItemPayload } from "@/lib/platforms/ebay";
@@ -44,7 +46,13 @@ export type PipelinePublishOutcome =
   | { mode: PublishMode; status: "live"; url: string; listingId: string }
   | { mode: "dry_run"; status: "dry_run"; payload: EbayInventoryItemPayload }
   | { mode: PublishMode; status: "not_connected"; connectUrl: string }
-  | { mode: PublishMode; status: "error"; message: string };
+  | { mode: PublishMode; status: "error"; message: string }
+  // A guardrail failed — the item is parked in the review queue, unpublished.
+  | {
+      mode: PublishMode;
+      status: "review";
+      failures: Array<{ gate: string; reason: string }>;
+    };
 
 export interface PipelineResult {
   itemId: string;
@@ -84,6 +92,12 @@ export interface PipelineDeps {
     decision: PriceDecision
   ): Promise<void>;
   setPrice(userId: string, itemId: string, price: number): Promise<void>;
+  setReview(
+    userId: string,
+    itemId: string,
+    reasons: Array<{ gate: string; reason: string }>
+  ): Promise<void>;
+  guardrails(input: Parameters<typeof evaluateGuardrails>[0]): GuardrailVerdict;
   getEbayConnection(userId: string): Promise<PlatformConnection | null>;
   publishEbay(
     conn: PlatformConnection,
@@ -114,6 +128,8 @@ const defaultDeps: PipelineDeps = {
   price: decidePrice,
   recordPrice: recordPriceDecision,
   setPrice: setItemPrice,
+  setReview: setItemReview,
+  guardrails: evaluateGuardrails,
   getEbayConnection: (userId) => getConnection(userId, "ebay"),
   publishEbay: publishToEbay,
   recordListing: recordLiveListing,
@@ -183,8 +199,29 @@ export async function runPipeline(
     shippingCost: extraction.estimatedShippingCost,
   };
 
-  // 5. Publish — sandbox for real, dry-run when production isn't opted in.
-  const publish = await publishStep(input.userId, itemId, listing, photoUrl, photoError, deps);
+  // 5. Guardrails — the auto-post decision. ALL gates must pass; any failure
+  //    parks the item in the review queue instead of publishing (P0-5).
+  const verdict = deps.guardrails({
+    confidence: identified.confidence,
+    price: decision.price,
+    floor: decision.floor,
+    title: extraction.title,
+    brand: extraction.brand,
+    category: extraction.category,
+    specs: extraction.specs,
+    defects: identified.defects,
+    photoBytes: photoUrl === null ? null : bytes,
+  });
+
+  let publish: PipelinePublishOutcome;
+  if (!verdict.autoPost) {
+    const failures = verdict.failures.map(({ gate, reason }) => ({ gate, reason }));
+    await deps.setReview(input.userId, itemId, failures);
+    publish = { mode: deps.publishMode(), status: "review", failures };
+  } else {
+    // 6. Publish — sandbox for real, dry-run when production isn't opted in.
+    publish = await publishStep(input.userId, itemId, listing, photoUrl, photoError, deps);
+  }
 
   return {
     itemId,
