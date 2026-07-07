@@ -522,35 +522,8 @@ export async function archiveItem(userId: string, itemId: string): Promise<boole
   return (data?.length ?? 0) > 0;
 }
 
-// ─── Direct-sale webhook entry point ──────────────────────────────────────────
-
-/**
- * A Stripe payment-link checkout completed: find the listing, mark its item
- * sold, and end every other channel. Safe on replays — markItemSold is
- * idempotent and an already-ended listing set is a no-op.
- */
-export async function handleDirectSale(
-  paymentLinkId: string,
-  amountTotalCents: number | null
-): Promise<void> {
-  const { data: listing } = await getSupabaseAdmin()
-    .from("marketplace_listings")
-    .select("user_id, inventory_item_id")
-    .eq("platform", "direct")
-    .eq("external_id", paymentLinkId)
-    .maybeSingle<{ user_id: string; inventory_item_id: string }>();
-
-  if (!listing) {
-    // Payment links created via /api/create-link (legacy flow) have no
-    // inventory item — nothing to sync.
-    console.log(`[inventory] direct sale for untracked link ${paymentLinkId}`);
-    return;
-  }
-
-  await markItemSold(
-    listing.user_id,
-    listing.inventory_item_id,
-    "direct",
-    amountTotalCents !== null ? amountTotalCents / 100 : null
-  );
-}
+// Direct-sale webhook entry point moved to lib/sold-events.ts
+// (handleDirectSale) so Stripe sales flow through the same sold_events
+// queue — atomic claim, cross-channel delist, audit — as every other
+// platform. Keeping it here would create an import cycle (sold-events
+// already imports endOtherListings from this module).

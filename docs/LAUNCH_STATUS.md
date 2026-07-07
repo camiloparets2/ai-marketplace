@@ -77,6 +77,6 @@ See the defaults table in `docs/design/launch.md` — confidence 0.80, min_margi
 - `20260707300000_sold_events_audit.sql` (sold_events, pipeline_audit, claim_item_sale fn)
 
 ## Known follow-ups (deliberate stubs)
-- Oversell loser path logs + audits but does NOT yet call the platform cancel/refund API — operator acts on the `oos_cancel` audit row until wired.
-- eBay Notification API payloads are parsed tolerantly but signature verification of the webhook body is not yet implemented (endpoint is unguessable + challenge-verified; polling backstop covers gaps). Add signature checks before scale.
-- Direct (Stripe) sales still use the legacy `markItemSold` path — safe (idempotent) but bypasses the queue; migrate for uniform audit.
+- Oversell loser path logs + audits but does NOT yet call the platform cancel/refund API — operator acts on the `oos_cancel` audit row until wired. **Blocked on a supervised eBay sandbox session** (post-order v2 cancellation semantics need a live check before we trust code to cancel real orders).
+- eBay Notification API payload **signature verification** is not yet implemented (endpoint is unguessable + challenge-verified; polling backstop covers gaps). **Blocked on merging PR #4** — verifying signatures requires the app-token mint (`mintEbayAppToken`) that lives there to fetch eBay's public keys.
+- ~~Direct (Stripe) sales still use the legacy `markItemSold` path~~ **DONE (continuation run):** `handleDirectSale` moved to `lib/sold-events.ts` and routes through the queue — dedupe on the checkout *session* id (links are reusable), atomic claim, cross-channel delist incl. the payment link itself, uniform audit rows. 2 tests.

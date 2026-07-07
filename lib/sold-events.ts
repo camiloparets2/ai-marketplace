@@ -270,6 +270,54 @@ export async function processSoldEvent(
   }
 }
 
+// ─── Direct (Stripe) sale intake ──────────────────────────────────────────────
+
+/**
+ * A Stripe payment-link checkout completed. Routed through the same
+ * sold_events queue as every marketplace sale — atomic claim, cross-channel
+ * delist (including deactivating the payment link itself, per
+ * planEndListings' direct-platform rule), and audit rows.
+ *
+ * Dedupe key is the checkout SESSION id, not the payment-link id: links are
+ * reusable, sessions are one per sale, and Stripe retries redeliver the
+ * same session.
+ */
+export interface DirectSaleIO {
+  findOwner: typeof findListingOwner;
+  record: typeof recordSoldEvent;
+  process: (userId: string) => Promise<ProcessSummary>;
+}
+
+export async function handleDirectSale(
+  paymentLinkId: string,
+  checkoutSessionId: string,
+  amountTotalCents: number | null,
+  io: DirectSaleIO = {
+    findOwner: findListingOwner,
+    record: recordSoldEvent,
+    process: (userId) => processPendingSoldEvents(userId),
+  }
+): Promise<void> {
+  const owner = await io.findOwner("direct", paymentLinkId, null);
+  if (!owner) {
+    // Payment links created via /api/create-link (legacy flow) have no
+    // inventory item — nothing to sync.
+    console.log(`[sold-events] direct sale for untracked link ${paymentLinkId}`);
+    return;
+  }
+
+  await io.record({
+    userId: owner.userId,
+    platform: "direct",
+    externalOrderId: checkoutSessionId,
+    listingExternalId: paymentLinkId,
+    sku: null,
+    salePrice: amountTotalCents !== null ? amountTotalCents / 100 : null,
+    source: "webhook",
+  });
+  await io.process(owner.userId);
+}
+
 /**
  * Drain pending events (optionally for one user). Events are independent —
  * a failure marks that event 'error' and the rest continue.

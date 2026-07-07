@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { processSoldEvent, processPendingSoldEvents } from "./sold-events";
-import type { SoldEventDeps, SoldEventRow } from "./sold-events";
+import {
+  processSoldEvent,
+  processPendingSoldEvents,
+  handleDirectSale,
+} from "./sold-events";
+import type { SoldEventDeps, SoldEventRow, DirectSaleIO } from "./sold-events";
 
 function event(over: Partial<SoldEventRow> = {}): SoldEventRow {
   return {
@@ -124,6 +128,43 @@ describe("double-sale race (the core anti-oversell promise)", () => {
     const replay = await processSoldEvent(event({ id: 3 }), deps);
     expect(replay).toBe("oversold");
     expect(deps.endOthers).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("handleDirectSale (Stripe → queue)", () => {
+  function io(over: Partial<DirectSaleIO> = {}): DirectSaleIO {
+    return {
+      findOwner: vi
+        .fn()
+        .mockResolvedValue({ userId: "user-1", inventoryItemId: "item-1" }),
+      record: vi.fn().mockResolvedValue(1),
+      process: vi
+        .fn()
+        .mockResolvedValue({ processed: 1, oversold: 0, unmatched: 0, errors: 0 }),
+      ...over,
+    };
+  }
+
+  it("enqueues on the checkout session id (links are reusable) and drains", async () => {
+    const deps = io();
+    await handleDirectSale("plink_1", "cs_123", 4999, deps);
+    expect(deps.record).toHaveBeenCalledWith({
+      userId: "user-1",
+      platform: "direct",
+      externalOrderId: "cs_123",
+      listingExternalId: "plink_1",
+      sku: null,
+      salePrice: 49.99,
+      source: "webhook",
+    });
+    expect(deps.process).toHaveBeenCalledWith("user-1");
+  });
+
+  it("ignores untracked legacy payment links", async () => {
+    const deps = io({ findOwner: vi.fn().mockResolvedValue(null) });
+    await handleDirectSale("plink_legacy", "cs_1", 1000, deps);
+    expect(deps.record).not.toHaveBeenCalled();
+    expect(deps.process).not.toHaveBeenCalled();
   });
 });
 
