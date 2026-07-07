@@ -9,6 +9,10 @@
 //       → archive the item (no marketplace calls)
 //   { action: "set_cost", costOfGoods: number }
 //       → record what the item cost — feeds profit analytics
+//   { action: "approve", price?: number }
+//       → release a guardrail-held item from review and publish it
+//   { action: "reject" }
+//       → archive a guardrail-held item, never publish
 //
 // Sold/delist are idempotent: repeating retries any listing whose end failed.
 
@@ -21,13 +25,17 @@ import {
   delistItem,
   archiveItem,
   setItemCost,
+  rejectItemFromReview,
 } from "@/lib/inventory";
+import { approveAndPublish } from "@/lib/pipeline";
+import { recordAudit } from "@/lib/audit";
 
 interface ActionBody {
   action?: unknown;
   platform?: unknown;
   soldPrice?: unknown;
   costOfGoods?: unknown;
+  price?: unknown;
 }
 
 export async function POST(
@@ -97,9 +105,34 @@ export async function POST(
         }
         return NextResponse.json({ ok: true, endResults: [] });
       }
+      case "approve": {
+        const price =
+          typeof body.price === "number" && isFinite(body.price) && body.price > 0
+            ? body.price
+            : null;
+        const result = await approveAndPublish(user.id, id, price);
+        if (!result.ok) {
+          return NextResponse.json({ error: result.error }, { status: 400 });
+        }
+        return NextResponse.json(result);
+      }
+      case "reject": {
+        const ok = await rejectItemFromReview(user.id, id);
+        if (!ok) {
+          return NextResponse.json(
+            { error: "Item is not awaiting review" },
+            { status: 400 }
+          );
+        }
+        await recordAudit(user.id, id, "review_reject", null, {});
+        return NextResponse.json({ ok: true });
+      }
       default:
         return NextResponse.json(
-          { error: "action must be sold, delist, archive, or set_cost" },
+          {
+            error:
+              "action must be sold, delist, archive, set_cost, approve, or reject",
+          },
           { status: 400 }
         );
     }

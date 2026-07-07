@@ -25,6 +25,7 @@ interface Item {
   price: number | null;
   cost_of_goods: number | null;
   status: "draft" | "review" | "listed" | "sold" | "archived";
+  review_reasons: Array<{ gate: string; reason: string }>;
   sold_at: string | null;
   sold_price: number | null;
   sold_platform: string | null;
@@ -340,7 +341,37 @@ export default function InventoryPage() {
                 </div>
               )}
 
-              {item.status !== "archived" && (
+              {/* Review queue: why the item is held + the human decision */}
+              {item.status === "review" && (
+                <div className="rounded-lg bg-amber-50 border border-amber-200 p-2.5 space-y-1.5">
+                  <p className="text-xs font-medium text-amber-800">
+                    Held for review — not posted:
+                  </p>
+                  <ul className="text-xs text-amber-700 list-disc pl-4 space-y-0.5">
+                    {(item.review_reasons ?? []).map((r) => (
+                      <li key={r.gate}>{r.reason}</li>
+                    ))}
+                  </ul>
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      onClick={() => void runAction(item.id, { action: "approve" })}
+                      disabled={busyItem === item.id}
+                      className="flex-1 py-1.5 rounded-lg bg-blue-600 text-white font-medium text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                    >
+                      {busyItem === item.id ? "Working..." : "Approve & post"}
+                    </button>
+                    <button
+                      onClick={() => void runAction(item.id, { action: "reject" })}
+                      disabled={busyItem === item.id}
+                      className="flex-1 py-1.5 rounded-lg border border-gray-200 text-gray-600 font-medium text-sm hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {item.status !== "archived" && item.status !== "review" && (
                 <div className="flex gap-2">
                   {item.status !== "sold" && (
                     <>

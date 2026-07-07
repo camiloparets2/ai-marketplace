@@ -16,8 +16,8 @@
 import { identifyItem } from "@/lib/ai/vision";
 import type { IdentifiedItem } from "@/lib/ai/vision";
 import { hostListingPhoto } from "@/lib/storage";
-import { createDraftItem, setItemPrice, setItemReview, recordLiveListing, markItemListed, recordPublishAttempt } from "@/lib/inventory";
-import type { DraftItemInput, LiveListing } from "@/lib/inventory";
+import { createDraftItem, setItemPrice, setItemReview, recordLiveListing, markItemListed, recordPublishAttempt, getItemDetail, approveItemFromReview } from "@/lib/inventory";
+import type { DraftItemInput, LiveListing, ItemDetailRow } from "@/lib/inventory";
 import { evaluateGuardrails } from "@/lib/guardrails";
 import type { GuardrailVerdict } from "@/lib/guardrails";
 import { recordAudit } from "@/lib/audit";
@@ -133,6 +133,8 @@ export interface PipelineDeps {
     mimeType: AcceptedMimeType
   ): Promise<EtsyPublishResult>;
   route(extraction: Parameters<typeof routeChannels>[0]): RoutingDecision;
+  getItem(userId: string, itemId: string): Promise<ItemDetailRow | null>;
+  approveReview(userId: string, itemId: string): Promise<boolean>;
   recordListing(
     userId: string,
     itemId: string,
@@ -174,6 +176,8 @@ const defaultDeps: PipelineDeps = {
   getEtsyConnection: (userId) => getConnection(userId, "etsy"),
   publishEtsy: publishToEtsy,
   route: routeChannels,
+  getItem: getItemDetail,
+  approveReview: approveItemFromReview,
   recordListing: recordLiveListing,
   markListed: markItemListed,
   recordAttempt: recordPublishAttempt,
@@ -289,6 +293,82 @@ export async function runPipeline(
     publish,
     ...(etsy ? { etsy } : {}),
   };
+}
+
+// ─── Review-queue approval (P1-2) ─────────────────────────────────────────────
+
+const CONDITIONS: ReadonlyArray<ListingInput["condition"]> = [
+  "New",
+  "Like New",
+  "Very Good",
+  "Good",
+  "Acceptable",
+];
+
+export type ApproveResult =
+  | { ok: true; publish: PipelinePublishOutcome }
+  | { ok: false; error: string };
+
+/**
+ * A human approved a guardrail-held item: release it from review and publish
+ * through the same (sandbox/dry-run-safe) publish step. Guardrails are NOT
+ * re-run — approval IS the human override. An optional price override is
+ * recorded in price_history like any other decision.
+ */
+export async function approveAndPublish(
+  userId: string,
+  itemId: string,
+  overridePrice: number | null = null,
+  deps: PipelineDeps = defaultDeps
+): Promise<ApproveResult> {
+  const item = await deps.getItem(userId, itemId);
+  if (!item) return { ok: false, error: "Item not found" };
+  if (item.status !== "review") {
+    return { ok: false, error: "Item is not awaiting review" };
+  }
+
+  const price = overridePrice ?? item.price;
+  if (price === null || price <= 0) {
+    return { ok: false, error: "Set a price before approving" };
+  }
+  if (overridePrice !== null) {
+    await deps.setPrice(userId, itemId, overridePrice);
+    await deps.recordPrice(userId, itemId, {
+      price: overridePrice,
+      floor: overridePrice,
+      strategy: "user_target",
+      rationale: "Review-queue approval with a manual price override.",
+      inputs: { targetPrice: overridePrice },
+    });
+  }
+
+  const released = await deps.approveReview(userId, itemId);
+  if (!released) return { ok: false, error: "Item is not awaiting review" };
+  await deps.audit(userId, itemId, "review_approve", null, { price });
+
+  const listing: ListingInput = {
+    title: item.title,
+    brand: item.brand,
+    model: item.model,
+    upc: item.upc,
+    condition: CONDITIONS.includes(item.condition as ListingInput["condition"])
+      ? (item.condition as ListingInput["condition"])
+      : "Good",
+    category: item.category ?? "",
+    specs: item.specs ?? {},
+    price,
+    shippingCost: null,
+  };
+
+  const publish = await publishStep(
+    userId,
+    itemId,
+    listing,
+    item.photo_url,
+    item.photo_url === null ? "no stored photo for this item" : null,
+    deps
+  );
+  return { ok: true, publish };
 }
 
 // The optional Etsy leg. Etsy has no sandbox environment, so a real Etsy

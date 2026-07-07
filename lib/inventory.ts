@@ -46,6 +46,8 @@ export interface InventoryItemRow {
   price: number | null;
   cost_of_goods: number | null;
   status: "draft" | "review" | "listed" | "sold" | "archived";
+  // why the guardrails held this item (empty unless status === "review")
+  review_reasons: Array<{ gate: string; reason: string }>;
   sold_at: string | null;
   sold_price: number | null;
   sold_platform: string | null;
@@ -124,6 +126,70 @@ export async function setItemReview(
     .eq("user_id", userId)
     .eq("status", "draft");
   if (error) throw new Error(`set review failed: ${error.message}`);
+}
+
+/** Full item detail — what the review queue and approval publish need. */
+export interface ItemDetailRow {
+  id: string;
+  title: string;
+  brand: string | null;
+  model: string | null;
+  upc: string | null;
+  condition: string;
+  category: string | null;
+  specs: Record<string, string>;
+  photo_url: string | null;
+  price: number | null;
+  status: "draft" | "review" | "listed" | "sold" | "archived";
+  review_reasons: Array<{ gate: string; reason: string }>;
+}
+
+export async function getItemDetail(
+  userId: string,
+  itemId: string
+): Promise<ItemDetailRow | null> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .select(
+      "id, title, brand, model, upc, condition, category, specs, photo_url, price, status, review_reasons"
+    )
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .maybeSingle<ItemDetailRow>();
+  if (error) throw new Error(`item detail read failed: ${error.message}`);
+  return data;
+}
+
+/** Human approved a held item — release it back to draft for publishing. */
+export async function approveItemFromReview(
+  userId: string,
+  itemId: string
+): Promise<boolean> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({ status: "draft", updated_at: new Date().toISOString() })
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .eq("status", "review")
+    .select("id");
+  if (error) throw new Error(`approve failed: ${error.message}`);
+  return (data?.length ?? 0) > 0;
+}
+
+/** Human rejected a held item — archive it, never publish. */
+export async function rejectItemFromReview(
+  userId: string,
+  itemId: string
+): Promise<boolean> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({ status: "archived", updated_at: new Date().toISOString() })
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .eq("status", "review")
+    .select("id");
+  if (error) throw new Error(`reject failed: ${error.message}`);
+  return (data?.length ?? 0) > 0;
 }
 
 /** Stamp the pricing engine's decision onto the item. */
@@ -220,7 +286,7 @@ export async function listInventory(userId: string): Promise<InventoryItemRow[]>
   const { data: items, error } = await supabase
     .from("inventory_items")
     .select(
-      "id, title, condition, photo_url, quantity, price, cost_of_goods, status, sold_at, sold_price, sold_platform, created_at"
+      "id, title, condition, photo_url, quantity, price, cost_of_goods, status, review_reasons, sold_at, sold_price, sold_platform, created_at"
     )
     .eq("user_id", userId)
     .order("created_at", { ascending: false })

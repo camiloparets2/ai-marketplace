@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { runPipeline, resolvePublishMode } from "./pipeline";
+import { runPipeline, approveAndPublish, resolvePublishMode } from "./pipeline";
 import type { PipelineDeps, PipelineInput } from "./pipeline";
 import type { IdentifiedItem } from "@/lib/ai/vision";
 import type { ExtractionResult } from "@/lib/types/extraction";
@@ -92,6 +92,21 @@ function fakeDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
       shopId: "shop-1",
     }),
     route: routeChannels,
+    getItem: vi.fn().mockResolvedValue({
+      id: "item-1",
+      title: "Sony WH-1000XM4 Wireless Headphones",
+      brand: "Sony",
+      model: "WH-1000XM4",
+      upc: null,
+      condition: "Very Good",
+      category: "Electronics > Headphones",
+      specs: { Color: "Black" },
+      photo_url: "https://cdn.example/p.jpg",
+      price: 94.99,
+      status: "review",
+      review_reasons: [{ gate: "confidence", reason: "low" }],
+    }),
+    approveReview: vi.fn().mockResolvedValue(true),
     publishMode: () => "sandbox" as const,
     ...over,
   };
@@ -345,6 +360,52 @@ describe("runPipeline — channel routing enforcement", () => {
     });
     const result = await runPipeline(input, deps);
     expect(result.etsy).toMatchObject({ status: "not_connected" });
+  });
+});
+
+describe("approveAndPublish — the review queue's human override", () => {
+  it("releases the item and publishes without re-running guardrails", async () => {
+    const deps = fakeDeps();
+    const result = await approveAndPublish("user-1", "item-1", null, deps);
+
+    expect(result.ok).toBe(true);
+    expect(deps.approveReview).toHaveBeenCalledWith("user-1", "item-1");
+    expect(deps.audit).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "review_approve",
+      null,
+      { price: 94.99 }
+    );
+    expect(deps.publishEbay).toHaveBeenCalled();
+    if (result.ok) expect(result.publish.status).toBe("live");
+  });
+
+  it("records a manual price override in price_history", async () => {
+    const deps = fakeDeps();
+    await approveAndPublish("user-1", "item-1", 120, deps);
+    expect(deps.setPrice).toHaveBeenCalledWith("user-1", "item-1", 120);
+    expect(deps.recordPrice).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      expect.objectContaining({ strategy: "user_target", price: 120 })
+    );
+  });
+
+  it("refuses items that are not in review or have no price", async () => {
+    const listed = fakeDeps({
+      getItem: vi.fn().mockResolvedValue({ status: "listed", price: 10 }),
+    });
+    expect((await approveAndPublish("user-1", "item-1", null, listed)).ok).toBe(false);
+
+    const unpriced = fakeDeps({
+      getItem: vi
+        .fn()
+        .mockResolvedValue({ status: "review", price: null, review_reasons: [] }),
+    });
+    const result = await approveAndPublish("user-1", "item-1", null, unpriced);
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("price") });
+    expect(unpriced.publishEbay).not.toHaveBeenCalled();
   });
 });
 

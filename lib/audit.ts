@@ -9,7 +9,9 @@ export type AuditAction =
   | "auto_delist"
   | "sold_event"
   | "oos_cancel"
-  | "review_hold";
+  | "review_hold"
+  | "review_approve"
+  | "review_reject";
 
 export async function recordAudit(
   userId: string,
