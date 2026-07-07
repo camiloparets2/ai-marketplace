@@ -4,7 +4,7 @@
 > from the first unchecked item in the highest-priority section.
 > Design doc: `docs/design/launch.md`.
 
-**Last updated:** 2026-07-07 · Phase 0 complete (audit + docs)
+**Last updated:** 2026-07-07 · Phase 1 complete (happy path, PR pending merge)
 
 ## Pipeline stage status
 
@@ -19,10 +19,10 @@
 ## Gap list (work top to bottom)
 
 ### P0 — launch blockers
-- [ ] **P0-1** `lib/ai/vision.ts`: single Vision entry point returning title, brand, model, category, condition grade, defects[], confidence 0–1 (route refactored onto it) — *Phase 1*
-- [ ] **P0-2** Persist identified item to `inventory_items` (status `draft`) at intake, incl. cost-basis field — *Phase 1*
-- [ ] **P0-3** Pricing engine: floor = cost_basis + fees + shipping + min_margin; strategy per item; write price + rationale to new `price_history` table — *Phase 1*
-- [ ] **P0-4** eBay payload build + publish against Sandbox/dry-run (`PIPELINE_LIVE_PUBLISH` default off); save listing id to `marketplace_listings` status live — *Phase 1*
+- [x] **P0-1** `lib/ai/vision.ts` Vision entry point (defects[], min-of-critical-fields confidence 0–1); /api/analyze refactored onto it; 8 tests — *Phase 1 ✅*
+- [x] **P0-2** `createDraftItem` persists at intake (defects, id_confidence, cost basis; `price` now nullable; `review` status added). Migration `20260707100000_pipeline_intake.sql` — **repo only, NOT yet applied to the live DB** — *Phase 1 ✅*
+- [x] **P0-3** `lib/pricing.ts`: floor = cost+fees+shipping+max($3,15%); strategies user_target/floor_markup; `price_history` rows w/ rationale + inputs; 8 tests — *Phase 1 ✅*
+- [x] **P0-4** `lib/pipeline.ts` + `POST /api/pipeline`: identify → draft → price → publish. Sandbox real, production **dry-run unless `PIPELINE_LIVE_PUBLISH=true`** (ships off). Pure eBay payload builders extracted + tested; 7 pipeline tests — *Phase 1 ✅*
 - [ ] **P0-5** Auto-post guardrails (confidence ≥0.80, price ≥ floor + sane range, prohibited-item check, VeRO flag, photo quality bar) → all-pass publishes, any-fail → `status=review`; tests per gate — *Phase 2*
 - [ ] **P0-6** eBay order event intake normalized into new `sold_events` queue (polling backstop feeds it too) — *Phase 3*
 - [ ] **P0-7** Atomic DB-locked sold transition, qty decrement, delist-all at 0, double-sale race: first committed wins, loser → out-of-stock cancel/refund stub; race test — *Phase 3*
@@ -54,4 +54,8 @@ See the defaults table in `docs/design/launch.md` — confidence 0.80, min_margi
 - Stripe: webhook endpoint + one test-mode subscription
 
 ## PRs opened this run
-- (Phase 0) `chore/launch-audit` — this audit + design doc
+- (Phase 0) `chore/launch-audit` — audit + design doc (PR #6)
+- (Phase 1) `feature/pipeline-happy-path` — vision wrapper, intake persistence, pricing engine, auto-list pipeline (stacked on #6)
+
+## New migrations awaiting live apply
+- `20260707100000_pipeline_intake.sql` (price nullable, defects/id_confidence, review status, price_history)
