@@ -29,6 +29,7 @@ import {
 } from "@/lib/inventory";
 import { approveAndPublish } from "@/lib/pipeline";
 import { recordAudit } from "@/lib/audit";
+import { trackEvent } from "@/lib/telemetry";
 
 interface ActionBody {
   action?: unknown;
@@ -72,6 +73,11 @@ export async function POST(
         if (!result) {
           return NextResponse.json({ error: "Item not found" }, { status: 404 });
         }
+        await trackEvent(user.id, "item_sold", {
+          itemId: id,
+          platform: body.platform,
+          endOk: result.ok,
+        });
         return NextResponse.json(result);
       }
       case "delist": {
@@ -79,6 +85,10 @@ export async function POST(
         if (!result) {
           return NextResponse.json({ error: "Item not found" }, { status: 404 });
         }
+        await trackEvent(user.id, "item_delisted", {
+          itemId: id,
+          endOk: result.ok,
+        });
         return NextResponse.json(result);
       }
       case "archive": {

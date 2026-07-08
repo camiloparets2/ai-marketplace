@@ -32,8 +32,9 @@ Stripe webhook endpoint + `STRIPE_WEBHOOK_SECRET`, then one end-to-end test-mode
 ### [ ] 4. Marketplace approvals
 eBay production keyset (test in SANDBOX first), Etsy API key, Shopify app credentials. Reconnect any early-connected accounts (new OAuth scopes for sale polling).
 
-### [ ] 5. Error monitoring + product analytics
-Add Sentry (or Vercel's error monitoring) for auth/AI/marketplace/Stripe failures, and PostHog for the core funnel (photo → draft → publish → sale). Roadmap Gate 2 requirement; currently only console logs + Vercel logs exist.
+### [~] 5. Error monitoring + product analytics — EVENT TRACKING BUILT
+**Done:** `app_events` table + `lib/telemetry.ts` capture the full funnel server-side: `sign_in`, `draft_created`/`draft_failed`, `published` (+ per-channel `publish_error`), `item_sold`/`item_delisted`, `direct_sale`, `credits_granted`. Fire-and-forget (never breaks a flow), safe payloads only; query with SQL (sample in `lib/telemetry.ts`).
+**Optional upgrades for dashboards/alerts without SQL:** PostHog for funnel charts (free tier, ~1h to wire) and Sentry for stack-trace alerting — Vercel logs + the failure events cover the basics meanwhile.
 
 ### [ ] 6. Ops basics before ads
 Supabase backup schedule (PITR or daily dumps), a rollback note (Vercel instant rollback + `git revert`), spend alerts: Anthropic ($25 soft/$50 hard — see Phase 1 list), Stripe email alerts, Vercel usage alerts.

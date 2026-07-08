@@ -12,6 +12,7 @@ import { randomUUID } from "crypto";
 import { spendCredits, refundCredits } from "@/lib/billing/credits";
 import { CREDIT_COST_AI_EXTRACTION } from "@/lib/billing/plans";
 import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
+import { trackEvent } from "@/lib/telemetry";
 
 // ─── Error shape ──────────────────────────────────────────────────────────────
 
@@ -167,9 +168,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const shippingRate = getShippingRate(extracted.suggestedShippingService);
     extracted.estimatedShippingCost = shippingRate.cost;
 
+    await trackEvent(user?.id ?? null, "draft_created", { requestId });
     return NextResponse.json(extracted);
   } catch (err) {
     await refund();
+    await trackEvent(user?.id ?? null, "draft_failed", { requestId });
 
     if (err instanceof VisionError) {
       const status =

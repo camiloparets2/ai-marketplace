@@ -30,6 +30,7 @@ import { publishToShopify } from "@/lib/platforms/shopify";
 import { createPaymentLink } from "@/lib/stripe-link";
 import { authenticateRequest } from "@/lib/auth/guard";
 import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
+import { trackEvent } from "@/lib/telemetry";
 import {
   createInventoryItem,
   recordLiveListing,
@@ -299,6 +300,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     } catch (err) {
       console.error("[publish] inventory recording failed:", err);
+    }
+  }
+
+  // Funnel: one event per publish run, plus one per failed target so
+  // channel-level breakage is queryable.
+  const liveCount = results.filter((r) => r.status === "live").length;
+  await trackEvent(user?.id ?? null, "published", {
+    targets,
+    liveCount,
+    inventoryItemId,
+  });
+  for (const result of results) {
+    if (result.status === "error") {
+      await trackEvent(user?.id ?? null, "publish_error", {
+        platform: result.platform,
+        message: result.message,
+      });
     }
   }
 
