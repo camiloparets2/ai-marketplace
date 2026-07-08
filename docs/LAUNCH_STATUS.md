@@ -14,7 +14,7 @@
 | Identify | 🟡 | Claude Vision tool_use, per-field confidence | `lib/ai/vision.ts` wrapper w/ confidence 0–1 + defects (P0-1); persist at intake (P0-2) |
 | Price | 🔴 | nothing (user types price) | floor engine + `price_history` (P0-3); comps + cost-basis intake (P1) |
 | List | 🟡 | full eBay/Etsy/Shopify publishers, tested | dry-run mode (P0-4); guardrails + review status (P0-5); routing table (P1) |
-| Sync/Delist | 🟡 | polling sync, idempotent markItemSold, cross-channel ends | `sold_events` queue + webhook intake (P0-6); atomic transition + race handling (P0-7); `pipeline_audit` (P0-8) |
+| Sync/Delist | 🟢 | real eBay Fulfillment `getOrders` sold-detection (`fetchEbaySales`, PAID-only) → `sold_events` queue → atomic `claim_item_sale` (first-commit-wins) → cross-channel delist + `pipeline_audit`; cron `/api/sync/orders` + webhook intake; e2e regression test | live push-notification subscription (optional); oversell cancel/refund is a stub |
 
 ## Gap list (work top to bottom)
 
