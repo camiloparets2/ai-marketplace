@@ -11,6 +11,7 @@ import {
   isSupabaseAuthConfigured,
 } from "@/lib/supabase/client";
 import { safeNextPath } from "@/lib/auth/redirect";
+import { friendlyAuthError } from "@/lib/auth/errors";
 import { BrandWordmark } from "@/app/brand";
 
 const inputClass =
@@ -50,8 +51,9 @@ function LoginForm() {
       },
     });
     // On success the browser navigates away; only errors reach here.
+    // A disabled provider / misconfig gets friendly copy; real errors pass through.
     if (err) {
-      setError(err.message);
+      setError(friendlyAuthError(err.message, "google"));
       setBusy(false);
     }
   }
