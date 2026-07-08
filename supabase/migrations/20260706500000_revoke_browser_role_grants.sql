@@ -4,10 +4,10 @@
 -- too (Supabase advisor lints 0026/0027). All access goes through server API
 -- routes using the service role.
 --
--- NOTE: the six launch migrations before this one were applied to the
--- production project (eunnwzggubyhvvatxnyy) via the Supabase connector on
--- 2026-07-06. This revoke is the only one still pending there — apply it
--- with `supabase db push` or paste into the SQL editor.
+-- Applied to the production project (eunnwzggubyhvvatxnyy) on 2026-07-06 as
+-- remote migration 20260706203320_snap_revoke_browser_role_grants, alongside
+-- the six launch migrations before it. Advisor before/after comparison lives
+-- in docs/design/supabase-hardening.md.
 
 revoke all on table
   public.platform_connections,
