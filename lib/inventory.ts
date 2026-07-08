@@ -7,6 +7,7 @@
 // this module executes them against eBay/Etsy/Stripe.
 
 import { getSupabaseAdmin, getConnection } from "@/lib/connections";
+import { recordAudit } from "@/lib/audit";
 import { endEbayListing } from "@/lib/platforms/ebay";
 import { endEtsyListing } from "@/lib/platforms/etsy";
 import { endShopifyListing } from "@/lib/platforms/shopify";
@@ -41,9 +42,12 @@ export interface InventoryItemRow {
   condition: string;
   photo_url: string | null;
   quantity: number;
-  price: number;
+  // null until the pricing engine (or the seller) prices the draft
+  price: number | null;
   cost_of_goods: number | null;
-  status: "draft" | "listed" | "sold" | "archived";
+  status: "draft" | "review" | "listed" | "sold" | "archived";
+  // why the guardrails held this item (empty unless status === "review")
+  review_reasons: Array<{ gate: string; reason: string }>;
   sold_at: string | null;
   sold_price: number | null;
   sold_platform: string | null;
@@ -55,6 +59,151 @@ export interface EndResult {
   platform: string;
   ok: boolean;
   error?: string;
+}
+
+// ─── Intake (called from the auto-list pipeline the moment identification
+//     succeeds — before any price exists) ─────────────────────────────────────
+
+export interface DraftItemInput {
+  title: string;
+  brand: string | null;
+  model: string | null;
+  upc: string | null;
+  condition: string;
+  category: string;
+  specs: Record<string, string>;
+  defects: string[];
+  // 0-1 from lib/ai/vision.ts
+  idConfidence: number;
+  costOfGoods: number | null;
+}
+
+export async function createDraftItem(
+  userId: string,
+  input: DraftItemInput,
+  photoUrl: string | null
+): Promise<string> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .insert({
+      user_id: userId,
+      title: input.title,
+      brand: input.brand,
+      model: input.model,
+      upc: input.upc,
+      condition: input.condition,
+      category: input.category,
+      specs: input.specs,
+      defects: input.defects,
+      id_confidence: input.idConfidence,
+      cost_of_goods: input.costOfGoods,
+      photo_url: photoUrl,
+    })
+    .select("id")
+    .single<{ id: string }>();
+  if (error) throw new Error(`draft item insert failed: ${error.message}`);
+  return data.id;
+}
+
+/**
+ * Route an item to the human review queue with the guardrail failures that
+ * put it there (P0-5). Only drafts move — an already-listed/sold item is
+ * never pulled back into review by a late pipeline retry.
+ */
+export async function setItemReview(
+  userId: string,
+  itemId: string,
+  reasons: Array<{ gate: string; reason: string }>
+): Promise<void> {
+  const { error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({
+      status: "review",
+      review_reasons: reasons,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .eq("status", "draft");
+  if (error) throw new Error(`set review failed: ${error.message}`);
+}
+
+/** Full item detail — what the review queue and approval publish need. */
+export interface ItemDetailRow {
+  id: string;
+  title: string;
+  brand: string | null;
+  model: string | null;
+  upc: string | null;
+  condition: string;
+  category: string | null;
+  specs: Record<string, string>;
+  photo_url: string | null;
+  price: number | null;
+  status: "draft" | "review" | "listed" | "sold" | "archived";
+  review_reasons: Array<{ gate: string; reason: string }>;
+}
+
+export async function getItemDetail(
+  userId: string,
+  itemId: string
+): Promise<ItemDetailRow | null> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .select(
+      "id, title, brand, model, upc, condition, category, specs, photo_url, price, status, review_reasons"
+    )
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .maybeSingle<ItemDetailRow>();
+  if (error) throw new Error(`item detail read failed: ${error.message}`);
+  return data;
+}
+
+/** Human approved a held item — release it back to draft for publishing. */
+export async function approveItemFromReview(
+  userId: string,
+  itemId: string
+): Promise<boolean> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({ status: "draft", updated_at: new Date().toISOString() })
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .eq("status", "review")
+    .select("id");
+  if (error) throw new Error(`approve failed: ${error.message}`);
+  return (data?.length ?? 0) > 0;
+}
+
+/** Human rejected a held item — archive it, never publish. */
+export async function rejectItemFromReview(
+  userId: string,
+  itemId: string
+): Promise<boolean> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({ status: "archived", updated_at: new Date().toISOString() })
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .eq("status", "review")
+    .select("id");
+  if (error) throw new Error(`reject failed: ${error.message}`);
+  return (data?.length ?? 0) > 0;
+}
+
+/** Stamp the pricing engine's decision onto the item. */
+export async function setItemPrice(
+  userId: string,
+  itemId: string,
+  price: number
+): Promise<void> {
+  const { error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({ price, updated_at: new Date().toISOString() })
+    .eq("id", itemId)
+    .eq("user_id", userId);
+  if (error) throw new Error(`set price failed: ${error.message}`);
 }
 
 // ─── Creation (called from the publish fan-out) ───────────────────────────────
@@ -137,7 +286,7 @@ export async function listInventory(userId: string): Promise<InventoryItemRow[]>
   const { data: items, error } = await supabase
     .from("inventory_items")
     .select(
-      "id, title, condition, photo_url, quantity, price, cost_of_goods, status, sold_at, sold_price, sold_platform, created_at"
+      "id, title, condition, photo_url, quantity, price, cost_of_goods, status, review_reasons, sold_at, sold_price, sold_platform, created_at"
     )
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
@@ -206,6 +355,7 @@ async function endOneListing(userId: string, listing: ListingRow): Promise<void>
 
 async function endListings(
   userId: string,
+  itemId: string,
   listings: ListingRow[],
   soldPlatform: string | null
 ): Promise<EndResult[]> {
@@ -235,6 +385,11 @@ async function endListings(
             last_error: null,
           })
           .eq("id", listing.id);
+        // P0-8: every automated delist leaves an audit row.
+        await recordAudit(userId, itemId, "auto_delist", listing.platform, {
+          listingId: listing.external_id,
+          trigger: soldPlatform ? `sold on ${soldPlatform}` : "delist",
+        });
         results.push({ platform: listing.platform, ok: true });
       } catch (err) {
         const message = err instanceof Error ? err.message : "end failed";
@@ -302,8 +457,23 @@ export async function markItemSold(
     if (error) throw new Error(`mark sold failed: ${error.message}`);
   }
 
-  const endResults = await endListings(userId, item.listings, soldPlatform);
+  const endResults = await endListings(userId, itemId, item.listings, soldPlatform);
   return { ok: endResults.every((r) => r.ok), endResults };
+}
+
+/**
+ * End every listing on channels other than the one that sold (P0-7's
+ * delist-everywhere step). Used by the sold_events processor after a won
+ * claim; the claim itself already stamped the sale facts atomically.
+ */
+export async function endOtherListings(
+  userId: string,
+  itemId: string,
+  soldPlatform: string
+): Promise<EndResult[]> {
+  const item = await getItemWithListings(userId, itemId);
+  if (!item) return [];
+  return endListings(userId, itemId, item.listings, soldPlatform);
 }
 
 /** End all listings without a sale (pull the item back to draft). */
@@ -314,7 +484,7 @@ export async function delistItem(
   const item = await getItemWithListings(userId, itemId);
   if (!item) return null;
 
-  const endResults = await endListings(userId, item.listings, null);
+  const endResults = await endListings(userId, itemId, item.listings, null);
   if (endResults.every((r) => r.ok) && item.status === "listed") {
     await getSupabaseAdmin()
       .from("inventory_items")
@@ -352,35 +522,8 @@ export async function archiveItem(userId: string, itemId: string): Promise<boole
   return (data?.length ?? 0) > 0;
 }
 
-// ─── Direct-sale webhook entry point ──────────────────────────────────────────
-
-/**
- * A Stripe payment-link checkout completed: find the listing, mark its item
- * sold, and end every other channel. Safe on replays — markItemSold is
- * idempotent and an already-ended listing set is a no-op.
- */
-export async function handleDirectSale(
-  paymentLinkId: string,
-  amountTotalCents: number | null
-): Promise<void> {
-  const { data: listing } = await getSupabaseAdmin()
-    .from("marketplace_listings")
-    .select("user_id, inventory_item_id")
-    .eq("platform", "direct")
-    .eq("external_id", paymentLinkId)
-    .maybeSingle<{ user_id: string; inventory_item_id: string }>();
-
-  if (!listing) {
-    // Payment links created via /api/create-link (legacy flow) have no
-    // inventory item — nothing to sync.
-    console.log(`[inventory] direct sale for untracked link ${paymentLinkId}`);
-    return;
-  }
-
-  await markItemSold(
-    listing.user_id,
-    listing.inventory_item_id,
-    "direct",
-    amountTotalCents !== null ? amountTotalCents / 100 : null
-  );
-}
+// Direct-sale webhook entry point moved to lib/sold-events.ts
+// (handleDirectSale) so Stripe sales flow through the same sold_events
+// queue — atomic claim, cross-channel delist, audit — as every other
+// platform. Keeping it here would create an import cycle (sold-events
+// already imports endOtherListings from this module).

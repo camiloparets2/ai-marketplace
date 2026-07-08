@@ -11,6 +11,7 @@ import {
   isSupabaseAuthConfigured,
 } from "@/lib/supabase/client";
 import { safeNextPath } from "@/lib/auth/redirect";
+import { friendlyAuthError } from "@/lib/auth/errors";
 import { BrandWordmark } from "@/app/brand";
 
 const inputClass =
@@ -50,8 +51,9 @@ function LoginForm() {
       },
     });
     // On success the browser navigates away; only errors reach here.
+    // A disabled provider / misconfig gets friendly copy; real errors pass through.
     if (err) {
-      setError(err.message);
+      setError(friendlyAuthError(err.message, "google"));
       setBusy(false);
     }
   }
@@ -204,7 +206,9 @@ export default function LoginPage() {
     <main className="min-h-screen bg-gray-50 flex flex-col items-center px-4 py-16">
       <div className="w-full max-w-sm flex flex-col gap-6">
         <div className="text-center flex flex-col items-center gap-1">
-          <BrandWordmark />
+          <h1>
+            <BrandWordmark />
+          </h1>
           <p className="text-sm text-gray-500">
             Sign in to list everywhere from one photo.
           </p>

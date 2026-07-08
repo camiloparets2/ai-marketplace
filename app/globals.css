@@ -12,6 +12,34 @@
   --font-mono: var(--font-geist-mono);
 }
 
+/* ─── Design tokens (docs/design/design-system.md) ───────────────────────────
+   Semantic aliases over the Tailwind palette. Components reference THESE, so
+   a rebrand is a token edit, not a codebase grep. Values chosen to pass
+   WCAG 2.1 AA on white and on the tinted -50 surfaces they pair with. */
+@theme {
+  /* brand */
+  --color-brand: oklch(54.6% 0.245 262.881);          /* blue-600  */
+  --color-brand-strong: oklch(48.8% 0.243 264.376);   /* blue-700  */
+  --color-brand-accent: oklch(51.1% 0.262 276.966);   /* indigo-600 */
+  /* status intents (text-on--50-surface contrast ≥ 4.5:1) */
+  --color-ok: oklch(52.7% 0.154 150.069);             /* green-700 */
+  --color-ok-surface: oklch(98.2% 0.018 155.826);     /* green-50  */
+  --color-warn: oklch(55.5% 0.163 48.998);            /* amber-700 */
+  --color-warn-surface: oklch(98.7% 0.022 95.277);    /* amber-50  */
+  --color-danger: oklch(50.5% 0.213 27.518);          /* red-700   */
+  --color-danger-surface: oklch(97.1% 0.013 17.38);   /* red-50    */
+  --color-info: oklch(48.8% 0.243 264.376);           /* blue-700  */
+  --color-info-surface: oklch(97% 0.014 254.604);     /* blue-50   */
+  --color-muted: oklch(44.6% 0.03 256.802);           /* gray-600  */
+  --color-muted-surface: oklch(98.5% 0.002 247.839);  /* gray-50   */
+  /* shape scale — cards are the roundest thing on screen */
+  --radius-card: 1rem;      /* rounded-2xl equivalent */
+  --radius-control: 0.75rem;
+  --radius-badge: 9999px;
+  /* minimum touch target (WCAG 2.5.5 / launch a11y bar) */
+  --spacing-touch: 2.75rem; /* 44px */
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
@@ -56,5 +84,30 @@ textarea {
   /* Headline treatment for brand moments (landing hero, wordmark). */
   .text-brand-gradient {
     @apply bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 bg-clip-text text-transparent;
+  }
+
+  /* Quiet counterpart to .btn-primary — bordered, for secondary actions. */
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2
+      border border-gray-200 bg-white text-gray-700 transition-colors
+      hover:bg-gray-50 active:scale-[0.98]
+      disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
+  }
+}
+
+/* Visible keyboard focus everywhere (WCAG 2.4.7) without mouse-click rings. */
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

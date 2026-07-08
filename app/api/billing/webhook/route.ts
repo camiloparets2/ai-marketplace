@@ -20,7 +20,8 @@ import { getStripe, upsertSubscription, userIdForCustomer } from "@/lib/billing/
 import type { SubscriptionLike } from "@/lib/billing/stripe";
 import { getSupabaseAdmin } from "@/lib/connections";
 import { PLANS, isPaidPlanKey } from "@/lib/billing/plans";
-import { handleDirectSale } from "@/lib/inventory";
+import { handleDirectSale } from "@/lib/sold-events";
+import { trackEvent } from "@/lib/telemetry";
 
 // Narrow view of a Checkout Session — enough to route payment-link sales.
 interface CheckoutSessionLike {
@@ -89,6 +90,13 @@ async function handleInvoicePaid(invoice: InvoiceLike): Promise<void> {
   if (error && error.code !== "23505") {
     throw new Error(`credit grant failed: ${error.message}`);
   }
+  if (!error) {
+    await trackEvent(userId, "credits_granted", {
+      planKey,
+      credits: PLANS[planKey].monthlyCredits,
+      invoiceId: invoice.id,
+    });
+  }
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -141,7 +149,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             typeof session.payment_link === "string"
               ? session.payment_link
               : session.payment_link.id;
-          await handleDirectSale(paymentLinkId, session.amount_total ?? null);
+          await handleDirectSale(
+            paymentLinkId,
+            session.id,
+            session.amount_total ?? null
+          );
+          await trackEvent(null, "direct_sale", {
+            paymentLinkId,
+            amountTotal: session.amount_total ?? null,
+          });
         }
         break;
       }

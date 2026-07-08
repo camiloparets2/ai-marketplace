@@ -3,14 +3,8 @@
 export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from "next/server";
-import Anthropic, {
-  APIConnectionTimeoutError,
-  RateLimitError,
-  APIError,
-} from "@anthropic-ai/sdk";
 import { validateImageBytes } from "@/lib/image-validation";
-import { EXTRACTION_TOOL_SCHEMA } from "@/lib/types/extraction";
-import type { ExtractionResult } from "@/lib/types/extraction";
+import { identifyItem, VisionError } from "@/lib/ai/vision";
 import type { AcceptedMimeType } from "@/lib/image-validation";
 import { getShippingRate } from "@/lib/shipping";
 import { authenticateRequest } from "@/lib/auth/guard";
@@ -18,14 +12,7 @@ import { randomUUID } from "crypto";
 import { spendCredits, refundCredits } from "@/lib/billing/credits";
 import { CREDIT_COST_AI_EXTRACTION } from "@/lib/billing/plans";
 import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
-
-// Lazily initialised — avoids import-time crash when ANTHROPIC_API_KEY is absent
-// in local dev before .env.local is configured.
-let _client: Anthropic | null = null;
-function getClient(): Anthropic {
-  if (!_client) _client = new Anthropic();
-  return _client;
-}
+import { trackEvent } from "@/lib/telemetry";
 
 // ─── Error shape ──────────────────────────────────────────────────────────────
 
@@ -169,67 +156,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   // ── Claude Vision call ──────────────────────────────────────────────────────
-  // tool_choice forces Claude to always call extract_listing and return
-  // structured JSON matching ExtractionResult. No free-text parsing needed.
+  // All Vision work lives in lib/ai/vision.ts (CLAUDE.md rule). Every failure
+  // path refunds the credit first.
   try {
-    const response = await getClient().messages.create(
-      {
-        model: process.env.EXTRACTION_MODEL ?? "claude-sonnet-4-6",
-        max_tokens: 1024,
-        tools: [EXTRACTION_TOOL_SCHEMA as unknown as Anthropic.Tool],
-        tool_choice: { type: "tool", name: "extract_listing" },
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "image",
-                source: {
-                  type: "base64",
-                  media_type: mimeType,
-                  data: imageBase64,
-                },
-              },
-              {
-                type: "text",
-                text: [
-                  "Analyze this product photo and extract all structured listing data.",
-                  "Look carefully at labels, barcodes, text, and physical characteristics.",
-                  "For dimensions and weight, use visual cues and reference objects if visible.",
-                  "Be precise about model numbers, UPCs, and technical specifications —",
-                  "accuracy prevents buyer returns on high-ticket items.",
-                  "Set confidence scores honestly: 90+ only when you can read the value directly",
-                  "from the photo; 50-70 for reasonable inference; below 50 when uncertain.",
-                ].join(" "),
-              },
-            ],
-          },
-        ],
-      },
-      {
-        // 30-second wall-clock timeout. Vision calls on complex images can
-        // occasionally take 15-20s; 30s gives headroom without hanging the UI.
-        timeout: 30_000,
-      }
-    );
-
-    // tool_choice: { type: 'tool' } guarantees a tool_use block in the response.
-    // Defensive check in case of an unexpected API change.
-    const toolBlock = response.content.find((b) => b.type === "tool_use");
-    if (!toolBlock || toolBlock.type !== "tool_use") {
-      console.error(
-        "[analyze] Unexpected response shape — no tool_use block",
-        response.content
-      );
-      await refund();
-      return errorResponse(
-        "Analysis returned an unexpected response. Please try again.",
-        true,
-        500
-      );
-    }
-
-    const extracted = toolBlock.input as ExtractionResult;
+    const identified = await identifyItem(imageBase64, mimeType);
+    const extracted = identified.extraction;
 
     // Overwrite Claude's shipping cost with the authoritative lookup table value.
     // We trust our table, not Claude's price number — rates change and Claude
@@ -237,44 +168,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const shippingRate = getShippingRate(extracted.suggestedShippingService);
     extracted.estimatedShippingCost = shippingRate.cost;
 
+    await trackEvent(user?.id ?? null, "draft_created", { requestId });
     return NextResponse.json(extracted);
   } catch (err) {
-    // ── Anthropic SDK error handling ──────────────────────────────────────────
-    // Every path below failed to produce a draft — return the credit first.
     await refund();
+    await trackEvent(user?.id ?? null, "draft_failed", { requestId });
 
-    if (err instanceof RateLimitError) {
-      return errorResponse(
-        "Service is busy right now. Please wait a moment and try again.",
-        true,
-        429
-      );
+    if (err instanceof VisionError) {
+      const status =
+        err.kind === "rate_limited"
+          ? 429
+          : err.kind === "timeout"
+            ? 504
+            : err.kind === "api_error"
+              ? 502
+              : 500;
+      return errorResponse(err.message, err.retryable, status);
     }
 
-    if (err instanceof APIConnectionTimeoutError) {
-      return errorResponse(
-        "Analysis timed out. Please try again — complex photos sometimes take longer.",
-        true,
-        504
-      );
-    }
-
-    if (err instanceof APIError) {
-      // Covers InternalServerError and other 5xx from Anthropic
-      console.error("[analyze] Anthropic API error", err.status, err.message);
-      return errorResponse(
-        "Analysis failed. Please try a different photo or try again shortly.",
-        true,
-        502
-      );
-    }
-
-    // Unknown error — log and return generic message
     console.error("[analyze] Unexpected error", err);
-    return errorResponse(
-      "Something went wrong. Please try again.",
-      true,
-      500
-    );
+    return errorResponse("Something went wrong. Please try again.", true, 500);
   }
 }

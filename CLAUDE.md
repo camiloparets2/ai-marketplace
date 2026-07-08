@@ -314,3 +314,15 @@ Key routing rules:
 - Save progress, checkpoint, resume → invoke checkpoint
 - Code quality, health check → invoke health
 
+
+## 🗄 Data model — canonical names
+
+- **Marketplace OAuth tokens live in `platform_connections`** — `(user_id,
+  platform)` primary key, RLS-locked, service-role-only, accessed exclusively
+  through `lib/connections.ts`. The name `marketplace_accounts` (old
+  prototype/roadmap vocabulary) is retired — see
+  `docs/design/data-model-tokens.md`. Do not reintroduce it in code or briefs.
+- Other seller-owned tables follow the same security pattern (RLS on, no
+  policies, browser grants revoked): `inventory_items`,
+  `marketplace_listings`, `publish_attempts`, `sync_state`, billing tables,
+  `rate_limits`.

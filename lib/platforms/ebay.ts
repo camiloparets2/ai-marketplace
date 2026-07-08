@@ -11,7 +11,8 @@
 // Required env:
 //   EBAY_CLIENT_ID / EBAY_CLIENT_SECRET — keyset from developer.ebay.com
 //   EBAY_RU_NAME                        — the RuName tied to the OAuth redirect
-//   EBAY_ENV                            — "SANDBOX" (default) or "PRODUCTION"
+//   EBAY_ENV                            — "production" (default) or "sandbox",
+//                                          case-insensitive
 //   EBAY_POSTAL_CODE                    — ship-from ZIP for the merchant location
 // Optional policy overrides (otherwise the seller's first policy is used):
 //   EBAY_FULFILLMENT_POLICY_ID, EBAY_PAYMENT_POLICY_ID, EBAY_RETURN_POLICY_ID
@@ -31,7 +32,11 @@ import { saveConnection, isExpired } from "@/lib/connections";
 // ─── Environment ──────────────────────────────────────────────────────────────
 
 function isProduction(): boolean {
-  return process.env.EBAY_ENV === "PRODUCTION";
+  // Production is the default now that the Production keyset is enabled;
+  // only an explicit EBAY_ENV=sandbox (any casing) targets the sandbox.
+  // Previously this required the exact string "PRODUCTION", so an unset or
+  // lowercase value silently fell back to sandbox.
+  return (process.env.EBAY_ENV ?? "production").toLowerCase() !== "sandbox";
 }
 
 function apiBase(): string {
@@ -108,6 +113,33 @@ async function tokenRequest(body: URLSearchParams): Promise<TokenResponse> {
     throw new Error(`eBay token request failed (${res.status}): ${await res.text()}`);
   }
   return (await res.json()) as TokenResponse;
+}
+
+// ─── Application token (client credentials) ───────────────────────────────────
+
+export interface EbayAppToken {
+  accessToken: string;
+  // Epoch milliseconds when the token expires.
+  expiresAt: number;
+}
+
+/**
+ * Mints an application access token via the client-credentials grant against
+ * the environment-appropriate token endpoint (production by default). App
+ * tokens cover application-scope APIs (e.g. Taxonomy) that don't need a
+ * seller's consent, and minting one is the cheapest end-to-end proof that
+ * the keyset + secret are valid.
+ */
+export async function mintEbayAppToken(
+  scope = "https://api.ebay.com/oauth/api_scope"
+): Promise<EbayAppToken> {
+  const token = await tokenRequest(
+    new URLSearchParams({ grant_type: "client_credentials", scope })
+  );
+  return {
+    accessToken: token.access_token,
+    expiresAt: Date.now() + token.expires_in * 1000,
+  };
 }
 
 // Returns an unowned token bundle — the OAuth callback stamps the signed-in
@@ -318,10 +350,88 @@ export interface EbayPublishResult {
   sku: string;
 }
 
+// Pure payload builders — exported so the pipeline's dry-run mode and unit
+// tests can exercise the exact bodies eBay would receive without a network.
+
+export interface EbayInventoryItemPayload {
+  product: {
+    title: string;
+    description: string;
+    aspects: Record<string, string[]>;
+    imageUrls: string[];
+    upc?: string[];
+  };
+  condition: string;
+  availability: { shipToLocationAvailability: { quantity: number } };
+}
+
+export function buildEbayInventoryItemPayload(
+  input: ListingInput,
+  imageUrls: string[]
+): EbayInventoryItemPayload {
+  const composed = composeListing("ebay", input);
+
+  // Item specifics (aspects) from brand/model/specs. eBay expects string arrays.
+  const aspects: Record<string, string[]> = {};
+  if (input.brand) aspects["Brand"] = [input.brand];
+  if (input.model) aspects["Model"] = [input.model];
+  for (const [key, value] of Object.entries(input.specs)) {
+    aspects[key] = [value];
+  }
+
+  return {
+    product: {
+      title: composed.title,
+      description: composed.description,
+      aspects,
+      // eBay accepts up to 12 picture URLs; our product cap is 8 (first =
+      // hero). Defensive slice in case a caller ever exceeds it.
+      imageUrls: imageUrls.slice(0, 12),
+      ...(input.upc ? { upc: [input.upc] } : {}),
+    },
+    condition: EBAY_CONDITION_MAP[input.condition],
+    availability: { shipToLocationAvailability: { quantity: 1 } },
+  };
+}
+
+export interface EbayOfferPayload {
+  sku: string;
+  marketplaceId: "EBAY_US";
+  format: "FIXED_PRICE";
+  availableQuantity: number;
+  categoryId: string;
+  listingDescription: string;
+  merchantLocationKey: string;
+  pricingSummary: { price: { value: string; currency: "USD" } };
+  listingPolicies: PolicyIds;
+}
+
+export function buildEbayOfferPayload(
+  input: ListingInput,
+  sku: string,
+  categoryId: string,
+  merchantLocationKey: string,
+  policies: PolicyIds
+): EbayOfferPayload {
+  return {
+    sku,
+    marketplaceId: "EBAY_US",
+    format: "FIXED_PRICE",
+    availableQuantity: 1,
+    categoryId,
+    listingDescription: ebayHtmlDescription(input),
+    merchantLocationKey,
+    pricingSummary: {
+      price: { value: input.price.toFixed(2), currency: "USD" },
+    },
+    listingPolicies: policies,
+  };
+}
+
 export async function publishToEbay(
   connection: PlatformConnection,
   input: ListingInput,
-  imageUrl: string
+  imageUrls: string[]
 ): Promise<EbayPublishResult> {
   const conn = await freshConnection(connection);
   const composed = composeListing("ebay", input);
@@ -335,49 +445,19 @@ export async function publishToEbay(
     resolvePolicies(conn.accessToken),
   ]);
 
-  // Item specifics (aspects) from brand/model/specs. eBay expects string arrays.
-  const aspects: Record<string, string[]> = {};
-  if (input.brand) aspects["Brand"] = [input.brand];
-  if (input.model) aspects["Model"] = [input.model];
-  for (const [key, value] of Object.entries(input.specs)) {
-    aspects[key] = [value];
-  }
-
   const itemRes = await ebayFetch(
     conn.accessToken,
     `/sell/inventory/v1/inventory_item/${sku}`,
     {
       method: "PUT",
-      body: {
-        product: {
-          title: composed.title,
-          description: composed.description,
-          aspects,
-          imageUrls: [imageUrl],
-          ...(input.upc ? { upc: [input.upc] } : {}),
-        },
-        condition: EBAY_CONDITION_MAP[input.condition],
-        availability: { shipToLocationAvailability: { quantity: 1 } },
-      },
+      body: buildEbayInventoryItemPayload(input, imageUrls),
     }
   );
   if (!itemRes.ok) throw await ebayError(itemRes, "inventory item creation");
 
   const offerRes = await ebayFetch(conn.accessToken, "/sell/inventory/v1/offer", {
     method: "POST",
-    body: {
-      sku,
-      marketplaceId: "EBAY_US",
-      format: "FIXED_PRICE",
-      availableQuantity: 1,
-      categoryId,
-      listingDescription: ebayHtmlDescription(input),
-      merchantLocationKey,
-      pricingSummary: {
-        price: { value: input.price.toFixed(2), currency: "USD" },
-      },
-      listingPolicies: policies,
-    },
+    body: buildEbayOfferPayload(input, sku, categoryId, merchantLocationKey, policies),
   });
   if (!offerRes.ok) throw await ebayError(offerRes, "offer creation");
   const offer = (await offerRes.json()) as { offerId: string };

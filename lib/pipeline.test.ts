@@ -1,0 +1,426 @@
+import { describe, it, expect, vi } from "vitest";
+import { runPipeline, approveAndPublish, resolvePublishMode } from "./pipeline";
+import type { PipelineDeps, PipelineInput } from "./pipeline";
+import type { IdentifiedItem } from "@/lib/ai/vision";
+import type { ExtractionResult } from "@/lib/types/extraction";
+import { decidePrice } from "./pricing";
+import { evaluateGuardrails } from "./guardrails";
+import { routeChannels } from "./routing";
+
+// A base64 image that passes the photo quality gate: JPEG magic bytes, 30KB.
+function goodImageBase64(): string {
+  const bytes = Buffer.alloc(30 * 1024);
+  bytes[0] = 0xff;
+  bytes[1] = 0xd8;
+  bytes[2] = 0xff;
+  return bytes.toString("base64");
+}
+
+const extraction: ExtractionResult = {
+  title: "Sony WH-1000XM4 Wireless Headphones",
+  brand: "Sony",
+  model: "WH-1000XM4",
+  upc: null,
+  condition: "Very Good",
+  defects: ["light scuff on right earcup"],
+  category: "Electronics > Headphones",
+  handmade: false,
+  estimatedYearMade: 2020,
+  craftSupply: false,
+  specs: { Color: "Black" },
+  estimatedDimensions: null,
+  estimatedWeightLbs: null,
+  suggestedShippingService: "USPS_FLAT_RATE_MEDIUM",
+  estimatedShippingCost: 16.1,
+  confidence: { title: 95, category: 90, condition: 85 },
+};
+
+const identified: IdentifiedItem = {
+  extraction,
+  confidence: 0.85,
+  defects: extraction.defects,
+};
+
+const input: PipelineInput = {
+  userId: "user-1",
+  imageBase64: goodImageBase64(),
+  mimeType: "image/jpeg",
+  costBasis: 40,
+  targetPrice: null,
+};
+
+function fakeDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
+  return {
+    identify: vi.fn().mockResolvedValue(identified),
+    hostPhoto: vi.fn().mockResolvedValue("https://cdn.example/p.jpg"),
+    createDraft: vi.fn().mockResolvedValue("item-1"),
+    price: decidePrice,
+    fetchComps: vi.fn().mockResolvedValue(null),
+    recordPrice: vi.fn().mockResolvedValue(undefined),
+    setPrice: vi.fn().mockResolvedValue(undefined),
+    getEbayConnection: vi.fn().mockResolvedValue({
+      userId: "user-1",
+      platform: "ebay",
+      accessToken: "tok",
+      refreshToken: "ref",
+      expiresAt: Date.now() + 3_600_000,
+      meta: {},
+    }),
+    publishEbay: vi.fn().mockResolvedValue({
+      url: "https://sandbox.ebay.com/itm/123",
+      listingId: "123",
+      offerId: "off-1",
+      sku: "snap-1",
+    }),
+    recordListing: vi.fn().mockResolvedValue(undefined),
+    markListed: vi.fn().mockResolvedValue(undefined),
+    recordAttempt: vi.fn().mockResolvedValue(undefined),
+    setReview: vi.fn().mockResolvedValue(undefined),
+    guardrails: evaluateGuardrails,
+    audit: vi.fn().mockResolvedValue(undefined),
+    getEtsyConnection: vi.fn().mockResolvedValue({
+      userId: "user-1",
+      platform: "etsy",
+      accessToken: "tok",
+      refreshToken: "ref",
+      expiresAt: Date.now() + 3_600_000,
+      meta: {},
+    }),
+    publishEtsy: vi.fn().mockResolvedValue({
+      url: "https://www.etsy.com/listing/555",
+      listingId: "555",
+      shopId: "shop-1",
+    }),
+    route: routeChannels,
+    getItem: vi.fn().mockResolvedValue({
+      id: "item-1",
+      title: "Sony WH-1000XM4 Wireless Headphones",
+      brand: "Sony",
+      model: "WH-1000XM4",
+      upc: null,
+      condition: "Very Good",
+      category: "Electronics > Headphones",
+      specs: { Color: "Black" },
+      photo_url: "https://cdn.example/p.jpg",
+      price: 94.99,
+      status: "review",
+      review_reasons: [{ gate: "confidence", reason: "low" }],
+    }),
+    approveReview: vi.fn().mockResolvedValue(true),
+    publishMode: () => "sandbox" as const,
+    ...over,
+  };
+}
+
+describe("runPipeline — happy path (sandbox)", () => {
+  it("identifies, persists, prices, publishes, and records the listing", async () => {
+    const deps = fakeDeps();
+    const result = await runPipeline(input, deps);
+
+    // draft persisted with identification facts
+    expect(deps.createDraft).toHaveBeenCalledWith(
+      "user-1",
+      expect.objectContaining({
+        title: extraction.title,
+        defects: ["light scuff on right earcup"],
+        idConfidence: 0.85,
+        costOfGoods: 40,
+      }),
+      "https://cdn.example/p.jpg"
+    );
+
+    // price decision recorded and stamped on the item
+    expect(deps.recordPrice).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      expect.objectContaining({ strategy: "floor_markup" })
+    );
+    expect(deps.setPrice).toHaveBeenCalledWith("user-1", "item-1", result.price.price);
+
+    // published at the engine's price, listing recorded, item listed
+    expect(deps.publishEbay).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ price: result.price.price }),
+      ["https://cdn.example/p.jpg"]
+    );
+    expect(deps.recordListing).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      expect.objectContaining({ platform: "ebay", externalId: "123" }),
+      result.price.price
+    );
+    expect(deps.markListed).toHaveBeenCalledWith("item-1");
+    expect(deps.recordAttempt).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "ebay",
+      "live"
+    );
+
+    expect(result.publish).toMatchObject({
+      mode: "sandbox",
+      status: "live",
+      listingId: "123",
+    });
+    expect(result.price.price).toBeGreaterThanOrEqual(result.price.floor);
+
+    // P0-8: the automated publish left an audit row
+    expect(deps.audit).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "auto_publish",
+      "ebay",
+      expect.objectContaining({ listingId: "123" })
+    );
+  });
+});
+
+describe("runPipeline — dry run", () => {
+  it("builds the payload but never touches eBay or the listing tables", async () => {
+    const deps = fakeDeps({ publishMode: () => "dry_run" as const });
+    const result = await runPipeline(input, deps);
+
+    expect(deps.publishEbay).not.toHaveBeenCalled();
+    expect(deps.recordListing).not.toHaveBeenCalled();
+    expect(deps.markListed).not.toHaveBeenCalled();
+    expect(deps.recordAttempt).not.toHaveBeenCalled();
+
+    // draft + price still persisted — the item is real, only publish is dry
+    expect(deps.createDraft).toHaveBeenCalled();
+    expect(deps.recordPrice).toHaveBeenCalled();
+
+    expect(result.publish.status).toBe("dry_run");
+    if (result.publish.status === "dry_run") {
+      expect(result.publish.payload.product.title).toContain("Sony");
+      expect(result.publish.payload.product.imageUrls).toEqual([
+        "https://cdn.example/p.jpg",
+      ]);
+    }
+  });
+});
+
+describe("runPipeline — publish edge cases", () => {
+  it("reports not_connected and records the attempt", async () => {
+    const deps = fakeDeps({ getEbayConnection: vi.fn().mockResolvedValue(null) });
+    const result = await runPipeline(input, deps);
+    expect(result.publish.status).toBe("not_connected");
+    expect(deps.recordAttempt).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "ebay",
+      "not_connected"
+    );
+  });
+
+  it("records an error attempt when eBay publishing fails", async () => {
+    const deps = fakeDeps({
+      publishEbay: vi.fn().mockRejectedValue(new Error("eBay 500")),
+    });
+    const result = await runPipeline(input, deps);
+    expect(result.publish).toMatchObject({ status: "error", message: "eBay 500" });
+    expect(deps.recordAttempt).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "ebay",
+      "error",
+      "eBay 500"
+    );
+  });
+
+  it("still persists the draft when photo hosting fails, then routes to review", async () => {
+    const deps = fakeDeps({
+      hostPhoto: vi.fn().mockRejectedValue(new Error("bucket down")),
+    });
+    const result = await runPipeline(input, deps);
+    expect(deps.createDraft).toHaveBeenCalledWith("user-1", expect.anything(), null);
+    // no photo → the photo_quality guardrail holds the item for review
+    expect(result.publish.status).toBe("review");
+    if (result.publish.status === "review") {
+      expect(result.publish.failures.map((f) => f.gate)).toContain("photo_quality");
+    }
+    expect(deps.publishEbay).not.toHaveBeenCalled();
+  });
+});
+
+describe("runPipeline — guardrail routing", () => {
+  it("parks a low-confidence identification in review instead of posting", async () => {
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue({
+        ...identified,
+        confidence: 0.55,
+      }),
+    });
+    const result = await runPipeline(input, deps);
+
+    expect(result.publish.status).toBe("review");
+    if (result.publish.status === "review") {
+      expect(result.publish.failures).toEqual([
+        expect.objectContaining({ gate: "confidence" }),
+      ]);
+    }
+    // review is recorded on the item, and nothing was published anywhere
+    expect(deps.setReview).toHaveBeenCalledWith("user-1", "item-1", [
+      expect.objectContaining({ gate: "confidence" }),
+    ]);
+    expect(deps.publishEbay).not.toHaveBeenCalled();
+    expect(deps.recordListing).not.toHaveBeenCalled();
+    expect(deps.markListed).not.toHaveBeenCalled();
+
+    // but the draft and its price decision still persisted, and the hold
+    // itself is audited
+    expect(deps.createDraft).toHaveBeenCalled();
+    expect(deps.recordPrice).toHaveBeenCalled();
+    expect(deps.audit).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "review_hold",
+      null,
+      expect.objectContaining({ failures: expect.any(Array) })
+    );
+  });
+
+  it("holds VeRO-listed brands for a human authenticity check", async () => {
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue({
+        ...identified,
+        extraction: {
+          ...extraction,
+          title: "Louis Vuitton Neverfull MM Tote",
+          brand: "Louis Vuitton",
+        },
+      }),
+    });
+    const result = await runPipeline(input, deps);
+    expect(result.publish.status).toBe("review");
+    if (result.publish.status === "review") {
+      expect(result.publish.failures.map((f) => f.gate)).toEqual(["vero_brand"]);
+    }
+  });
+
+  it("does not let guardrail review block the sandbox happy path", async () => {
+    const deps = fakeDeps();
+    const result = await runPipeline(input, deps);
+    expect(result.publish.status).toBe("live");
+    expect(deps.setReview).not.toHaveBeenCalled();
+  });
+});
+
+describe("runPipeline — channel routing enforcement", () => {
+  const handmadeIdentified: IdentifiedItem = {
+    ...identified,
+    extraction: { ...extraction, handmade: true, brand: null, title: "Handmade ceramic mug" },
+  };
+
+  it("never touches Etsy for ordinary mass-produced items, even when connected", async () => {
+    const deps = fakeDeps({ publishMode: () => "live" as const });
+    const result = await runPipeline(input, deps);
+    expect(result.routing.channels).toEqual(["ebay"]);
+    expect(result.etsy).toBeUndefined();
+    expect(deps.publishEtsy).not.toHaveBeenCalled();
+  });
+
+  it("publishes the Etsy leg for handmade items in live mode", async () => {
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue(handmadeIdentified),
+      publishMode: () => "live" as const,
+    });
+    const result = await runPipeline(input, deps);
+    expect(result.routing.channels).toEqual(["ebay", "etsy"]);
+    expect(result.etsy).toMatchObject({ status: "live", listingId: "555" });
+    expect(deps.recordListing).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      expect.objectContaining({ platform: "etsy", externalId: "555" }),
+      expect.any(Number)
+    );
+    expect(deps.audit).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "auto_publish",
+      "etsy",
+      expect.objectContaining({ listingId: "555" })
+    );
+  });
+
+  it("skips the Etsy leg outside live mode (Etsy has no sandbox)", async () => {
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue(handmadeIdentified),
+      publishMode: () => "sandbox" as const,
+    });
+    const result = await runPipeline(input, deps);
+    expect(result.etsy).toMatchObject({ status: "skipped" });
+    expect(deps.publishEtsy).not.toHaveBeenCalled();
+  });
+
+  it("reports not_connected when eligible but Etsy is not linked", async () => {
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue(handmadeIdentified),
+      publishMode: () => "live" as const,
+      getEtsyConnection: vi.fn().mockResolvedValue(null),
+    });
+    const result = await runPipeline(input, deps);
+    expect(result.etsy).toMatchObject({ status: "not_connected" });
+  });
+});
+
+describe("approveAndPublish — the review queue's human override", () => {
+  it("releases the item and publishes without re-running guardrails", async () => {
+    const deps = fakeDeps();
+    const result = await approveAndPublish("user-1", "item-1", null, deps);
+
+    expect(result.ok).toBe(true);
+    expect(deps.approveReview).toHaveBeenCalledWith("user-1", "item-1");
+    expect(deps.audit).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "review_approve",
+      null,
+      { price: 94.99 }
+    );
+    expect(deps.publishEbay).toHaveBeenCalled();
+    if (result.ok) expect(result.publish.status).toBe("live");
+  });
+
+  it("records a manual price override in price_history", async () => {
+    const deps = fakeDeps();
+    await approveAndPublish("user-1", "item-1", 120, deps);
+    expect(deps.setPrice).toHaveBeenCalledWith("user-1", "item-1", 120);
+    expect(deps.recordPrice).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      expect.objectContaining({ strategy: "user_target", price: 120 })
+    );
+  });
+
+  it("refuses items that are not in review or have no price", async () => {
+    const listed = fakeDeps({
+      getItem: vi.fn().mockResolvedValue({ status: "listed", price: 10 }),
+    });
+    expect((await approveAndPublish("user-1", "item-1", null, listed)).ok).toBe(false);
+
+    const unpriced = fakeDeps({
+      getItem: vi
+        .fn()
+        .mockResolvedValue({ status: "review", price: null, review_reasons: [] }),
+    });
+    const result = await approveAndPublish("user-1", "item-1", null, unpriced);
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("price") });
+    expect(unpriced.publishEbay).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolvePublishMode", () => {
+  it("is sandbox whenever EBAY_ENV says so, regardless of the live flag", () => {
+    expect(resolvePublishMode({ EBAY_ENV: "sandbox" })).toBe("sandbox");
+    expect(resolvePublishMode({ EBAY_ENV: "SANDBOX", PIPELINE_LIVE_PUBLISH: "true" })).toBe(
+      "sandbox"
+    );
+  });
+
+  it("requires the explicit opt-in flag for live production publishes", () => {
+    expect(resolvePublishMode({})).toBe("dry_run");
+    expect(resolvePublishMode({ EBAY_ENV: "production" })).toBe("dry_run");
+    expect(resolvePublishMode({ PIPELINE_LIVE_PUBLISH: "false" })).toBe("dry_run");
+    expect(resolvePublishMode({ PIPELINE_LIVE_PUBLISH: "true" })).toBe("live");
+  });
+});

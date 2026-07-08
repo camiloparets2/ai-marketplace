@@ -20,7 +20,8 @@ Everything below is configuration/ops, not code. Work top to bottom.
 
 ### [~] 1. Apply all migrations + set all env vars — DATABASE HALF DONE
 **Done (2026-07-06, via the Supabase connector):** all six launch migrations are applied and registered on the production project (`eunnwzggubyhvvatxnyy` / "camiloparets2's Project"): per-user connections, billing + credits (with atomic spend/refund functions), inventory, sync_state, shopify, rate_limits. Three conflicting tables from the July-5 prototype build were renamed to `legacy_*` (16 test inventory rows preserved — delete `legacy_inventory_items`, `legacy_marketplace_listings`, `legacy_publish_attempts` whenever you're done with them). Note: this Supabase project is shared with the la_patrona OSHA app and the older prototype tables (`marketplace_connections`, `seller_profiles`, `listing_drafts`, `listings_log`, `sale_events`, `inventory_sync_actions`) — none were touched.
-**Still to do:** (a) run `supabase/migrations/20260706500000_revoke_browser_role_grants.sql` (security hardening; the connector stream kept dropping on this one call), (b) enable "leaked password protection" in Supabase → Authentication (advisor recommendation, dashboard toggle), (c) fill every var in `.env.example` into the Vercel panel.
+**Also done (2026-07-06):** `supabase/migrations/20260706500000_revoke_browser_role_grants.sql` is applied live (remote migration `20260706203320_snap_revoke_browser_role_grants`) — advisor before/after in `docs/design/supabase-hardening.md`.
+**Still to do:** (a) enable "leaked password protection" in Supabase → Authentication (advisor recommendation, **dashboard toggle only — not codeable in a migration**), (b) fill every var in `.env.example` into the Vercel panel, (c) after the Vercel production cutover to the launch build: revoke browser-role grants on the prototype/legacy tables too (deliberately deferred — see `docs/design/supabase-hardening.md`).
 
 ### [ ] 2. Auth + email
 Google provider, Site/redirect URLs, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and **production SMTP** (Supabase's built-in sender is rate-limited to a handful/hour — not enough for real signups).
@@ -31,8 +32,9 @@ Stripe webhook endpoint + `STRIPE_WEBHOOK_SECRET`, then one end-to-end test-mode
 ### [ ] 4. Marketplace approvals
 eBay production keyset (test in SANDBOX first), Etsy API key, Shopify app credentials. Reconnect any early-connected accounts (new OAuth scopes for sale polling).
 
-### [ ] 5. Error monitoring + product analytics
-Add Sentry (or Vercel's error monitoring) for auth/AI/marketplace/Stripe failures, and PostHog for the core funnel (photo → draft → publish → sale). Roadmap Gate 2 requirement; currently only console logs + Vercel logs exist.
+### [~] 5. Error monitoring + product analytics — EVENT TRACKING BUILT
+**Done:** `app_events` table + `lib/telemetry.ts` capture the full funnel server-side: `sign_in`, `draft_created`/`draft_failed`, `published` (+ per-channel `publish_error`), `item_sold`/`item_delisted`, `direct_sale`, `credits_granted`. Fire-and-forget (never breaks a flow), safe payloads only; query with SQL (sample in `lib/telemetry.ts`).
+**Optional upgrades for dashboards/alerts without SQL:** PostHog for funnel charts (free tier, ~1h to wire) and Sentry for stack-trace alerting — Vercel logs + the failure events cover the basics meanwhile.
 
 ### [ ] 6. Ops basics before ads
 Supabase backup schedule (PITR or daily dumps), a rollback note (Vercel instant rollback + `git revert`), spend alerts: Anthropic ($25 soft/$50 hard — see Phase 1 list), Stripe email alerts, Vercel usage alerts.

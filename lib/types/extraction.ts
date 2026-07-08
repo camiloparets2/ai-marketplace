@@ -26,8 +26,20 @@ export interface ExtractionResult {
   // UPC extracted via OCR from visible barcode or label text.
   upc: string | null;
   condition: "New" | "Like New" | "Very Good" | "Good" | "Acceptable";
+  // Visible flaws that justify the condition grade (scratches, missing parts,
+  // stains, cracked screen…). Empty when nothing is visibly wrong. Buyers see
+  // honest defect lists; sellers avoid INAD returns.
+  defects: string[];
   // eBay-style category path, e.g. "Electronics > Headphones"
   category: string;
+  // Channel-routing signals (Etsy only allows handmade / vintage 20+yr /
+  // craft supplies — see lib/routing.ts):
+  // The item appears handmade/artisan rather than mass-produced.
+  handmade: boolean;
+  // Approximate year of manufacture when inferable (vintage detection), else null.
+  estimatedYearMade: number | null;
+  // The item is a supply used to MAKE things (yarn, beads, fabric, tools-for-craft).
+  craftSupply: boolean;
   // Open-ended key-value spec pairs (wattage, color, size, material, etc.).
   // In Phase 2 these will be mapped to eBay/Etsy item specifics schemas.
   specs: Record<string, string>;
@@ -93,10 +105,31 @@ export const EXTRACTION_TOOL_SCHEMA = {
         enum: ["New", "Like New", "Very Good", "Good", "Acceptable"],
         description: "Condition assessment based on visible wear",
       },
+      defects: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Every visible flaw: scratches, dents, stains, missing parts, damage. Empty array when the item looks flawless.",
+      },
       category: {
         type: "string",
         description:
           "eBay-style category path, e.g. 'Electronics > Headphones'",
+      },
+      handmade: {
+        type: "boolean",
+        description:
+          "True only when the item is clearly handmade/artisan rather than mass-produced",
+      },
+      estimatedYearMade: {
+        type: ["number", "null"],
+        description:
+          "Approximate year of manufacture when inferable from styling, labels, or model history; null when unknown",
+      },
+      craftSupply: {
+        type: "boolean",
+        description:
+          "True when the item is a supply used to make things (yarn, beads, fabric, leather blanks, craft tools)",
       },
       specs: {
         type: "object",
@@ -153,7 +186,11 @@ export const EXTRACTION_TOOL_SCHEMA = {
       "model",
       "upc",
       "condition",
+      "defects",
       "category",
+      "handmade",
+      "estimatedYearMade",
+      "craftSupply",
       "specs",
       "estimatedDimensions",
       "estimatedWeightLbs",

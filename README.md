@@ -51,7 +51,7 @@ the app runs in legacy beta-key mode (see `.env.example`).
 
 ```bash
 npm install
-cp .env.example .env.local   # fill in keys — see comments in the file
+cp .env.local.example .env.local   # fill in keys — see comments in the file
 npm run dev
 ```
 

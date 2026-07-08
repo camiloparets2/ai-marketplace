@@ -6,6 +6,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+import { StatusBadge } from "@/app/ui/status-badge";
 
 interface ListingRow {
   id: string;
@@ -21,9 +22,11 @@ interface Item {
   condition: string;
   photo_url: string | null;
   quantity: number;
-  price: number;
+  // null until the pricing engine (or the seller) prices the draft
+  price: number | null;
   cost_of_goods: number | null;
-  status: "draft" | "listed" | "sold" | "archived";
+  status: "draft" | "review" | "listed" | "sold" | "archived";
+  review_reasons: Array<{ gate: string; reason: string }>;
   sold_at: string | null;
   sold_price: number | null;
   sold_platform: string | null;
@@ -38,13 +41,6 @@ const PLATFORM_NAMES: Record<string, string> = {
   direct: "Direct link",
 };
 
-const STATUS_STYLES: Record<Item["status"], string> = {
-  draft: "bg-gray-100 text-gray-600",
-  listed: "bg-blue-50 text-blue-700",
-  sold: "bg-green-50 text-green-700",
-  archived: "bg-gray-100 text-gray-400",
-};
-
 export default function InventoryPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(true);
@@ -56,6 +52,10 @@ export default function InventoryPage() {
   // Item id whose cost editor is open, and its in-progress value
   const [costEditor, setCostEditor] = useState<string>("");
   const [costValue, setCostValue] = useState<string>("");
+  // Lifecycle filter chip
+  const [filter, setFilter] = useState<
+    "all" | "draft" | "review" | "listed" | "sold"
+  >("all");
 
   const load = useCallback(async () => {
     try {
@@ -150,6 +150,10 @@ export default function InventoryPage() {
     return [...new Set([...fromListings, "facebook", "offerup", "other"])];
   }
 
+  const reviewCount = items.filter((i) => i.status === "review").length;
+  const visibleItems =
+    filter === "all" ? items : items.filter((i) => i.status === filter);
+
   return (
     <main className="min-h-screen bg-gray-50 flex flex-col items-center px-4 py-8 pb-16">
       <div className="w-full max-w-lg flex flex-col gap-6">
@@ -173,6 +177,40 @@ export default function InventoryPage() {
           </p>
         )}
 
+        {/* Review-queue nudge — held items need a human decision */}
+        {reviewCount > 0 && (
+          <Link
+            href="/review"
+            className="flex items-center justify-between bg-warn-surface border border-amber-200 rounded-(--radius-card) px-4 py-3"
+          >
+            <span className="text-sm text-warn font-medium">
+              {reviewCount} item{reviewCount === 1 ? "" : "s"} need review before posting
+            </span>
+            <span className="text-sm text-warn font-semibold">Review →</span>
+          </Link>
+        )}
+
+        {/* Lifecycle filter */}
+        {items.length > 0 && (
+          <div className="flex gap-1.5 overflow-x-auto -mx-1 px-1 pb-1">
+            {(["all", "draft", "review", "listed", "sold"] as const).map((f) => (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`text-xs font-medium px-3 py-1.5 rounded-badge border whitespace-nowrap capitalize ${
+                  filter === f
+                    ? "bg-gray-900 text-white border-gray-900"
+                    : "bg-white text-gray-600 border-gray-200"
+                }`}
+              >
+                {f}
+                {f !== "all" &&
+                  ` (${items.filter((i) => i.status === f).length})`}
+              </button>
+            ))}
+          </div>
+        )}
+
         {loading ? (
           <div className="flex justify-center py-10">
             <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
@@ -191,7 +229,7 @@ export default function InventoryPage() {
             </Link>
           </div>
         ) : (
-          items.map((item) => (
+          visibleItems.map((item) => (
             <div
               key={item.id}
               className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex flex-col gap-3"
@@ -212,7 +250,9 @@ export default function InventoryPage() {
                     {item.title}
                   </p>
                   <p className="text-sm text-gray-500">
-                    ${Number(item.price).toFixed(2)}
+                    {item.price !== null
+                      ? `$${Number(item.price).toFixed(2)}`
+                      : "unpriced"}
                     {item.status === "sold" && item.sold_price !== null && (
                       <span className="text-green-700">
                         {" "}· sold ${Number(item.sold_price).toFixed(2)}
@@ -222,10 +262,8 @@ export default function InventoryPage() {
                       </span>
                     )}
                   </p>
-                  <span
-                    className={`inline-block mt-1 text-xs font-medium px-1.5 py-0.5 rounded ${STATUS_STYLES[item.status]}`}
-                  >
-                    {item.status}
+                  <span className="inline-block mt-1">
+                    <StatusBadge status={item.status} />
                   </span>
                   {/* Cost of goods → per-item profit */}
                   <p className="text-xs text-gray-400 mt-1">
@@ -336,7 +374,37 @@ export default function InventoryPage() {
                 </div>
               )}
 
-              {item.status !== "archived" && (
+              {/* Review queue: why the item is held + the human decision */}
+              {item.status === "review" && (
+                <div className="rounded-lg bg-amber-50 border border-amber-200 p-2.5 space-y-1.5">
+                  <p className="text-xs font-medium text-amber-800">
+                    Held for review — not posted:
+                  </p>
+                  <ul className="text-xs text-amber-700 list-disc pl-4 space-y-0.5">
+                    {(item.review_reasons ?? []).map((r) => (
+                      <li key={r.gate}>{r.reason}</li>
+                    ))}
+                  </ul>
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      onClick={() => void runAction(item.id, { action: "approve" })}
+                      disabled={busyItem === item.id}
+                      className="flex-1 py-1.5 rounded-lg bg-blue-600 text-white font-medium text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                    >
+                      {busyItem === item.id ? "Working..." : "Approve & post"}
+                    </button>
+                    <button
+                      onClick={() => void runAction(item.id, { action: "reject" })}
+                      disabled={busyItem === item.id}
+                      className="flex-1 py-1.5 rounded-lg border border-gray-200 text-gray-600 font-medium text-sm hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {item.status !== "archived" && item.status !== "review" && (
                 <div className="flex gap-2">
                   {item.status !== "sold" && (
                     <>

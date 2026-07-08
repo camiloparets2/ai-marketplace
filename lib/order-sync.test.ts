@@ -14,25 +14,41 @@ const listing = (
 describe("matchSales", () => {
   it("matches by platform listing id", () => {
     const matches = matchSales(
-      [{ listingId: "111", sku: null, price: 42 }],
+      [{ orderId: "o-1", listingId: "111", sku: null, price: 42 }],
       [listing("item-1", "111")]
     );
-    expect(matches).toEqual([{ inventoryItemId: "item-1", price: 42 }]);
+    expect(matches).toEqual([
+      {
+        inventoryItemId: "item-1",
+        price: 42,
+        orderId: "o-1",
+        listingId: "111",
+        sku: null,
+      },
+    ]);
   });
 
   it("falls back to SKU when the listing id is absent", () => {
     const matches = matchSales(
-      [{ listingId: null, sku: "snap-123", price: 10 }],
+      [{ orderId: "o-2", listingId: null, sku: "snap-123", price: 10 }],
       [listing("item-1", "999", "snap-123")]
     );
-    expect(matches).toEqual([{ inventoryItemId: "item-1", price: 10 }]);
+    expect(matches).toEqual([
+      {
+        inventoryItemId: "item-1",
+        price: 10,
+        orderId: "o-2",
+        listingId: null,
+        sku: "snap-123",
+      },
+    ]);
   });
 
   it("skips already-ended listings and unknown sales", () => {
     const matches = matchSales(
       [
-        { listingId: "111", sku: null, price: 5 },
-        { listingId: "not-ours", sku: null, price: 7 },
+        { orderId: "o-3", listingId: "111", sku: null, price: 5 },
+        { orderId: "o-4", listingId: "not-ours", sku: null, price: 7 },
       ],
       [listing("item-1", "111", null, "ended")]
     );
@@ -42,8 +58,8 @@ describe("matchSales", () => {
   it("matches each inventory item at most once per pass", () => {
     const matches = matchSales(
       [
-        { listingId: "111", sku: null, price: 5 },
-        { listingId: "111", sku: null, price: 5 },
+        { orderId: "o-5", listingId: "111", sku: null, price: 5 },
+        { orderId: "o-6", listingId: "111", sku: null, price: 5 },
       ],
       [listing("item-1", "111")]
     );
@@ -52,7 +68,7 @@ describe("matchSales", () => {
 
   it("retries listings whose end previously failed", () => {
     const matches = matchSales(
-      [{ listingId: "111", sku: null, price: 5 }],
+      [{ orderId: "o-7", listingId: "111", sku: null, price: 5 }],
       [listing("item-1", "111", null, "end_failed")]
     );
     expect(matches).toHaveLength(1);

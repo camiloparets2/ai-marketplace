@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { safeNextPath } from "@/lib/auth/redirect";
+import { trackEvent } from "@/lib/telemetry";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const code = req.nextUrl.searchParams.get("code");
@@ -26,12 +27,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   try {
     const supabase = await createSupabaseServerClient();
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
     if (error) {
       return NextResponse.redirect(
         `${origin}/login?error=${encodeURIComponent(error.message)}`
       );
     }
+    // Funnel: every successful auth-link landing (Google, signup confirm,
+    // recovery) counts as a sign-in.
+    await trackEvent(data.session?.user.id ?? null, "sign_in", { next });
   } catch (err) {
     console.error("[auth/callback] code exchange failed", err);
     return NextResponse.redirect(
