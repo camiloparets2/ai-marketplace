@@ -14,7 +14,7 @@
 | Identify | 🟢 | `lib/ai/vision.ts` (0–1 confidence + defects), persisted at intake, **ConfidenceMeter + defect chips UI** |
 | Price | 🟢 | floor engine + `price_history`, comps w/ fallback, cost-basis intake, **PricingPanel (floor + comps + unprofitable warning)** |
 | List | 🟢 | eBay/Etsy/Shopify publishers, **dry-run gate**, guardrails → review, routing table |
-| Sync/Delist | 🟢 | `sold_events` queue (webhook + poll + **direct Stripe**), atomic `claim_item_sale` + race handling, `pipeline_audit` |
+| Sync/Delist | 🟢 | real eBay Fulfillment `getOrders` sold-detection (`fetchEbaySales`, PAID-only) → `sold_events` queue (webhook + poll + **direct Stripe**) → atomic `claim_item_sale` (first-commit-wins) → cross-channel delist + `pipeline_audit`; cron `/api/sync/orders`; e2e regression test |
 | UI/UX | 🟢 | design system (`app/ui/*`), capture/review/inventory/channels screens, review queue, error boundary + 404, toasts, a11y pass |
 
 ## Gap list (work top to bottom)

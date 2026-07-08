@@ -59,21 +59,34 @@ oversell: the moment it sells anywhere, it comes down everywhere else.
   Etsy only when the item is genuinely handmade, vintage 20+ years, or a
   craft supply; never otherwise.**
 
-### 5. Sync / Delist — 🟡 polling works; webhook queue + atomicity missing
-- Polling sync exists and is tested: daily Vercel cron + opportunistic +
-  manual → `fetchEbaySales`/Etsy/Shopify → `matchSales` → `markItemSold`
-  (idempotent) → `planEndListings` ends every other channel with per-listing
-  `end_failed` retry state (`lib/order-sync.ts`, `lib/inventory.ts`).
-- **Gap (P0):** no event intake. Build an eBay order **webhook/notification
-  endpoint** normalizing into a single **`sold_events`** queue (new table);
-  polling stays as the backstop and also feeds the queue.
-- **Gap (P0):** the sold transition is read-then-write, not DB-locked; two
-  near-simultaneous sales of the same item race. Needs an **atomic guarded
-  transition** (single conditional UPDATE, first committed wins), quantity
-  decrement, delist-everywhere at qty 0, and an out-of-stock cancel/refund
-  stub for the loser.
-- **Gap (P0):** no audit trail. Every auto-publish and auto-delist writes a
-  **`pipeline_audit`** row (new table).
+### 5. Sync / Delist — 🟢 BUILT (real eBay sold-detection → auto-delist)
+- **Sold-detection (real, official API).** `fetchEbaySales`
+  (`lib/platforms/ebay.ts`) calls the Sell Fulfillment API
+  `GET /sell/fulfillment/v1/order?filter=creationdate:[…]`; `extractEbaySales`
+  keeps PAID orders only and pulls SKU + legacyItemId + price per line item.
+- **Trigger + schedule.** `app/api/sync/orders` (GET, `Authorization: Bearer
+  $CRON_SECRET`) is registered in `vercel.json` (daily); it also runs
+  opportunistically on `/inventory` load and via the "Check for new sales"
+  button (POST). `lib/order-sync.ts` scans every connected seller since a
+  per-seller `sync_state` watermark (+24h overlap).
+- **SKU → item reverse-map.** `matchSales` (listingId primary, SKU fallback)
+  and `findListingOwner` (`marketplace_listings.meta->>sku`) resolve a line
+  item back to its `inventory_items` row.
+- **Atomic transition + delist.** each sale is normalized into the
+  **`sold_events`** queue (unique dedupe index on platform+order+listing) and
+  processed by `claim_item_sale` — a single guarded UPDATE (`quantity > 0`,
+  SQL row-lock, first committed wins) — then `endOtherListings` delists every
+  OTHER channel at qty 0. The double-sale loser takes the out-of-stock path
+  (`oversellAction` stub) + `oos_cancel` audit.
+- **Audit trail.** `pipeline_audit` rows for auto_publish / auto_delist /
+  sold_event / oos_cancel. Also serves the webhook path
+  (`app/api/webhooks/ebay-orders`) which funnels into the SAME queue.
+- **Tests:** `lib/order-sync.test.ts`, `lib/sold-events.test.ts` (race +
+  replay), `app/api/webhooks/ebay-orders/route.test.ts`, and the end-to-end
+  `tests/regression/ebay-sold-detection.test.ts` (payload→extract→match→delist).
+- Remaining (non-blocking): the oversell cancel/refund is a stub, and a
+  live eBay **push-notification subscription** is optional — the getOrders
+  poll is the required primary and is complete.
 
 ## Auto-post guardrails (P0 — Phase 2)
 
