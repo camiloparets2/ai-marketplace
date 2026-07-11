@@ -119,3 +119,22 @@ to a `suggested_price` column — the old flow returned it to the client only.
   profile (non-US payload), typed error when nothing available, env fallback.
 - Vision: suggestedPrice/priceRationale passthrough + null-normalisation.
 - Existing eBay payload tests updated for marketplace-aware offers.
+
+## Post-deploy landmine: name collision with a prototype-era table (2026-07-11)
+
+"No existing profile/settings table" above was wrong in production: the
+database carries prototype-era tables that predate the migrations folder. A
+legacy `public.seller_profiles` (id PK, stripe_account_id, ebay_* token
+columns — no `user_id`, no ship-from columns) already existed, so this
+feature's `create table if not exists` matched on NAME, silently did nothing,
+and the app failed at runtime with "column seller_profiles.ship_from_country
+does not exist". No code reads the legacy columns (tokens live in
+`platform_connections`), so the legacy table was renamed to
+`legacy_seller_profiles` and locked down; production was repaired by hand and
+`20260711010000_repair_seller_profiles_collision.sql` makes every other
+environment converge idempotently.
+
+Lesson: on this database, `create table if not exists` can collide on name
+while the columns differ. After applying a migration, verify the COLUMNS
+exist (e.g. select the new columns, or check information_schema.columns) —
+table existence proves nothing here.
