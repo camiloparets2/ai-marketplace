@@ -28,6 +28,9 @@ export function friendlyAuthError(
   rawMessage: string,
   provider?: "google"
 ): string {
+  if (rawMessage === "auth_unavailable") {
+    return "Sign-in is temporarily unavailable. Please wait a moment and try again.";
+  }
   if (CONFIG_ERROR_PATTERNS.some((p) => p.test(rawMessage))) {
     return provider === "google"
       ? GOOGLE_NOT_ENABLED_MESSAGE

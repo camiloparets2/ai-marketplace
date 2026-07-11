@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "crypto";
 import { NextRequest } from "next/server";
+
+const handleDeletion = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/platforms/ebay-deletion", () => ({
+  handleEbayAccountDeletion: handleDeletion,
+}));
+
 import { GET, POST } from "./route";
 
 // The three inputs eBay hashes, in the exact mandated order.
@@ -75,6 +81,11 @@ describe("eBay account deletion — GET challenge", () => {
 });
 
 describe("eBay account deletion — POST notification", () => {
+  beforeEach(() => {
+    handleDeletion.mockReset();
+    handleDeletion.mockResolvedValue({ deletedConnections: 1 });
+  });
+
   it("ACKs a valid deletion notification with 200", async () => {
     const req = new NextRequest(
       new Request("https://example.com/api/ebay/account-deletion", {
@@ -90,6 +101,11 @@ describe("eBay account deletion — POST notification", () => {
     );
     const res = await POST(req);
     expect(res.status).toBe(200);
+    expect(handleDeletion).toHaveBeenCalledWith({
+      userId: "u-99",
+      username: "someuser",
+      notificationId: "n-1",
+    });
   });
 
   it("400s on malformed JSON so eBay retries", async () => {
@@ -103,7 +119,7 @@ describe("eBay account deletion — POST notification", () => {
     expect(res.status).toBe(400);
   });
 
-  it("still ACKs when the notification has no data block", async () => {
+  it("rejects notifications without the required topic and identity", async () => {
     const req = new NextRequest(
       new Request("https://example.com/api/ebay/account-deletion", {
         method: "POST",
@@ -111,7 +127,25 @@ describe("eBay account deletion — POST notification", () => {
       })
     );
     const res = await POST(req);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 500 so eBay retries when erasure fails", async () => {
+    handleDeletion.mockRejectedValueOnce(new Error("database unavailable"));
+    const req = new NextRequest(
+      new Request("https://example.com/api/ebay/account-deletion", {
+        method: "POST",
+        body: JSON.stringify({
+          metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" },
+          notification: {
+            notificationId: "n-3",
+            data: { userId: "u-100" },
+          },
+        }),
+      })
+    );
+    const res = await POST(req);
+    expect(res.status).toBe(500);
   });
 });
 

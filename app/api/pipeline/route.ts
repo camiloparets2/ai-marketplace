@@ -51,7 +51,7 @@ function parseBody(raw: unknown): PipelineBody | string {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // Pipeline runs are user-scoped (they write inventory + use the user's
-  // eBay connection) — a beta key alone is not enough.
+  // eBay connection) and therefore requires a real user session.
   const user = await requireUser();
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -106,7 +106,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 402 }
     );
   }
-  const credited = spend.ok;
+  if (!spend.ok) {
+    return NextResponse.json(
+      {
+        error: "Credit service is temporarily unavailable. Please try again shortly.",
+        retryable: true,
+      },
+      { status: 503 }
+    );
+  }
+  const credited = true;
 
   try {
     const result = await runPipeline({

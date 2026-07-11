@@ -21,15 +21,15 @@ export const metadata: Metadata = {
     process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"
   ),
   title: {
-    default: "Snap to List — photograph it, it's listed everywhere",
+    default: "Snap to List — turn photos into polished listings",
     template: "%s — Snap to List",
   },
   description:
-    "Take one photo. AI drafts the listing. Publish to eBay, Etsy, Shopify, and more in one tap — and never oversell: selling anywhere delists everywhere else.",
+    "Take one photo, review an AI-assisted listing draft, and publish through the marketplace connections you choose.",
   openGraph: {
     title: "Snap to List",
     description:
-      "One photo → listed on eBay, Etsy, Shopify, and more. Automatic cross-channel delisting when it sells.",
+      "One photo becomes a review-ready listing you can publish through your connected marketplaces.",
     type: "website",
   },
   // Installed-app behavior on iOS (Android reads the manifest).

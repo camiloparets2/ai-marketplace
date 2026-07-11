@@ -21,11 +21,11 @@
 
 ### P0 — launch blockers
 - [x] **P0-1** `lib/ai/vision.ts` Vision entry point (defects[], min-of-critical-fields confidence 0–1); /api/analyze refactored onto it; 8 tests — *Phase 1 ✅*
-- [x] **P0-2** `createDraftItem` persists at intake (defects, id_confidence, cost basis; `price` now nullable; `review` status added). Migration `20260707100000_pipeline_intake.sql` — **repo only, NOT yet applied to the live DB** — *Phase 1 ✅*
+- [x] **P0-2** `createDraftItem` persists at intake (defects, id_confidence, cost basis; `price` now nullable; `review` status added). Migration `20260707100000_pipeline_intake.sql` — **applied and verified in production 2026-07-11** — *Phase 1 ✅*
 - [x] **P0-3** `lib/pricing.ts`: floor = cost+fees+shipping+max($3,15%); strategies user_target/floor_markup; `price_history` rows w/ rationale + inputs; 8 tests — *Phase 1 ✅*
 - [x] **P0-4** `lib/pipeline.ts` + `POST /api/pipeline`: identify → draft → price → publish. Sandbox real, production **dry-run unless `PIPELINE_LIVE_PUBLISH=true`** (ships off). Pure eBay payload builders extracted + tested; 7 pipeline tests — *Phase 1 ✅*
-- [x] **P0-5** `lib/guardrails.ts`: 6 gates (confidence ≥0.80, price ≥ floor, sane range $5–$2k, prohibited-item regexes, VeRO brand watch list, photo quality bar) → any-fail parks the item `status=review` with `review_reasons`; migration `20260707200000_review_reasons.sql` (repo only); 13 gate tests + 3 pipeline-routing tests — *Phase 2 ✅*
-- [x] **P0-6** `sold_events` queue (dedupe on platform+order+listing, NULLS NOT DISTINCT) + `POST /api/webhooks/ebay-orders` intake (challenge GET, tolerant parse, listing-based seller attribution) + polling backstop enqueues instead of direct-marking. Migration `20260707300000_sold_events_audit.sql` (repo only) — *Phase 3 ✅*
+- [x] **P0-5** `lib/guardrails.ts`: 6 gates (confidence ≥0.80, price ≥ floor, sane range $5–$2k, prohibited-item regexes, VeRO brand watch list, photo quality bar) → any-fail parks the item `status=review` with `review_reasons`; migration `20260707200000_review_reasons.sql` applied 2026-07-11; 13 gate tests + 3 pipeline-routing tests — *Phase 2 ✅*
+- [x] **P0-6** `sold_events` queue (dedupe on platform+order+listing, NULLS NOT DISTINCT) + `POST /api/webhooks/ebay-orders` intake (challenge GET, tolerant parse, listing-based seller attribution) + polling backstop enqueues instead of direct-marking. Migration `20260707300000_sold_events_audit.sql` applied 2026-07-11 — *Phase 3 ✅*
 - [x] **P0-7** `claim_item_sale` SQL fn: single guarded UPDATE (row lock serializes; `quantity > 0` makes overselling impossible); qty decrement; delist-everywhere at 0 via `endOtherListings`; race loser → `oversellAction` **stub** (cancel/refund API call is a follow-up) + `oos_cancel` audit; race test in `lib/sold-events.test.ts` — *Phase 3 ✅*
 - [x] **P0-8** `pipeline_audit`: auto_publish, auto_delist (in endListings), sold_event, oos_cancel, review_hold all write rows — *Phase 3 ✅*
 
@@ -64,7 +64,7 @@ See the defaults table in `docs/design/launch.md` — confidence 0.80, min_margi
 
 ## Deploy checklist (updated after Phase 5)
 1. Merge PRs **in stack order**: #6 → #7 → #8 → #9 → #10 → #11 (plus standalone #3 telemetry, #4 eBay prod config, #5 schema-vocab docs).
-2. Apply the three new migrations to production Supabase (in timestamp order): `20260707100000_pipeline_intake`, `20260707200000_review_reasons`, `20260707300000_sold_events_audit`.
+2. ~~Apply the three launch migrations to production Supabase.~~ **Done 2026-07-11**, including explicit service-role grants and missing foreign-key indexes; verified with privilege queries and Supabase advisors.
 3. Vercel env: everything in `.env.example` **plus new** `PIPELINE_LIVE_PUBLISH` (leave `false`!), `EBAY_ORDER_WEBHOOK_VERIFICATION_TOKEN`, `EBAY_ORDER_WEBHOOK_ENDPOINT`.
 4. Flip Vercel Production Branch → `master`, redeploy.
 5. Supervised sandbox run: `EBAY_ENV=sandbox` + a sandbox seller connection → POST /api/pipeline with a real photo → confirm sandbox listing + inventory rows + price_history + audit rows.
@@ -72,10 +72,12 @@ See the defaults table in `docs/design/launch.md` — confidence 0.80, min_margi
 7. Only after 5–6 look right: consider `PIPELINE_LIVE_PUBLISH=true`.
 8. Note: Next 16 warns `middleware.ts` → `proxy.ts` rename is coming; harmless today, track for a future chore PR.
 
-## New migrations awaiting live apply
+## Launch migrations applied to production (2026-07-11)
 - `20260707100000_pipeline_intake.sql` (price nullable, defects/id_confidence, review status, price_history)
 - `20260707200000_review_reasons.sql` (review_reasons on inventory_items)
 - `20260707300000_sold_events_audit.sql` (sold_events, pipeline_audit, claim_item_sale fn)
+- `20260711185901_grant_service_role_data_api_access.sql` (explicit server-only Data API privileges)
+- `20260711191106_add_launch_foreign_key_indexes.sql` (reconciliation/cascade indexes)
 
 ## Continuation run — Track A (backend) + Track B (UI/UX), PRs #12–#16
 

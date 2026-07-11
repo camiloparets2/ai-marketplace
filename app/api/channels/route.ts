@@ -4,7 +4,11 @@
 
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
-import { getConnection, getSupabaseAdmin, isExpired } from "@/lib/connections";
+import {
+  getConnection,
+  getSupabaseAdmin,
+  needsReconnect as connectionNeedsReconnect,
+} from "@/lib/connections";
 import { API_PLATFORMS } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
 
@@ -35,8 +39,7 @@ export async function GET(): Promise<NextResponse> {
       accountLabel =
         conn?.meta.shop ?? (conn?.meta.shopId ? `shop ${conn.meta.shopId}` : null);
       // Expired with no refresh token → the seller must reconnect.
-      const canRefresh = conn?.refreshToken != null && conn.refreshToken !== "";
-      needsReconnect = conn !== null && isExpired(conn) && !canRefresh;
+      needsReconnect = conn !== null && connectionNeedsReconnect(conn);
     } catch {
       // Supabase not configured — report disconnected.
     }

@@ -189,7 +189,7 @@ export default function Page() {
     kind: "success" | "error";
     text: string;
   } | null>(null);
-  // Signed-in user's email for the account header; null in legacy beta mode.
+  // Signed-in user's email for the account header.
   const [accountEmail, setAccountEmail] = useState<string | null>(null);
   // AI credits remaining; null → unknown (signed out / billing not migrated).
   const [creditsLeft, setCreditsLeft] = useState<number | null>(null);
@@ -253,11 +253,7 @@ export default function Page() {
       })
       .catch(() => undefined);
 
-    void fetch("/api/connections", {
-      headers: {
-        "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
-      },
-    })
+    void fetch("/api/connections")
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { connections?: Record<ApiPlatform, boolean> } | null) => {
         if (!data?.connections) return;
@@ -326,10 +322,7 @@ export default function Page() {
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: base64, mimeType }),
       });
 
@@ -394,10 +387,7 @@ export default function Page() {
     try {
       const res = await fetch("/api/publish", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           listing: {
             title,
@@ -425,6 +415,11 @@ export default function Page() {
       }
 
       setResults(data.results as TargetResult[]);
+      if (data.inventorySyncError) {
+        setError(
+          "Your listings were published, but automatic sold-item syncing needs attention. Contact support before cross-listing this item."
+        );
+      }
       setStage("published");
     } catch {
       setError("Connection failed. Please try again.");
@@ -463,7 +458,7 @@ export default function Page() {
             <BrandWordmark />
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            Photograph an item. List it everywhere in seconds.
+            Photograph an item. Review it, then publish with confidence.
           </p>
           {accountEmail && (
             <p className="text-xs text-gray-400 mt-2">
@@ -932,6 +927,11 @@ export default function Page() {
         {/* ── Published: per-platform results ─────────────────────────────── */}
         {stage === "published" && (
           <div className="flex flex-col gap-4">
+            {error && (
+              <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                {error}
+              </p>
+            )}
             {results.map((r) => (
               <div
                 key={r.platform}

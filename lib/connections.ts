@@ -84,3 +84,11 @@ const EXPIRY_SKEW_MS = 5 * 60 * 1000;
 export function isExpired(conn: PlatformConnection): boolean {
   return conn.expiresAt !== null && Date.now() > conn.expiresAt - EXPIRY_SKEW_MS;
 }
+
+export function needsReconnect(conn: PlatformConnection): boolean {
+  const canRefresh = Boolean(conn.refreshToken);
+  const tokenCannotRefresh = isExpired(conn) && !canRefresh;
+  const missingEbayIdentity =
+    conn.platform === "ebay" && !conn.meta.ebayUserId;
+  return tokenCannotRefresh || missingEbayIdentity;
+}

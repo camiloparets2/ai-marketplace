@@ -51,6 +51,12 @@ function authBase(): string {
     : "https://auth.sandbox.ebay.com";
 }
 
+function identityApiBase(): string {
+  return isProduction()
+    ? "https://apiz.ebay.com"
+    : "https://apiz.sandbox.ebay.com";
+}
+
 function credentials(): { clientId: string; clientSecret: string; ruName: string } {
   const clientId = process.env.EBAY_CLIENT_ID;
   const clientSecret = process.env.EBAY_CLIENT_SECRET;
@@ -72,6 +78,7 @@ const OAUTH_SCOPES = [
   // Order polling (sale detection). Accounts connected before this scope was
   // added must reconnect for sales sync to work.
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
+  "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
 ].join(" ");
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────
@@ -153,16 +160,42 @@ export async function ebayExchangeCode(code: string): Promise<UnownedConnection>
       redirect_uri: ruName,
     })
   );
+  const identityRes = await fetch(`${identityApiBase()}/commerce/identity/v1/user/`, {
+    headers: {
+      Authorization: `Bearer ${token.access_token}`,
+      Accept: "application/json",
+    },
+  });
+  if (!identityRes.ok) {
+    throw new Error(
+      `eBay identity lookup failed (${identityRes.status}): ${await identityRes.text()}`
+    );
+  }
+  const identity = (await identityRes.json()) as {
+    userId?: string;
+    username?: string;
+  };
+  if (!identity.userId) {
+    throw new Error("eBay identity lookup did not return an immutable user id.");
+  }
   return {
     platform: "ebay",
     accessToken: token.access_token,
     refreshToken: token.refresh_token ?? null,
     expiresAt: Date.now() + token.expires_in * 1000,
-    meta: {},
+    meta: {
+      ebayUserId: identity.userId,
+      ...(identity.username ? { ebayUsername: identity.username } : {}),
+    },
   };
 }
 
 async function freshConnection(conn: PlatformConnection): Promise<PlatformConnection> {
+  if (!conn.meta.ebayUserId) {
+    throw new Error(
+      "Reconnect your eBay account to complete the required identity and deletion setup."
+    );
+  }
   if (!isExpired(conn)) return conn;
   if (!conn.refreshToken) {
     throw new Error("eBay session expired — reconnect your eBay account.");

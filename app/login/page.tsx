@@ -28,14 +28,16 @@ function LoginForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(searchParams.get("error") ?? "");
+  const [error, setError] = useState(
+    friendlyAuthError(searchParams.get("error") ?? "")
+  );
   const [notice, setNotice] = useState("");
 
   if (!isSupabaseAuthConfigured()) {
     return (
       <p className="text-sm text-orange-700 bg-orange-50 rounded-lg px-3 py-2">
         Sign-in is not configured yet. Set NEXT_PUBLIC_SUPABASE_URL and
-        NEXT_PUBLIC_SUPABASE_ANON_KEY, or use the beta link you were given.
+        NEXT_PUBLIC_SUPABASE_ANON_KEY.
       </p>
     );
   }
@@ -210,7 +212,7 @@ export default function LoginPage() {
             <BrandWordmark />
           </h1>
           <p className="text-sm text-gray-500">
-            Sign in to list everywhere from one photo.
+            Sign in to turn one photo into a polished listing.
           </p>
         </div>
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">

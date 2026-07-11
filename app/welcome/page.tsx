@@ -1,12 +1,12 @@
 // Public landing page — the destination for ads and shared links (roadmap
 // Gate 4: public reseller acquisition). Signed-out visitors to "/" land here
-// via middleware; signed-in users go straight to the app.
+// via proxy; signed-in users go straight to the app.
 
 import Link from "next/link";
 import { BrandWordmark } from "@/app/brand";
 
 export const metadata = {
-  title: "Photograph it. It's listed everywhere.",
+  title: "Turn a photo into a polished listing draft.",
 };
 
 const STEPS = [
@@ -19,15 +19,15 @@ const STEPS = [
     text: "A ready-to-publish draft in seconds. Low-confidence fields are flagged so you stay in control.",
   },
   {
-    title: "Publish everywhere",
-    text: "eBay, Etsy, and Shopify live via their official APIs. Facebook Marketplace and OfferUp with a one-tap assisted post. Plus your own no-fee checkout link.",
+    title: "Choose where to publish",
+    text: "Publish through the marketplace connections you have enabled, or use an assisted post when a marketplace does not offer a listing API.",
   },
 ];
 
 const PILLARS = [
   {
-    title: "Never oversell",
-    text: "Sell an item anywhere — including your direct link — and it's automatically delisted from every other channel. eBay, Etsy, and Shopify sales are detected for you.",
+    title: "Keep inventory coordinated",
+    text: "Detected sales update inventory and trigger delisting on other connected channels. Review alerts promptly if two marketplaces sell at nearly the same time.",
   },
   {
     title: "Know what made money",
@@ -52,13 +52,13 @@ export default function WelcomePage() {
             Photograph it.
             <br />
             <span className="text-brand-gradient">
-              It&apos;s listed everywhere.
+              Publish with confidence.
             </span>
           </h1>
           <p className="text-gray-500 max-w-md mx-auto">
-            Snap to List turns one photo into live listings on eBay, Etsy,
-            Shopify, and more — then keeps every channel in sync so you never
-            sell the same item twice.
+            Snap to List turns one photo into a review-ready draft, helps you
+            price it, and publishes through the marketplace connections you
+            choose.
           </p>
           <div className="flex gap-3 justify-center">
             <Link

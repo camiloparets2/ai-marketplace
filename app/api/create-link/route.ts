@@ -3,7 +3,7 @@ export const maxDuration = 30;
 
 import { NextRequest, NextResponse } from "next/server";
 import { createPaymentLink } from "@/lib/stripe-link";
-import { authenticateRequest } from "@/lib/auth/guard";
+import { requireUser } from "@/lib/auth/guard";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,9 +30,9 @@ export async function POST(
   req: NextRequest
 ): Promise<NextResponse<CreateLinkSuccess | CreateLinkError>> {
   // ── Auth ────────────────────────────────────────────────────────────────────
-  // Session or legacy beta key — same policy as /api/analyze.
-  const { authorized } = await authenticateRequest(req);
-  if (!authorized) {
+  // Payment links are user-owned and require a real session.
+  const user = await requireUser();
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized", retryable: false }, { status: 401 });
   }
 

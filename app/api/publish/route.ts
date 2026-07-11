@@ -28,7 +28,7 @@ import { publishToEbay } from "@/lib/platforms/ebay";
 import { publishToEtsy } from "@/lib/platforms/etsy";
 import { publishToShopify } from "@/lib/platforms/shopify";
 import { createPaymentLink } from "@/lib/stripe-link";
-import { authenticateRequest } from "@/lib/auth/guard";
+import { requireUser } from "@/lib/auth/guard";
 import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
 import { trackEvent } from "@/lib/telemetry";
 import {
@@ -110,17 +110,17 @@ function parseBody(raw: unknown): PublishBody | string {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // Session preferred; legacy beta key still allows the stateless targets
-  // (assist platforms + direct Stripe link). eBay/Etsy require a user because
-  // their connections are per-account.
-  const { authorized, user } = await authenticateRequest(req);
-  if (!authorized) {
+  // Every publish is user-scoped so inventory and external listings can be
+  // reconciled and delisted safely.
+  const user = await requireUser();
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  const userId = user.id;
 
   const allowed = await checkRateLimit(
     RATE_RULES.publish,
-    requestIdentity(req, user?.id ?? null)
+    requestIdentity(req, userId)
   );
   if (!allowed) {
     return NextResponse.json(
@@ -184,16 +184,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         case "ebay":
         case "etsy":
         case "shopify": {
-          // Marketplace publishing is user-scoped; a beta key alone can't
-          // reach anyone's tokens.
-          if (!user) {
-            return {
-              platform: target,
-              status: "not_connected",
-              connectUrl: "/login",
-            };
-          }
-          const conn = await getConnection(user.id, target);
+          // Marketplace publishing uses the signed-in user's stored tokens.
+          const conn = await getConnection(userId, target);
           if (!conn) {
             return {
               platform: target,
@@ -272,53 +264,66 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  // Establish the inventory source-of-truth before any external listing can
+  // go live. If this fails, stop before creating an untracked marketplace item.
+  let inventoryItemId: string;
+  try {
+    const photoUrl = targets.includes("ebay")
+      ? await hostedUrl().catch(() => null)
+      : null;
+    inventoryItemId = await createInventoryItem(userId, listing, photoUrl);
+  } catch (err) {
+    console.error("[publish] inventory creation failed:", err);
+    return NextResponse.json(
+      {
+        error:
+          "Your inventory could not be saved, so nothing was published. Please try again.",
+        retryable: true,
+      },
+      { status: 503 }
+    );
+  }
+
   const results = await Promise.all(targets.map(publishTo));
 
-  // ── Inventory: source of truth ───────────────────────────────────────────
-  // Record the item + its live listings so sold/delist sync can end them
-  // everywhere later. Best-effort: an inventory write failure must never
-  // undo a publish that already succeeded on the marketplaces.
-  let inventoryItemId: string | null = null;
-  if (user) {
-    try {
-      const photoUrl = await hostedUrl().catch(() => null);
-      inventoryItemId = await createInventoryItem(user.id, listing, photoUrl);
-
-      for (const record of liveRecords) {
-        await recordLiveListing(user.id, inventoryItemId, record, listing.price);
-      }
-      if (liveRecords.length > 0) await markItemListed(inventoryItemId);
-
-      for (const result of results) {
-        await recordPublishAttempt(
-          user.id,
-          inventoryItemId,
-          result.platform,
-          result.status,
-          result.status === "error" ? result.message : undefined
-        );
-      }
-    } catch (err) {
-      console.error("[publish] inventory recording failed:", err);
+  // Attach platform-side ids to the inventory item for sold/delist sync.
+  let inventorySyncError = false;
+  try {
+    for (const record of liveRecords) {
+      await recordLiveListing(userId, inventoryItemId, record, listing.price);
     }
+    if (liveRecords.length > 0) await markItemListed(inventoryItemId);
+
+    for (const result of results) {
+      await recordPublishAttempt(
+        userId,
+        inventoryItemId,
+        result.platform,
+        result.status,
+        result.status === "error" ? result.message : undefined
+      );
+    }
+  } catch (err) {
+    inventorySyncError = true;
+    console.error("[publish] live-listing reconciliation failed:", err);
   }
 
   // Funnel: one event per publish run, plus one per failed target so
   // channel-level breakage is queryable.
   const liveCount = results.filter((r) => r.status === "live").length;
-  await trackEvent(user?.id ?? null, "published", {
+  await trackEvent(userId, "published", {
     targets,
     liveCount,
     inventoryItemId,
   });
   for (const result of results) {
     if (result.status === "error") {
-      await trackEvent(user?.id ?? null, "publish_error", {
+      await trackEvent(userId, "publish_error", {
         platform: result.platform,
         message: result.message,
       });
     }
   }
 
-  return NextResponse.json({ results, inventoryItemId });
+  return NextResponse.json({ results, inventoryItemId, inventorySyncError });
 }

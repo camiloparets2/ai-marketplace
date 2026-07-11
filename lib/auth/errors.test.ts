@@ -2,6 +2,11 @@ import { describe, it, expect } from "vitest";
 import { friendlyAuthError, GOOGLE_NOT_ENABLED_MESSAGE } from "./errors";
 
 describe("friendlyAuthError", () => {
+  it("maps transient auth availability failures", () => {
+    expect(friendlyAuthError("auth_unavailable")).toContain(
+      "temporarily unavailable"
+    );
+  });
   it("maps a disabled Google provider to actionable copy", () => {
     expect(
       friendlyAuthError("Unsupported provider: provider is not enabled", "google")

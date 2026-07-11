@@ -1,9 +1,8 @@
 // Rate limiting for expensive / abuse-prone routes (server-only).
 //
 // Backed by the atomic bump_rate() Postgres function — one round trip, no
-// read-modify-write race. Keys are scoped per identity: the signed-in user
-// id when there is one, otherwise the caller's IP (good enough to blunt
-// anonymous abuse of the legacy beta-key path).
+// read-modify-write race. Keys are scoped to the signed-in user where
+// available, with an IP fallback for any future anonymous route.
 //
 // Fail-open: if the limiter itself errors (migration not applied, DB blip),
 // the request proceeds and we log — availability beats perfect metering, and

@@ -44,13 +44,13 @@ counter (`lib/rate-limit.ts`, fail-open).
 Routes: `/login` (sign in/up + Google), `/forgot-password`, `/reset-password`,
 `/auth/callback` (code exchange; validates `?next=` against open redirects),
 `/api/auth/status` (safe metadata only). Signed-out visitors to the app are
-redirected to `/login` by `middleware.ts`. Without the Supabase auth env vars
-the app runs in legacy beta-key mode (see `.env.example`).
+redirected by `proxy.ts`. Missing Supabase auth configuration fails closed;
+protected pages and APIs never fall back to a shared browser-visible key.
 
 ## Setup
 
 ```bash
-npm install
+npm ci
 cp .env.local.example .env.local   # fill in keys — see comments in the file
 npm run dev
 ```

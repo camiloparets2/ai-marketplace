@@ -9,7 +9,7 @@ export default function manifest(): MetadataRoute.Manifest {
     name: "Snap to List",
     short_name: "SnapToList",
     description:
-      "Photograph an item. AI drafts the listing. Publish to eBay, Etsy, Shopify, and more — and never oversell.",
+      "Photograph an item, review an AI-assisted draft, and publish through your connected marketplaces.",
     start_url: "/",
     display: "standalone",
     orientation: "portrait",

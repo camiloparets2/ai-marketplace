@@ -7,7 +7,7 @@ import { validateImageBytes } from "@/lib/image-validation";
 import { identifyItem, VisionError } from "@/lib/ai/vision";
 import type { AcceptedMimeType } from "@/lib/image-validation";
 import { getShippingRate } from "@/lib/shipping";
-import { authenticateRequest } from "@/lib/auth/guard";
+import { requireUser } from "@/lib/auth/guard";
 import { randomUUID } from "crypto";
 import { spendCredits, refundCredits } from "@/lib/billing/credits";
 import { CREDIT_COST_AI_EXTRACTION } from "@/lib/billing/plans";
@@ -47,18 +47,18 @@ function errorResponse(
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Auth ────────────────────────────────────────────────────────────────────
-  // Signed-in Supabase session, or the legacy pre-shared beta key during the
-  // transition (see lib/auth/guard.ts — key removal is a Gate 2 TODO).
-  const { authorized, user } = await authenticateRequest(req);
-  if (!authorized) {
+  // A real session is required so AI usage is always metered to one account.
+  const user = await requireUser();
+  if (!user) {
     return errorResponse("Unauthorized", false, 401);
   }
+  const userId = user.id;
 
   // Abuse protection ahead of the expensive Claude call (credits already gate
   // signed-in volume; this blunts scripted bursts and beta-key abuse).
   const allowed = await checkRateLimit(
     RATE_RULES.analyze,
-    requestIdentity(req, user?.id ?? null)
+    requestIdentity(req, userId)
   );
   if (!allowed) {
     return errorResponse(
@@ -123,14 +123,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // beta-key requests carry no user, so they aren't metered (Gate 2 TODO).
   const requestId = randomUUID();
   let credited = false;
-  if (user) {
-    const spend = await spendCredits(
-      user.id,
-      CREDIT_COST_AI_EXTRACTION,
-      "ai_listing_extraction",
-      requestId
-    );
-    if (!spend.ok && spend.reason === "no_credits") {
+  const spend = await spendCredits(
+    userId,
+    CREDIT_COST_AI_EXTRACTION,
+    "ai_listing_extraction",
+    requestId
+  );
+  if (!spend.ok) {
+    if (spend.reason === "no_credits") {
       const renews = spend.status.periodEnd
         ? ` Your credits renew ${new Date(spend.status.periodEnd).toLocaleDateString()}.`
         : "";
@@ -144,14 +144,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: 402 }
       );
     }
-    credited = spend.ok;
-    // reason === "unavailable" → billing infra not migrated yet; fail open.
+    return errorResponse(
+      "Credit service is temporarily unavailable. Please try again shortly.",
+      true,
+      503
+    );
   }
+  credited = true;
 
   // Refund helper for every failure path below the spend.
   async function refund(): Promise<void> {
-    if (credited && user) {
-      await refundCredits(user.id, CREDIT_COST_AI_EXTRACTION, requestId);
+    if (credited) {
+      await refundCredits(userId, CREDIT_COST_AI_EXTRACTION, requestId);
     }
   }
 
@@ -168,11 +172,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const shippingRate = getShippingRate(extracted.suggestedShippingService);
     extracted.estimatedShippingCost = shippingRate.cost;
 
-    await trackEvent(user?.id ?? null, "draft_created", { requestId });
+    await trackEvent(userId, "draft_created", { requestId });
     return NextResponse.json(extracted);
   } catch (err) {
     await refund();
-    await trackEvent(user?.id ?? null, "draft_failed", { requestId });
+    await trackEvent(userId, "draft_failed", { requestId });
 
     if (err instanceof VisionError) {
       const status =

@@ -2,7 +2,7 @@
 // "Connect eBay" vs a ready-to-publish checkbox.
 
 import { NextResponse } from "next/server";
-import { getConnection, isExpired } from "@/lib/connections";
+import { getConnection, isExpired, needsReconnect } from "@/lib/connections";
 import { API_PLATFORMS } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
 import { requireUser } from "@/lib/auth/guard";
@@ -26,32 +26,33 @@ export interface ConnectionsResponse {
 }
 
 export async function GET(): Promise<NextResponse> {
-  // Connections are per-user, so a beta key (no identity) can't see any.
+  // Connections are per-user and never exposed without a session.
   const user = await requireUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
   const connections = {} as Record<ApiPlatform, boolean>;
   const health = {} as Record<ApiPlatform, ConnectionHealth>;
 
   for (const platform of API_PLATFORMS) {
     let conn = null;
-    if (user) {
-      try {
-        conn = await getConnection(user.id, platform);
-      } catch {
-        // Supabase not configured yet — treat as disconnected so the UI
-        // (and the assist platforms) still work.
-        conn = null;
-      }
+    try {
+      conn = await getConnection(user.id, platform);
+    } catch {
+      // A connection-store outage should not expose tokens or crash the page.
+      conn = null;
     }
     const connected = conn !== null;
     const expired = conn !== null && isExpired(conn);
     const canRefresh = conn?.refreshToken != null && conn.refreshToken !== "";
-    connections[platform] = connected;
+    const reconnectRequired = conn !== null && needsReconnect(conn);
+    connections[platform] = connected && !reconnectRequired;
     health[platform] = {
       connected,
       expired,
       canRefresh,
-      needsReconnect: connected && expired && !canRefresh,
+      needsReconnect: reconnectRequired,
     };
   }
 
