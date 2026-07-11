@@ -60,6 +60,10 @@ export const VISION_PROMPT = [
   "accuracy prevents buyer returns on high-ticket items.",
   "List every visible defect honestly — scratches, dents, stains, missing",
   "parts — an empty defect list must mean the item truly looks flawless.",
+  "Always recommend an asking price from the item's typical resale value in",
+  "its visible condition, with a 1-2 sentence rationale citing the comparable",
+  "market. If you're unsure, still price it and lower the confidence score —",
+  "the seller edits the price either way.",
   "Set confidence scores honestly: 90+ only when you can read the value directly",
   "from the photo; 50-70 for reasonable inference; below 50 when uncertain.",
 ].join(" ");
@@ -87,7 +91,9 @@ export async function identifyItem(
     response = await client.messages.create(
       {
         model: process.env.EXTRACTION_MODEL ?? "claude-sonnet-4-6",
-        max_tokens: 1024,
+        // Headroom for the full extraction plus the price rationale — a
+        // truncated tool_use block fails JSON parsing inside the SDK.
+        max_tokens: 1536,
         tools: [EXTRACTION_TOOL_SCHEMA as unknown as Anthropic.Tool],
         tool_choice: { type: "tool", name: "extract_listing" },
         messages: [
@@ -155,6 +161,10 @@ export async function identifyItem(
   }
 
   const extraction = toolBlock.input as ExtractionResult;
+  // Normalise the price fields a degraded response might omit: downstream
+  // code (and the review UI's editable price) relies on null, not undefined.
+  extraction.suggestedPrice ??= null;
+  extraction.priceRationale ??= null;
   return {
     extraction,
     confidence: overallConfidence(extraction),

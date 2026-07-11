@@ -216,6 +216,8 @@ export default function Page() {
       "MANUAL_ESTIMATE_NEEDED"
     );
   const [price, setPrice] = useState("");
+  // One-line explanation of the AI's suggested price, shown by the price field.
+  const [priceRationale, setPriceRationale] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingText = useLoadingStage(stage === "analyzing");
@@ -293,6 +295,7 @@ export default function Page() {
     setResults([]);
     setCopiedKey("");
     setPrice("");
+    setPriceRationale(null);
     setImageBase64("");
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, [preview]);
@@ -363,6 +366,15 @@ export default function Page() {
       setCondition(result.condition);
       setCategory(result.category);
       setShippingService(result.suggestedShippingService);
+      // The AI's recommended price pre-fills the EDITABLE field — always
+      // shown when present, never gated. Below-floor prices warn (in
+      // PricingPanel) but never block a manual publish.
+      setPrice(
+        typeof result.suggestedPrice === "number" && result.suggestedPrice > 0
+          ? result.suggestedPrice.toFixed(2)
+          : ""
+      );
+      setPriceRationale(result.priceRationale ?? null);
       setStage("review");
     } catch {
       setError("Connection failed. Please check your network and try again.");
@@ -853,6 +865,7 @@ export default function Page() {
                 costBasis={null}
                 shippingCost={getShippingRate(shippingService).cost}
                 compsQuery={title}
+                aiRationale={priceRationale}
               />
             </div>
 

@@ -55,6 +55,16 @@ export interface ExtractionResult {
   suggestedShippingService: ShippingService;
   // Dollar amount from the flat rate lookup table, or null when MANUAL_ESTIMATE_NEEDED.
   estimatedShippingCost: number | null;
+  // AI-recommended asking price in dollars — pre-fills the EDITABLE price
+  // field in the review UI. Regression note: dropped by the vision.ts
+  // refactor (e548dab) and restored per docs/design/ship-from-location.md.
+  // Null only when the item is truly unpriceable; uncertainty belongs in a
+  // lower confidence score, not a missing price.
+  suggestedPrice: number | null;
+  // 1-2 sentence rationale for the price, e.g. "Used WH-1000XM4 in Good
+  // condition sells for $150-180; $165 targets a one-week sale." Null when
+  // suggestedPrice is null.
+  priceRationale: string | null;
   // Per-field confidence scores from 0–100. Only keys that Claude populated are present.
   // UI renders a yellow "needs review" indicator when confidence[field] < CONFIDENCE_THRESHOLD.
   // NOTE (Phase 2 TODO): Claude generates confidence scores in the same inference pass as
@@ -173,6 +183,16 @@ export const EXTRACTION_TOOL_SCHEMA = {
         description:
           "Estimated shipping cost in dollars from the flat rate table, null when MANUAL_ESTIMATE_NEEDED",
       },
+      suggestedPrice: {
+        type: ["number", "null"],
+        description:
+          "Recommended asking price in dollars based on the item's identity, condition, and typical resale market value. Always suggest a price — express uncertainty through a lower confidence score, not by omitting it. Null only when the item is truly unpriceable.",
+      },
+      priceRationale: {
+        type: ["string", "null"],
+        description:
+          "1-2 sentences explaining your price. Cite the comparable market (e.g. 'Used Sony WH-1000XM4 in Good condition sells for $150-180 on eBay. $165 targets a quick sale.'). Null when suggestedPrice is null.",
+      },
       confidence: {
         type: "object",
         description:
@@ -196,6 +216,8 @@ export const EXTRACTION_TOOL_SCHEMA = {
       "estimatedWeightLbs",
       "suggestedShippingService",
       "estimatedShippingCost",
+      "suggestedPrice",
+      "priceRationale",
       "confidence",
     ],
   },
