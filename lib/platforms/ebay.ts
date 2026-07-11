@@ -13,9 +13,14 @@
 //   EBAY_RU_NAME                        — the RuName tied to the OAuth redirect
 //   EBAY_ENV                            — "production" (default) or "sandbox",
 //                                          case-insensitive
-//   EBAY_POSTAL_CODE                    — ship-from ZIP for the merchant location
 // Optional policy overrides (otherwise the seller's first policy is used):
 //   EBAY_FULFILLMENT_POLICY_ID, EBAY_PAYMENT_POLICY_ID, EBAY_RETURN_POLICY_ID
+//
+// DEPRECATED: EBAY_POSTAL_CODE — the old single global ship-from ZIP. The
+// ship-from address is per-seller data now (docs/design/ship-from-location.md):
+// detected from the seller's existing inventory locations at connect time, or
+// created from their stored ship-from profile. The env var survives only as a
+// last-resort local-dev fallback and assumes US.
 
 import type {
   ListingInput,
@@ -28,6 +33,13 @@ import {
   EBAY_CONDITION_MAP,
 } from "@/lib/platforms/compose";
 import { saveConnection, isExpired } from "@/lib/connections";
+import { getShipFromLocation } from "@/lib/locations";
+import type { ShipFromLocation } from "@/lib/ship-from";
+import {
+  marketplaceForCountry,
+  marketplaceById,
+} from "@/lib/platforms/ebay-marketplaces";
+import type { EbayMarketplace } from "@/lib/platforms/ebay-marketplaces";
 
 // ─── Environment ──────────────────────────────────────────────────────────────
 
@@ -188,15 +200,16 @@ async function freshConnection(conn: PlatformConnection): Promise<PlatformConnec
 async function ebayFetch(
   accessToken: string,
   path: string,
-  init: { method?: string; body?: unknown } = {}
+  init: { method?: string; body?: unknown; contentLanguage?: string } = {}
 ): Promise<Response> {
   return fetch(`${apiBase()}${path}`, {
     method: init.method ?? "GET",
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
-      // Required by Inventory API write calls.
-      "Content-Language": "en-US",
+      // Required by Inventory API write calls; must match the seller's
+      // marketplace (de-DE for EBAY_DE, en-GB for EBAY_GB, …).
+      "Content-Language": init.contentLanguage ?? "en-US",
       Accept: "application/json",
     },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
@@ -218,38 +231,91 @@ async function ebayError(res: Response, step: string): Promise<Error> {
   return new Error(`eBay ${step} failed (${res.status}): ${detail}`);
 }
 
-// ─── Publish steps ────────────────────────────────────────────────────────────
+// ─── Merchant location (per-seller ship-from) ─────────────────────────────────
+//
+// docs/design/ship-from-location.md — order of preference:
+//   1. merchantLocationKey cached in the connection meta (no network)
+//   2. a location the seller already has on eBay (getInventoryLocations)
+//   3. create one from the seller's stored ship-from profile
+//   4. DEPRECATED local-dev fallback: EBAY_POSTAL_CODE (US-only)
+//   5. EbayShipFromMissingError — the app maps it to an in-app prompt.
 
 const MERCHANT_LOCATION_KEY = "snap-to-list-default";
 
-async function ensureMerchantLocation(accessToken: string): Promise<string> {
-  const existing = await ebayFetch(
-    accessToken,
-    "/sell/inventory/v1/location?limit=1"
-  );
-  if (existing.ok) {
-    const data = (await existing.json()) as {
-      locations?: Array<{ merchantLocationKey: string }>;
-    };
-    const key = data.locations?.[0]?.merchantLocationKey;
-    if (key) return key;
-  }
-
-  const postalCode = process.env.EBAY_POSTAL_CODE;
-  if (!postalCode) {
-    throw new Error(
-      "No eBay inventory location found. Set EBAY_POSTAL_CODE so one can be created."
+// Thrown when the seller has no eBay inventory location and no stored
+// ship-from address to create one from. The message is end-user safe;
+// /api/publish attaches the settings link so the UI can render a CTA.
+export class EbayShipFromMissingError extends Error {
+  constructor() {
+    super(
+      "Add your ship-from location to publish on eBay — it takes 30 seconds in Settings."
     );
+    this.name = "EbayShipFromMissingError";
   }
+}
+
+interface DetectedLocation {
+  merchantLocationKey: string;
+  country: string | null;
+}
+
+// Narrow view of a getInventoryLocations response.
+interface LocationsPayload {
+  locations?: Array<{
+    merchantLocationKey?: string;
+    merchantLocationStatus?: string;
+    location?: { address?: { country?: string } };
+  }> | null;
+}
+
+// Looks for a merchant location the seller already has — most established
+// eBay sellers do, so this keeps them from ever seeing the ship-from form.
+export async function detectEbayLocation(
+  accessToken: string
+): Promise<DetectedLocation | null> {
+  const res = await ebayFetch(
+    accessToken,
+    "/sell/inventory/v1/location?limit=100"
+  );
+  if (!res.ok) return null;
+  const data = (await res.json()) as LocationsPayload;
+  const locations = (data.locations ?? []).filter(
+    (l): l is { merchantLocationKey: string } & typeof l =>
+      typeof l.merchantLocationKey === "string" && l.merchantLocationKey !== ""
+  );
+  if (locations.length === 0) return null;
+  // Prefer an ENABLED location — offers can only reference enabled ones.
+  const chosen =
+    locations.find((l) => l.merchantLocationStatus === "ENABLED") ??
+    locations[0];
+  return {
+    merchantLocationKey: chosen.merchantLocationKey,
+    country: chosen.location?.address?.country ?? null,
+  };
+}
+
+// Creates the seller's merchant location from a ship-from address. The key
+// lives in the seller's own account namespace, so a constant is safe.
+async function createEbayLocation(
+  accessToken: string,
+  shipFrom: ShipFromLocation,
+  contentLanguage: string
+): Promise<string> {
+  const address: Record<string, string> = { country: shipFrom.country };
+  if (shipFrom.postalCode) address.postalCode = shipFrom.postalCode;
+  if (shipFrom.city) address.city = shipFrom.city;
+  if (shipFrom.stateOrProvince)
+    address.stateOrProvince = shipFrom.stateOrProvince;
 
   const created = await ebayFetch(
     accessToken,
     `/sell/inventory/v1/location/${MERCHANT_LOCATION_KEY}`,
     {
       method: "POST",
+      contentLanguage,
       body: {
-        location: { address: { postalCode, country: "US" } },
-        name: "Snap to List default location",
+        location: { address },
+        name: "Snap to List ship-from location",
         merchantLocationStatus: "ENABLED",
         locationTypes: ["WAREHOUSE"],
       },
@@ -262,13 +328,140 @@ async function ensureMerchantLocation(accessToken: string): Promise<string> {
   return MERCHANT_LOCATION_KEY;
 }
 
+export interface EnsuredEbayLocation {
+  merchantLocationKey: string;
+  marketplace: EbayMarketplace;
+  // How the location was resolved — the OAuth callback uses this to decide
+  // whether to send the user to the ship-from form.
+  source: "meta" | "detected" | "created" | "env_fallback";
+}
+
+// Persist the resolved key + marketplace on the connection so subsequent
+// publishes skip every lookup. Best-effort: a meta write failure must not
+// fail a publish that already has everything it needs.
+async function cacheLocationOnConnection(
+  conn: PlatformConnection,
+  merchantLocationKey: string,
+  marketplace: EbayMarketplace
+): Promise<void> {
+  try {
+    await saveConnection({
+      ...conn,
+      meta: {
+        ...conn.meta,
+        merchantLocationKey,
+        marketplaceId: marketplace.id,
+        currency: marketplace.currency,
+      },
+    });
+  } catch (err) {
+    console.warn("[ebay] failed to cache merchant location on connection", err);
+  }
+}
+
+/**
+ * Resolve the seller's merchant location + marketplace: cached meta first,
+ * then detect on eBay, then create from the stored (or provided) ship-from
+ * address. Throws EbayShipFromMissingError when there is nothing to go on.
+ */
+export async function ensureEbayLocation(
+  conn: PlatformConnection,
+  shipFromOverride: ShipFromLocation | null = null
+): Promise<EnsuredEbayLocation> {
+  const metaKey = conn.meta.merchantLocationKey;
+  const metaMarketplace = marketplaceById(conn.meta.marketplaceId);
+  if (metaKey && metaMarketplace) {
+    return {
+      merchantLocationKey: metaKey,
+      marketplace: metaMarketplace,
+      source: "meta",
+    };
+  }
+
+  // The seller may already have a location from selling elsewhere — detect
+  // before ever asking them anything.
+  const detected = await detectEbayLocation(conn.accessToken);
+  if (detected) {
+    const marketplace =
+      metaMarketplace ?? marketplaceForCountry(detected.country);
+    await cacheLocationOnConnection(
+      conn,
+      detected.merchantLocationKey,
+      marketplace
+    );
+    return {
+      merchantLocationKey: detected.merchantLocationKey,
+      marketplace,
+      source: "detected",
+    };
+  }
+
+  const shipFrom =
+    shipFromOverride ?? (await getShipFromLocation(conn.userId));
+  if (shipFrom) {
+    const marketplace =
+      metaMarketplace ?? marketplaceForCountry(shipFrom.country);
+    const key = await createEbayLocation(
+      conn.accessToken,
+      shipFrom,
+      marketplace.contentLanguage
+    );
+    await cacheLocationOnConnection(conn, key, marketplace);
+    return { merchantLocationKey: key, marketplace, source: "created" };
+  }
+
+  // DEPRECATED: global env fallback from the single-seller era. US-only by
+  // construction — kept so local dev keeps working, never a product answer.
+  const envPostal = process.env.EBAY_POSTAL_CODE;
+  if (envPostal) {
+    console.warn(
+      "[ebay] EBAY_POSTAL_CODE is deprecated — ship-from is per-user now; see docs/design/ship-from-location.md"
+    );
+    const marketplace = marketplaceForCountry("US");
+    const key = await createEbayLocation(
+      conn.accessToken,
+      { country: "US", postalCode: envPostal, city: null, stateOrProvince: null },
+      marketplace.contentLanguage
+    );
+    await cacheLocationOnConnection(conn, key, marketplace);
+    return { merchantLocationKey: key, marketplace, source: "env_fallback" };
+  }
+
+  throw new EbayShipFromMissingError();
+}
+
+export type ConnectLocationStatus = "ready" | "ship_from_needed";
+
+/**
+ * Connect-time hook for the OAuth callback: detect (or create, when a
+ * ship-from profile already exists) the seller's location so publishing
+ * works immediately. "ship_from_needed" → the callback routes the user to
+ * the ship-from form. Never throws on infra errors — publish-time
+ * ensureEbayLocation retries the whole chain anyway.
+ */
+export async function setupEbayLocationOnConnect(
+  conn: PlatformConnection
+): Promise<ConnectLocationStatus> {
+  try {
+    await ensureEbayLocation(conn);
+    return "ready";
+  } catch (err) {
+    if (err instanceof EbayShipFromMissingError) return "ship_from_needed";
+    console.warn("[ebay] connect-time location setup failed; deferring", err);
+    return "ready";
+  }
+}
+
+// ─── Publish steps ────────────────────────────────────────────────────────────
+
 async function suggestCategoryId(
   accessToken: string,
-  title: string
+  title: string,
+  categoryTreeId: string
 ): Promise<string> {
   const res = await ebayFetch(
     accessToken,
-    `/commerce/taxonomy/v1/category_tree/0/get_category_suggestions?q=${encodeURIComponent(title)}`
+    `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_category_suggestions?q=${encodeURIComponent(title)}`
   );
   if (!res.ok) throw await ebayError(res, "category lookup");
   const data = (await res.json()) as {
@@ -289,7 +482,10 @@ interface PolicyIds {
   returnPolicyId: string;
 }
 
-async function resolvePolicies(accessToken: string): Promise<PolicyIds> {
+async function resolvePolicies(
+  accessToken: string,
+  marketplaceId: string
+): Promise<PolicyIds> {
   async function firstPolicyId(
     kind: "fulfillment_policy" | "payment_policy" | "return_policy",
     envOverride: string | undefined,
@@ -299,7 +495,7 @@ async function resolvePolicies(accessToken: string): Promise<PolicyIds> {
     if (envOverride) return envOverride;
     const res = await ebayFetch(
       accessToken,
-      `/sell/account/v1/${kind}?marketplace_id=EBAY_US`
+      `/sell/account/v1/${kind}?marketplace_id=${marketplaceId}`
     );
     if (!res.ok) throw await ebayError(res, `${kind} lookup`);
     const data = (await res.json()) as Record<
@@ -396,13 +592,15 @@ export function buildEbayInventoryItemPayload(
 
 export interface EbayOfferPayload {
   sku: string;
-  marketplaceId: "EBAY_US";
+  // The seller's marketplace (EBAY_US, EBAY_GB, EBAY_DE, …) — derived from
+  // their account/country at connect time, never a global constant.
+  marketplaceId: string;
   format: "FIXED_PRICE";
   availableQuantity: number;
   categoryId: string;
   listingDescription: string;
   merchantLocationKey: string;
-  pricingSummary: { price: { value: string; currency: "USD" } };
+  pricingSummary: { price: { value: string; currency: string } };
   listingPolicies: PolicyIds;
 }
 
@@ -411,18 +609,19 @@ export function buildEbayOfferPayload(
   sku: string,
   categoryId: string,
   merchantLocationKey: string,
-  policies: PolicyIds
+  policies: PolicyIds,
+  marketplace: EbayMarketplace
 ): EbayOfferPayload {
   return {
     sku,
-    marketplaceId: "EBAY_US",
+    marketplaceId: marketplace.id,
     format: "FIXED_PRICE",
     availableQuantity: 1,
     categoryId,
     listingDescription: ebayHtmlDescription(input),
     merchantLocationKey,
     pricingSummary: {
-      price: { value: input.price.toFixed(2), currency: "USD" },
+      price: { value: input.price.toFixed(2), currency: marketplace.currency },
     },
     listingPolicies: policies,
   };
@@ -439,10 +638,13 @@ export async function publishToEbay(
   // Unique SKU per publish keeps retries simple — no stale-offer reconciliation.
   const sku = `snap-${Date.now()}`;
 
-  const [merchantLocationKey, categoryId, policies] = await Promise.all([
-    ensureMerchantLocation(conn.accessToken),
-    suggestCategoryId(conn.accessToken, composed.title),
-    resolvePolicies(conn.accessToken),
+  // Location first: it decides the marketplace (and with it the category
+  // tree, currency, policies, and Content-Language) for everything below.
+  const { merchantLocationKey, marketplace } = await ensureEbayLocation(conn);
+
+  const [categoryId, policies] = await Promise.all([
+    suggestCategoryId(conn.accessToken, composed.title, marketplace.categoryTreeId),
+    resolvePolicies(conn.accessToken, marketplace.id),
   ]);
 
   const itemRes = await ebayFetch(
@@ -450,6 +652,7 @@ export async function publishToEbay(
     `/sell/inventory/v1/inventory_item/${sku}`,
     {
       method: "PUT",
+      contentLanguage: marketplace.contentLanguage,
       body: buildEbayInventoryItemPayload(input, imageUrls),
     }
   );
@@ -457,7 +660,15 @@ export async function publishToEbay(
 
   const offerRes = await ebayFetch(conn.accessToken, "/sell/inventory/v1/offer", {
     method: "POST",
-    body: buildEbayOfferPayload(input, sku, categoryId, merchantLocationKey, policies),
+    contentLanguage: marketplace.contentLanguage,
+    body: buildEbayOfferPayload(
+      input,
+      sku,
+      categoryId,
+      merchantLocationKey,
+      policies,
+      marketplace
+    ),
   });
   if (!offerRes.ok) throw await ebayError(offerRes, "offer creation");
   const offer = (await offerRes.json()) as { offerId: string };
@@ -465,7 +676,7 @@ export async function publishToEbay(
   const publishRes = await ebayFetch(
     conn.accessToken,
     `/sell/inventory/v1/offer/${offer.offerId}/publish`,
-    { method: "POST", body: {} }
+    { method: "POST", contentLanguage: marketplace.contentLanguage, body: {} }
   );
   if (!publishRes.ok) throw await ebayError(publishRes, "offer publish");
   const published = (await publishRes.json()) as { listingId: string };

@@ -3,7 +3,10 @@
 // user back to the app with a status query param the UI can toast on.
 
 import { NextRequest, NextResponse } from "next/server";
-import { ebayExchangeCode } from "@/lib/platforms/ebay";
+import {
+  ebayExchangeCode,
+  setupEbayLocationOnConnect,
+} from "@/lib/platforms/ebay";
 import { etsyExchangeCode } from "@/lib/platforms/etsy";
 import {
   shopifyExchangeCode,
@@ -13,8 +16,12 @@ import {
 import { saveConnection } from "@/lib/connections";
 import { requireUser } from "@/lib/auth/guard";
 
-function backToApp(origin: string, params: Record<string, string>): NextResponse {
-  const url = new URL("/", origin);
+function backToApp(
+  origin: string,
+  params: Record<string, string>,
+  path = "/"
+): NextResponse {
+  const url = new URL(path, origin);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const res = NextResponse.redirect(url.toString());
   // One-shot cookies — always clear them regardless of outcome.
@@ -67,7 +74,22 @@ export async function GET(
 
   try {
     if (platform === "ebay") {
-      await saveConnection({ ...(await ebayExchangeCode(code)), userId: user.id });
+      const connection = {
+        ...(await ebayExchangeCode(code)),
+        userId: user.id,
+      };
+      await saveConnection(connection);
+      // Least-friction ship-from resolution: reuse a location the seller
+      // already has on eBay (or create one from their stored ship-from
+      // address). Only when neither exists do we ask — once, right now.
+      const locationStatus = await setupEbayLocationOnConnect(connection);
+      if (locationStatus === "ship_from_needed") {
+        return backToApp(
+          origin,
+          { connected: platform },
+          "/settings/ship-from"
+        );
+      }
     } else if (platform === "shopify") {
       // Shopify signs its callbacks — reject anything with a bad HMAC or a
       // shop domain outside myshopify.com before exchanging the code.

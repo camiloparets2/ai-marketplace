@@ -24,7 +24,7 @@ import { ASSIST_POST_URLS } from "@/lib/platforms/types";
 import { assistCopyText, composeListing } from "@/lib/platforms/compose";
 import { getConnection } from "@/lib/connections";
 import { hostListingPhoto } from "@/lib/storage";
-import { publishToEbay } from "@/lib/platforms/ebay";
+import { publishToEbay, EbayShipFromMissingError } from "@/lib/platforms/ebay";
 import { publishToEtsy } from "@/lib/platforms/etsy";
 import { publishToShopify } from "@/lib/platforms/shopify";
 import { createPaymentLink } from "@/lib/stripe-link";
@@ -263,6 +263,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     } catch (err) {
       console.error(`[publish:${target}]`, err);
+      // Missing ship-from is fixable in-app — send the UI a CTA, never an
+      // env/config error.
+      if (err instanceof EbayShipFromMissingError) {
+        return {
+          platform: target,
+          status: "error",
+          message: err.message,
+          actionUrl: "/settings/ship-from",
+          actionLabel: "Add ship-from location →",
+        };
+      }
       return {
         platform: target,
         status: "error",

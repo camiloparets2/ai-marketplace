@@ -18,6 +18,9 @@ export interface PricingPanelProps {
   shippingCost: number | null;
   // query for the comps lookup (usually the listing title)
   compsQuery: string;
+  // One-line rationale for the AI-suggested price the field was pre-filled
+  // with; null → no suggestion arrived (the field starts empty).
+  aiRationale?: string | null;
 }
 
 export function PricingPanel({
@@ -26,6 +29,7 @@ export function PricingPanel({
   costBasis,
   shippingCost,
   compsQuery,
+  aiRationale = null,
 }: PricingPanelProps) {
   const [comps, setComps] = useState<CompsSummary | null>(null);
   const [compsState, setCompsState] = useState<"idle" | "loading" | "done">(
@@ -93,11 +97,30 @@ export function PricingPanel({
         />
       </div>
 
-      {/* Floor indicator */}
+      {/* AI suggestion rationale — why the field was pre-filled */}
+      {aiRationale && (
+        <p className="text-xs text-blue-800 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
+          <span className="font-semibold">AI suggestion:</span> {aiRationale}{" "}
+          <span className="text-blue-600">Edit the price as you like.</span>
+        </p>
+      )}
+
+      {/* Floor indicator. With no cost basis the true floor is uncomputable —
+          say so instead of presenting the $0-cost floor as authoritative. */}
       <p id="price-floor" className="text-xs text-gray-500">
-        Break-even floor <span className="font-semibold text-gray-700">${floor.toFixed(2)}</span>{" "}
-        — cost + fees ({Math.round(PRICING_DEFAULTS.feeRate * 100)}%) + shipping + minimum margin.
-        {costBasis === null && " Add your cost for an accurate floor."}
+        {costBasis === null ? (
+          <>
+            Break-even floor unknown — without your item cost it&apos;s at least{" "}
+            <span className="font-semibold text-gray-700">${floor.toFixed(2)}</span>{" "}
+            (fees {Math.round(PRICING_DEFAULTS.feeRate * 100)}% + shipping +
+            minimum margin). Add your cost for the real floor.
+          </>
+        ) : (
+          <>
+            Break-even floor <span className="font-semibold text-gray-700">${floor.toFixed(2)}</span>{" "}
+            — cost + fees ({Math.round(PRICING_DEFAULTS.feeRate * 100)}%) + shipping + minimum margin.
+          </>
+        )}
       </p>
 
       {/* Comps snapshot */}

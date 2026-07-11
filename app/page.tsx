@@ -60,7 +60,14 @@ type TargetResult =
       price: number;
     }
   | { platform: PublishTarget; status: "not_connected"; connectUrl: string }
-  | { platform: PublishTarget; status: "error"; message: string };
+  | {
+      platform: PublishTarget;
+      status: "error";
+      message: string;
+      // In-app fix the user can click through to (e.g. add ship-from).
+      actionUrl?: string;
+      actionLabel?: string;
+    };
 
 // ─── Loading progress stages ──────────────────────────────────────────────────
 // Time-based — not tied to real API progress. Each label reinforces the
@@ -209,6 +216,8 @@ export default function Page() {
       "MANUAL_ESTIMATE_NEEDED"
     );
   const [price, setPrice] = useState("");
+  // One-line explanation of the AI's suggested price, shown by the price field.
+  const [priceRationale, setPriceRationale] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingText = useLoadingStage(stage === "analyzing");
@@ -286,6 +295,7 @@ export default function Page() {
     setResults([]);
     setCopiedKey("");
     setPrice("");
+    setPriceRationale(null);
     setImageBase64("");
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, [preview]);
@@ -356,6 +366,15 @@ export default function Page() {
       setCondition(result.condition);
       setCategory(result.category);
       setShippingService(result.suggestedShippingService);
+      // The AI's recommended price pre-fills the EDITABLE field — always
+      // shown when present, never gated. Below-floor prices warn (in
+      // PricingPanel) but never block a manual publish.
+      setPrice(
+        typeof result.suggestedPrice === "number" && result.suggestedPrice > 0
+          ? result.suggestedPrice.toFixed(2)
+          : ""
+      );
+      setPriceRationale(result.priceRationale ?? null);
       setStage("review");
     } catch {
       setError("Connection failed. Please check your network and try again.");
@@ -846,6 +865,7 @@ export default function Page() {
                 costBasis={null}
                 shippingCost={getShippingRate(shippingService).cost}
                 compsQuery={title}
+                aiRationale={priceRationale}
               />
             </div>
 
@@ -1038,9 +1058,19 @@ export default function Page() {
                 )}
 
                 {r.status === "error" && (
-                  <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-                    {r.message}
-                  </p>
+                  <>
+                    <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
+                      {r.message}
+                    </p>
+                    {r.actionUrl && (
+                      <a
+                        href={r.actionUrl}
+                        className="w-full py-2 rounded-lg btn-primary font-medium text-sm text-center transition-colors"
+                      >
+                        {r.actionLabel ?? "Fix this →"}
+                      </a>
+                    )}
+                  </>
                 )}
               </div>
             ))}

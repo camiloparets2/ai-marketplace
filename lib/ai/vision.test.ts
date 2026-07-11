@@ -21,6 +21,9 @@ function extraction(over: Partial<ExtractionResult> = {}): ExtractionResult {
     estimatedWeightLbs: null,
     suggestedShippingService: "USPS_FLAT_RATE_MEDIUM",
     estimatedShippingCost: 16.1,
+    suggestedPrice: 165,
+    priceRationale:
+      "Used WH-1000XM4 in Very Good condition sells for $150-180 on eBay; $165 targets a quick sale.",
     confidence: { title: 95, category: 90, condition: 85 },
     ...over,
   };
@@ -67,6 +70,29 @@ describe("identifyItem", () => {
     expect(result.extraction.title).toBe("Sony WH-1000XM4 Wireless Headphones");
     expect(result.confidence).toBeCloseTo(0.85);
     expect(result.defects).toEqual(["light scuff on right earcup"]);
+  });
+
+  it("passes the suggested price and rationale through untouched", async () => {
+    // Regression: e548dab dropped these from the schema and the review UI
+    // lost its pre-filled editable price (docs/design/ship-from-location.md).
+    const client = clientReturning([
+      { type: "tool_use", name: "extract_listing", input: extraction() },
+    ]);
+    const result = await identifyItem("aGk=", "image/jpeg", client);
+    expect(result.extraction.suggestedPrice).toBe(165);
+    expect(result.extraction.priceRationale).toMatch(/\$150-180/);
+  });
+
+  it("normalises omitted price fields to null, never undefined", async () => {
+    const bare = extraction();
+    delete (bare as Partial<ExtractionResult>).suggestedPrice;
+    delete (bare as Partial<ExtractionResult>).priceRationale;
+    const client = clientReturning([
+      { type: "tool_use", name: "extract_listing", input: bare },
+    ]);
+    const result = await identifyItem("aGk=", "image/jpeg", client);
+    expect(result.extraction.suggestedPrice).toBeNull();
+    expect(result.extraction.priceRationale).toBeNull();
   });
 
   it("defaults defects to [] when the model omits them", async () => {

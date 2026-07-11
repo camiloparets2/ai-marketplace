@@ -32,6 +32,8 @@ const extraction: ExtractionResult = {
   estimatedWeightLbs: null,
   suggestedShippingService: "USPS_FLAT_RATE_MEDIUM",
   estimatedShippingCost: 16.1,
+  suggestedPrice: 165,
+  priceRationale: "Comparable used pairs sell for $150-180.",
   confidence: { title: 95, category: 90, condition: 85 },
 };
 
