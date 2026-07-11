@@ -3,6 +3,7 @@ import {
   buildEbayInventoryItemPayload,
   buildEbayOfferPayload,
 } from "./ebay";
+import { marketplaceForCountry } from "./ebay-marketplaces";
 import type { ListingInput } from "./types";
 
 const listing: ListingInput = {
@@ -51,12 +52,21 @@ describe("buildEbayInventoryItemPayload", () => {
 });
 
 describe("buildEbayOfferPayload", () => {
+  const policies = {
+    fulfillmentPolicyId: "f1",
+    paymentPolicyId: "p1",
+    returnPolicyId: "r1",
+  };
+
   it("builds a fixed-price US offer with policies and 2-decimal price", () => {
-    const p = buildEbayOfferPayload(listing, "snap-1", "112233", "loc-1", {
-      fulfillmentPolicyId: "f1",
-      paymentPolicyId: "p1",
-      returnPolicyId: "r1",
-    });
+    const p = buildEbayOfferPayload(
+      listing,
+      "snap-1",
+      "112233",
+      "loc-1",
+      policies,
+      marketplaceForCountry("US")
+    );
     expect(p).toMatchObject({
       sku: "snap-1",
       marketplaceId: "EBAY_US",
@@ -68,5 +78,32 @@ describe("buildEbayOfferPayload", () => {
     expect(p.pricingSummary.price).toEqual({ value: "149.99", currency: "USD" });
     expect(p.listingPolicies.fulfillmentPolicyId).toBe("f1");
     expect(p.listingDescription).toContain("Condition");
+  });
+
+  it("uses the seller's marketplace and currency — never a US constant", () => {
+    const gb = buildEbayOfferPayload(
+      listing,
+      "snap-2",
+      "112233",
+      "loc-1",
+      policies,
+      marketplaceForCountry("GB")
+    );
+    expect(gb.marketplaceId).toBe("EBAY_GB");
+    expect(gb.pricingSummary.price).toEqual({
+      value: "149.99",
+      currency: "GBP",
+    });
+
+    const de = buildEbayOfferPayload(
+      listing,
+      "snap-3",
+      "112233",
+      "loc-1",
+      policies,
+      marketplaceForCountry("DE")
+    );
+    expect(de.marketplaceId).toBe("EBAY_DE");
+    expect(de.pricingSummary.price.currency).toBe("EUR");
   });
 });
