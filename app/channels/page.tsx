@@ -134,6 +134,15 @@ export default function ChannelsPage() {
                   </p>
                 )}
 
+                {ch.platform === "ebay" && (
+                  <Link
+                    href="/settings/ship-from"
+                    className="text-sm font-medium text-blue-600 hover:underline"
+                  >
+                    Ship-from location →
+                  </Link>
+                )}
+
                 {ch.platform === "shopify" && !ch.connected ? (
                   <form onSubmit={connectShopify} className="flex gap-2">
                     <input

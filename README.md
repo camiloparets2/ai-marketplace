@@ -63,7 +63,7 @@ supabase db push   # or paste supabase/migrations/*.sql into the SQL editor
 
 ### Marketplace credentials
 
-- **eBay** — create a keyset at [developer.ebay.com](https://developer.ebay.com), configure an OAuth "accepted" URL pointing to `{APP_URL}/api/oauth/ebay/callback`, and set `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`, `EBAY_RU_NAME`, `EBAY_POSTAL_CODE`. Start with `EBAY_ENV=SANDBOX`. The seller account needs business policies (Account → Business policies) — opted-in accounts have these by default.
+- **eBay** — create a keyset at [developer.ebay.com](https://developer.ebay.com), configure an OAuth "accepted" URL pointing to `{APP_URL}/api/oauth/ebay/callback`, and set `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`, `EBAY_RU_NAME`. Start with `EBAY_ENV=SANDBOX`. The seller account needs business policies (Account → Business policies) — opted-in accounts have these by default. Each seller's ship-from location is detected from their eBay account at connect time or collected in-app (`/settings/ship-from`) — the old global `EBAY_POSTAL_CODE` env var is deprecated (docs/design/ship-from-location.md).
 - **Etsy** — request an API key at [etsy.com/developers](https://www.etsy.com/developers), set the app's redirect URI to `{APP_URL}/api/oauth/etsy/callback`, and set `ETSY_API_KEY`. The connected account must have an open Etsy shop with at least one shipping profile.
 
 Then open the app and hit **Connect →** next to each marketplace — tokens are

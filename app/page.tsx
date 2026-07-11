@@ -60,7 +60,14 @@ type TargetResult =
       price: number;
     }
   | { platform: PublishTarget; status: "not_connected"; connectUrl: string }
-  | { platform: PublishTarget; status: "error"; message: string };
+  | {
+      platform: PublishTarget;
+      status: "error";
+      message: string;
+      // In-app fix the user can click through to (e.g. add ship-from).
+      actionUrl?: string;
+      actionLabel?: string;
+    };
 
 // ─── Loading progress stages ──────────────────────────────────────────────────
 // Time-based — not tied to real API progress. Each label reinforces the
@@ -1038,9 +1045,19 @@ export default function Page() {
                 )}
 
                 {r.status === "error" && (
-                  <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-                    {r.message}
-                  </p>
+                  <>
+                    <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
+                      {r.message}
+                    </p>
+                    {r.actionUrl && (
+                      <a
+                        href={r.actionUrl}
+                        className="w-full py-2 rounded-lg btn-primary font-medium text-sm text-center transition-colors"
+                      >
+                        {r.actionLabel ?? "Fix this →"}
+                      </a>
+                    )}
+                  </>
                 )}
               </div>
             ))}

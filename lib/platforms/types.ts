@@ -93,6 +93,11 @@ export type PublishResult =
       platform: Platform;
       status: "error";
       message: string;
+      // Optional in-app remedy the UI renders as a CTA (e.g. "Add your
+      // ship-from location"). Errors a user can fix should carry one —
+      // never surface config/env language to end users.
+      actionUrl?: string;
+      actionLabel?: string;
     };
 
 // ─── Stored OAuth connection ──────────────────────────────────────────────────
