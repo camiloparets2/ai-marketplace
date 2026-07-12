@@ -7,11 +7,16 @@ import { validateImageBytes } from "@/lib/image-validation";
 import { identifyItem, VisionError } from "@/lib/ai/vision";
 import type { AcceptedMimeType } from "@/lib/image-validation";
 import { getShippingRate } from "@/lib/shipping";
-import { authenticateRequest } from "@/lib/auth/guard";
+import { requireUser } from "@/lib/auth/guard";
 import { randomUUID } from "crypto";
 import { spendCredits, refundCredits } from "@/lib/billing/credits";
 import { CREDIT_COST_AI_EXTRACTION } from "@/lib/billing/plans";
-import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
+import {
+  checkRateLimit,
+  requestIdentity,
+  RATE_RULES,
+  RATE_LIMIT_UNAVAILABLE_MESSAGE,
+} from "@/lib/rate-limit";
 import { trackEvent } from "@/lib/telemetry";
 
 // ─── Error shape ──────────────────────────────────────────────────────────────
@@ -47,25 +52,29 @@ function errorResponse(
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Auth ────────────────────────────────────────────────────────────────────
-  // Signed-in Supabase session, or the legacy pre-shared beta key during the
-  // transition (see lib/auth/guard.ts — key removal is a Gate 2 TODO).
-  const { authorized, user } = await authenticateRequest(req);
-  if (!authorized) {
+  // A real Supabase session, always — the AI route must never run for an
+  // unattributable caller (the legacy beta key is gone).
+  const user = await requireUser();
+  if (!user) {
     return errorResponse("Unauthorized", false, 401);
   }
+  const userId = user.id;
 
-  // Abuse protection ahead of the expensive Claude call (credits already gate
-  // signed-in volume; this blunts scripted bursts and beta-key abuse).
-  const allowed = await checkRateLimit(
+  // Abuse protection ahead of the expensive Claude call. FAIL-CLOSED: if the
+  // limiter is unavailable we return a retriable 503 without calling Claude.
+  const rate = await checkRateLimit(
     RATE_RULES.analyze,
-    requestIdentity(req, user?.id ?? null)
+    requestIdentity(req, user.id)
   );
-  if (!allowed) {
+  if (rate === "limited") {
     return errorResponse(
       "Too many photos too fast — please wait a bit and try again.",
       true,
       429
     );
+  }
+  if (rate === "unavailable") {
+    return errorResponse(RATE_LIMIT_UNAVAILABLE_MESSAGE, true, 503);
   }
 
   // ── Parse body ──────────────────────────────────────────────────────────────
@@ -119,18 +128,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   // ── AI credits ──────────────────────────────────────────────────────────────
   // 1 credit per extraction, reserved atomically BEFORE the (expensive) API
-  // call and refunded if the call fails to produce a usable draft. Legacy
-  // beta-key requests carry no user, so they aren't metered (Gate 2 TODO).
+  // call and refunded if the call fails to produce a usable draft.
+  // FAIL-CLOSED: if the ledger is unavailable the caller gets a retriable
+  // 503 and Claude is never called — no unmetered AI.
   const requestId = randomUUID();
-  let credited = false;
-  if (user) {
-    const spend = await spendCredits(
-      user.id,
-      CREDIT_COST_AI_EXTRACTION,
-      "ai_listing_extraction",
-      requestId
-    );
-    if (!spend.ok && spend.reason === "no_credits") {
+  const spend = await spendCredits(
+    user.id,
+    CREDIT_COST_AI_EXTRACTION,
+    "ai_listing_extraction",
+    requestId
+  );
+  if (!spend.ok) {
+    if (spend.reason === "no_credits") {
       const renews = spend.status.periodEnd
         ? ` Your credits renew ${new Date(spend.status.periodEnd).toLocaleDateString()}.`
         : "";
@@ -144,15 +153,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: 402 }
       );
     }
-    credited = spend.ok;
-    // reason === "unavailable" → billing infra not migrated yet; fail open.
+    // reason === "unavailable" — billing backend unreachable.
+    return errorResponse(
+      "Billing is briefly unavailable — your credit was not charged. Please try again in a moment.",
+      true,
+      503
+    );
   }
 
   // Refund helper for every failure path below the spend.
   async function refund(): Promise<void> {
-    if (credited && user) {
-      await refundCredits(user.id, CREDIT_COST_AI_EXTRACTION, requestId);
-    }
+    await refundCredits(userId, CREDIT_COST_AI_EXTRACTION, requestId);
   }
 
   // ── Claude Vision call ──────────────────────────────────────────────────────
@@ -168,11 +179,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const shippingRate = getShippingRate(extracted.suggestedShippingService);
     extracted.estimatedShippingCost = shippingRate.cost;
 
-    await trackEvent(user?.id ?? null, "draft_created", { requestId });
+    await trackEvent(user.id, "draft_created", { requestId });
     return NextResponse.json(extracted);
   } catch (err) {
     await refund();
-    await trackEvent(user?.id ?? null, "draft_failed", { requestId });
+    await trackEvent(user.id, "draft_failed", { requestId });
 
     if (err instanceof VisionError) {
       const status =

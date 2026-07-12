@@ -40,8 +40,8 @@ their next publish, exactly like `ensureEbayLocation`.
 | State | Detection | Handling |
 |---|---|---|
 | (a) Not a registered seller | eBay 400/403 containing "not eligible for Business Policy" on program/list/opt-in calls | Typed `EbaySellerSetupError(kind: "not_registered")`. Publish result carries `actionUrl` → eBay seller registration + plain-English one-liner. **The raw 400 never reaches the user.** |
-| (b) Registered, not opted in | `getOptedInPrograms` lacks SELLING_POLICY_MANAGEMENT | Auto opt-in, then proceed. Silent. |
-| (c) Opted in, missing policies | Empty list for a kind | Auto-create defaults. Silent. |
+| (b) Registered, not opted in | `getOptedInPrograms` lacks SELLING_POLICY_MANAGEMENT | Opt-in requires the seller's explicit confirmation (Channels page) — publish throws `policies_unconfirmed` until then. |
+| (c) Opted in, missing policies | Empty list for a kind | Defaults created ONLY after the seller confirms the exact settings (`mayCreate: true` from POST /api/channels/ebay-readiness with `confirm: true`); otherwise `policies_unconfirmed`. Detection/adoption of EXISTING policies stays automatic — reads are safe. |
 
 Edge: right after a successful opt-in, eBay can briefly still report "not
 eligible" while the program activates. That maps to
@@ -90,14 +90,18 @@ policy instead of failing.
 - **Publish time**: `publishToEbay` calls `ensureEbayPolicies` — self-heal
   for pre-existing connections.
 - **Channels page**: GET `/api/channels` is **detect-only** (never mutates
-  the seller's eBay account from a page view). A "Set up automatically"
-  button POSTs `/api/channels/ebay-readiness`, which runs the full chain.
+  the seller's eBay account from a page view; it also returns
+  `proposedPolicies` — the human-readable exact settings). The confirmation
+  button ("I approve — create these policies on my eBay account") POSTs
+  `/api/channels/ebay-readiness` with `{ confirm: true }`; without that flag
+  the route 400s and nothing is written. Connect-time setup only detects and
+  caches existing policies — it never creates.
 
 ### Readiness checklist UI (/channels, eBay card)
 
 Connected ✓ · Ship-from ✓/✗ (→ /settings/ship-from) · Business policies:
 - ready ✓
-- missing → "Set up automatically" button (states b/c)
+- missing → the exact proposed settings + the explicit confirmation button (states b/c)
 - not_registered → "Finish your eBay seller setup →" (external eBay link)
   with the one-line explanation (state a)
 - unknown → shown as unchecked with a retry hint (probe failed; publish will
@@ -110,7 +114,7 @@ publish never consumes a credit either.)
 ## Not-registered state is never cached
 
 `not_registered` is always probed live: the moment the user completes eBay
-registration, the next publish / checklist visit / "Set up automatically"
+registration, the next publish / checklist visit / confirmed policy setup
 click remediates and flips to ready with no support intervention.
 
 ## Tests (all eBay calls mocked)

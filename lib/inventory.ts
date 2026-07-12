@@ -40,7 +40,13 @@ export interface ListingRow {
 // item isn't live yet ("eBay: seller registration incomplete", …).
 export interface LastPublishAttempt {
   platform: string;
-  status: "live" | "assist" | "not_connected" | "error";
+  status:
+    | "pending"
+    | "live"
+    | "assist"
+    | "not_connected"
+    | "error"
+    | "reconciliation_required";
   error: string | null;
   created_at: string;
 }
@@ -308,11 +314,25 @@ export async function recordLiveListing(
   if (error) throw new Error(`listing record failed: ${error.message}`);
 }
 
+export type PublishAttemptStatus =
+  | "pending"
+  | "live"
+  | "assist"
+  | "not_connected"
+  | "error"
+  // The listing IS live on the marketplace but local recording failed —
+  // the attempt row carries the platform ids needed to re-adopt it.
+  | "reconciliation_required";
+
+/** One-shot terminal rows for outcomes where NO external call happened
+ *  (not_connected, assist copy, pre-call failures). Real marketplace calls
+ *  must use beginPublishAttempt/completePublishAttempt instead so the row
+ *  exists BEFORE the external side effect. */
 export async function recordPublishAttempt(
   userId: string,
   inventoryItemId: string | null,
   platform: string,
-  status: "live" | "assist" | "not_connected" | "error",
+  status: Exclude<PublishAttemptStatus, "pending">,
   errorMessage?: string
 ): Promise<void> {
   const { error } = await getSupabaseAdmin().from("publish_attempts").insert({
@@ -323,6 +343,69 @@ export async function recordPublishAttempt(
     error: errorMessage ?? null,
   });
   if (error) console.error("[inventory] attempt log failed:", error.message);
+}
+
+/**
+ * Persist-before-publish: insert the 'pending' attempt row BEFORE any
+ * external marketplace call. THROWS when the row can't be written — in that
+ * case the caller must NOT publish (an untracked publish is the exact
+ * failure mode this exists to prevent).
+ */
+export async function beginPublishAttempt(
+  userId: string,
+  inventoryItemId: string | null,
+  platform: string
+): Promise<string> {
+  const { data, error } = await getSupabaseAdmin()
+    .from("publish_attempts")
+    .insert({
+      user_id: userId,
+      inventory_item_id: inventoryItemId,
+      platform,
+      status: "pending",
+    })
+    .select("id")
+    .single<{ id: number }>();
+  if (error) {
+    throw new Error(`publish attempt record failed: ${error.message}`);
+  }
+  return String(data.id);
+}
+
+export interface PublishAttemptCompletion {
+  status: Exclude<PublishAttemptStatus, "pending">;
+  error?: string;
+  // Platform-side identifiers — REQUIRED for live and
+  // reconciliation_required so an unmanaged listing stays recoverable.
+  externalId?: string;
+  url?: string;
+  meta?: Record<string, string>;
+}
+
+/** Stamp the outcome onto the pending attempt row. Returns false (and logs
+ *  loudly) when the update failed — callers treat that as reconciliation. */
+export async function completePublishAttempt(
+  attemptId: string,
+  completion: PublishAttemptCompletion
+): Promise<boolean> {
+  const { error } = await getSupabaseAdmin()
+    .from("publish_attempts")
+    .update({
+      status: completion.status,
+      error: completion.error ?? null,
+      external_id: completion.externalId ?? null,
+      url: completion.url ?? null,
+      meta: completion.meta ?? {},
+    })
+    .eq("id", attemptId);
+  if (error) {
+    console.error(
+      `[inventory] RECONCILIATION: attempt ${attemptId} completion (${completion.status}, external ${completion.externalId ?? "?"}) failed to persist:`,
+      error.message
+    );
+    return false;
+  }
+  return true;
 }
 
 export async function markItemListed(inventoryItemId: string): Promise<void> {

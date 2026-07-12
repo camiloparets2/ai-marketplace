@@ -54,7 +54,8 @@ function isProduction(): boolean {
   return (process.env.EBAY_ENV ?? "production").toLowerCase() !== "sandbox";
 }
 
-function apiBase(): string {
+// Exported for the Notification API public-key lookup (ebay-signature.ts).
+export function apiBase(): string {
   return isProduction()
     ? "https://api.ebay.com"
     : "https://api.sandbox.ebay.com";
@@ -511,7 +512,13 @@ export interface PolicyIds {
   returnPolicyId: string;
 }
 
-export type EbaySellerSetupKind = "not_registered" | "policies_pending";
+export type EbaySellerSetupKind =
+  | "not_registered"
+  | "policies_pending"
+  // Business policies are missing and creating them is a WRITE to the
+  // seller's real eBay account — it requires their explicit confirmation of
+  // the exact settings (Channels page), never a silent default.
+  | "policies_unconfirmed";
 
 // The states the app cannot silently fix. Messages are end-user safe:
 // never a raw eBay status code, never config language.
@@ -526,7 +533,9 @@ export class EbaySellerSetupError extends Error {
     super(
       kind === "not_registered"
         ? "Your eBay account isn't set up for selling yet. Finish eBay's seller registration (identity + payout details), then publish again."
-        : "eBay is still enabling business policies on your account — this usually takes a few minutes. Try publishing again shortly."
+        : kind === "policies_unconfirmed"
+          ? "Your eBay account needs business policies (shipping, payment, returns). Review and confirm the exact settings on the Channels page — nothing is written to your eBay account until you approve it."
+          : "eBay is still enabling business policies on your account — this usually takes a few minutes. Try publishing again shortly."
     );
     this.name = "EbaySellerSetupError";
   }
@@ -741,6 +750,30 @@ export function buildDefaultReturnPolicy(
   };
 }
 
+// Human-readable summary of the EXACT settings the app would create — what
+// the seller confirms on the Channels page before anything is written to
+// their eBay account. Keep in lockstep with the builders above.
+export interface DefaultPolicyDescription {
+  fulfillment: string;
+  payment: string;
+  returns: string;
+}
+
+export function describeDefaultPolicies(
+  marketplace: EbayMarketplace
+): DefaultPolicyDescription {
+  const f = buildDefaultFulfillmentPolicy(marketplace);
+  const service = marketplace.defaultShippingService;
+  return {
+    fulfillment: service
+      ? `Shipping: ${f.handlingTime.value}-business-day handling; domestic ${service.carrierCode} ${service.serviceCode}; the buyer pays each listing's shipping estimate (never free shipping by default).`
+      : `Shipping: ${f.handlingTime.value}-business-day handling; no shipping service is set — you pick one in eBay's Business Policies manager before publishing.`,
+    payment: "Payment: eBay managed payments, immediate payment required.",
+    returns:
+      "Returns: 30-day returns accepted; buyer pays return shipping; money-back refund.",
+  };
+}
+
 function defaultPolicyPayload(
   spec: PolicyKindSpec,
   marketplace: EbayMarketplace
@@ -795,8 +828,14 @@ async function createPolicy(
  */
 export async function ensureEbayPolicies(
   conn: PlatformConnection,
-  marketplace: EbayMarketplace
+  marketplace: EbayMarketplace,
+  // Opting into the policy program and creating policies are WRITES to the
+  // seller's real eBay account. They happen ONLY when the seller explicitly
+  // confirmed the exact settings (POST /api/channels/ebay-readiness with
+  // confirm: true). Detection/adoption of existing policies is always safe.
+  opts: { mayCreate?: boolean } = {}
 ): Promise<PolicyIds> {
+  const mayCreate = opts.mayCreate ?? false;
   const resolved: Partial<PolicyIds> = {};
   for (const spec of POLICY_KINDS) {
     const fromEnv = process.env[spec.envVar];
@@ -822,6 +861,12 @@ export async function ensureEbayPolicies(
   let fulfillmentIsAppDefault: boolean | null = null;
   try {
     if (!(await isOptedIntoPolicies(token))) {
+      if (!mayCreate) {
+        throw new EbaySellerSetupError(
+          "policies_unconfirmed",
+          sellerRegistrationUrl(marketplace)
+        );
+      }
       await optIntoPolicies(token);
       justOptedIn = true;
     }
@@ -829,6 +874,12 @@ export async function ensureEbayPolicies(
     for (const spec of POLICY_KINDS) {
       if (resolved[spec.idKey]) continue;
       const existing = await listFirstPolicy(token, spec, marketplace.id);
+      if (!existing && !mayCreate) {
+        throw new EbaySellerSetupError(
+          "policies_unconfirmed",
+          sellerRegistrationUrl(marketplace)
+        );
+      }
       const id = existing?.id ?? (await createPolicy(token, spec, marketplace));
       resolved[spec.idKey] = id;
       if (spec.kind === "fulfillment_policy") {
@@ -899,6 +950,9 @@ export interface EbayReadiness {
   // Seller-registration CTA target on the seller's own marketplace
   // (ebay.co.uk, ebay.de, …) — used when policies === "not_registered".
   registrationUrl: string;
+  // The EXACT settings "Set up my policies" would create — shown for the
+  // seller's confirmation before any write to their eBay account.
+  proposedPolicies: DefaultPolicyDescription;
 }
 
 export async function detectEbayReadiness(
@@ -907,6 +961,8 @@ export async function detectEbayReadiness(
   let marketplace = marketplaceById(conn.meta.marketplaceId);
   const regUrl = (): string =>
     sellerRegistrationUrl(marketplace ?? DEFAULT_EBAY_MARKETPLACE);
+  const proposed = (): DefaultPolicyDescription =>
+    describeDefaultPolicies(marketplace ?? DEFAULT_EBAY_MARKETPLACE);
 
   let token: string;
   try {
@@ -916,6 +972,7 @@ export async function detectEbayReadiness(
       shipFrom: Boolean(conn.meta.merchantLocationKey),
       policies: "unknown",
       registrationUrl: regUrl(),
+      proposedPolicies: proposed(),
     };
   }
 
@@ -936,30 +993,56 @@ export async function detectEbayReadiness(
     (spec) => process.env[spec.envVar] ?? conn.meta[spec.idKey]
   );
   if (envReady) {
-    return { shipFrom, policies: "ready", registrationUrl: regUrl() };
+    return {
+      shipFrom,
+      policies: "ready",
+      registrationUrl: regUrl(),
+      proposedPolicies: proposed(),
+    };
   }
 
   const marketplaceId = (marketplace ?? marketplaceForCountry(null)).id;
   try {
     if (!(await isOptedIntoPolicies(token))) {
-      return { shipFrom, policies: "missing", registrationUrl: regUrl() };
+      return {
+        shipFrom,
+        policies: "missing",
+        registrationUrl: regUrl(),
+        proposedPolicies: proposed(),
+      };
     }
     for (const spec of POLICY_KINDS) {
       if (process.env[spec.envVar] ?? conn.meta[spec.idKey]) continue;
       if ((await listFirstPolicy(token, spec, marketplaceId)) === null) {
-        return { shipFrom, policies: "missing", registrationUrl: regUrl() };
+        return {
+          shipFrom,
+          policies: "missing",
+          registrationUrl: regUrl(),
+          proposedPolicies: proposed(),
+        };
       }
     }
-    return { shipFrom, policies: "ready", registrationUrl: regUrl() };
+    return {
+      shipFrom,
+      policies: "ready",
+      registrationUrl: regUrl(),
+      proposedPolicies: proposed(),
+    };
   } catch (err) {
     if (err instanceof EbaySellerSetupError && err.kind === "not_registered") {
       return {
         shipFrom,
         policies: "not_registered",
         registrationUrl: regUrl(),
+        proposedPolicies: proposed(),
       };
     }
-    return { shipFrom, policies: "unknown", registrationUrl: regUrl() };
+    return {
+      shipFrom,
+      policies: "unknown",
+      registrationUrl: regUrl(),
+      proposedPolicies: proposed(),
+    };
   }
 }
 

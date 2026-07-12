@@ -5,7 +5,7 @@
 > (all removed 2026-07-12; recoverable in git history). Next session: resume
 > at the first unchecked item of the lowest-numbered phase.
 
-**Last updated:** 2026-07-12 (Phase 0 in progress)
+**Last updated:** 2026-07-12 (Phase 1 complete — PR pending)
 **Branch under review:** `codex/ebay-beta-launch` (consolidation base — every
 phase lands as a small stacked PR on top of it; **nothing merges without
 Camilo's review**).
@@ -74,32 +74,40 @@ Camilo's review**).
 | dep upgrades, proxy.ts migration, engines pin | Phase 5 |
 | service-role grants + FK index migrations, .nvmrc | Phase 0 ✅ |
 
-### Phase 1 — P0 money + safety bugs — ◐ partially done via #23/#24
+### Phase 1 — P0 money + safety bugs — ✅ DONE (branch codex/lh-phase1-p0-safety)
 - [x] 1.1a Floor never coerces unknown shipping to $0 (`computeFloor` → null;
       `shipping_unknown` guardrail; manual flow blocks publish) — in #23.
 - [x] 1.1b No free-shipping policy default (buyer-paid + per-offer
       `shippingCostOverrides`, app-default-policy-only, refuses null
       shipping) — in #23.
-- [ ] 1.1c **Policy creation requires explicit seller confirmation of the
-      exact shipping/handling/return settings** — today `ensureEbayPolicies`
-      auto-creates defaults at connect/publish/"Set up automatically".
-      Creation must move behind a confirmation UI showing the exact terms.
+- [x] 1.1c Policy creation requires explicit seller confirmation:
+      `ensureEbayPolicies` writes (opt-in + creation) only with
+      `mayCreate: true`, granted solely by POST /api/channels/ebay-readiness
+      with `{ confirm: true }`; the Channels card shows the EXACT settings
+      (`EbayReadiness.proposedPolicies`); publish throws typed
+      `policies_unconfirmed` with a Review & confirm CTA until then.
+      Detection/adoption of existing policies stays automatic.
 - [x] 1.2 Image preflight (`assertPhotosPubliclyReachable` in
       `publishToEbay`) + bucket-visibility assertion (`lib/setup-health.ts`,
       `GET /api/health`) — in #24. Camilo flips the bucket public himself.
-- [ ] 1.3 Persist BEFORE publish: create inventory item + publish_attempt
-      row before any marketplace call; reconciliation state
-      (`reconciliationRequired`) when eBay succeeds but recording fails.
-- [ ] 1.4 Fail-closed auth/billing/rate-limit: remove `APP_INTERNAL_BETA_KEY`
-      (+ public counterpart + browser `x-api-key`); Supabase session required
-      on every user/AI route; 503 without calling Claude when credits or
-      rate-limit backends are unavailable.
-- [ ] 1.5 Webhook signature verification (X-EBAY-SIGNATURE, Event
-      Notification SDK-style verification behind a tested wrapper; 1h key
-      cache; 412 invalid / 400 malformed / 5xx processing) + idempotent
-      notification-receipt table keyed by notification ID.
-- [ ] 1.6 Account deletion actually erases (tokens, identity metadata, eBay
-      listing/order identifiers, raw payloads); errors → non-2xx for retry.
+- [x] 1.3 Persist BEFORE publish: inventory item + 'pending'
+      publish_attempts row exist before any marketplace call (no row → no
+      publish); live-but-unrecorded stamps `reconciliation_required` with the
+      platform ids; responses carry inventoryItemId / attemptId /
+      reconciliationRequired. Migration `20260712010000`.
+- [x] 1.4 Fail-closed: beta key removed everywhere (guard, routes, browser
+      headers, env examples); session required on analyze/publish/create-link;
+      rate limiter + credit ledger unavailability → retriable 503 with Claude
+      never called. Regression: tests/regression/fail-closed-analyze.test.ts.
+- [x] 1.5 X-EBAY-SIGNATURE verified on order + deletion webhooks over the
+      raw body (`lib/platforms/ebay-signature.ts`, tested with a real ECDSA
+      keypair; 1h key cache; 412/400/5xx contract) + `notification_receipts`
+      dedupe table (migration `20260712020000`).
+- [x] 1.6 Account deletion actually erases: connection row (tokens +
+      identity), listing/attempt identifiers, sold_events order ids + raw
+      payloads (per-row tombstones), audit detail, sync cursors; topic
+      mismatch → 400; failed erasure → 500 for retry. Matching via
+      meta.ebayUserId (Phase 2 captures it) with username fallback.
 
 ### Phase 2 — eBay compliance + retry safety — ☐ not started
 - [ ] `commerce.identity.readonly` scope; store immutable ebayUserId,

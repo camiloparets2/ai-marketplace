@@ -21,6 +21,11 @@ import {
   findListingOwner,
   processPendingSoldEvents,
 } from "@/lib/sold-events";
+import { verifyEbaySignature } from "@/lib/platforms/ebay-signature";
+import {
+  notificationAlreadyProcessed,
+  markNotificationProcessed,
+} from "@/lib/notification-receipts";
 
 export const maxDuration = 60;
 
@@ -89,9 +94,29 @@ function money(value: string | undefined): number | null {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Signature FIRST, over the raw bytes: 412 invalid, 503 when key
+  // infrastructure is down (eBay redelivers; the polling backstop also
+  // covers the gap).
+  const rawBody = await req.text();
+  const verdict = await verifyEbaySignature(
+    rawBody,
+    req.headers.get("x-ebay-signature")
+  );
+  if (!verdict.ok) {
+    if (verdict.reason === "invalid") {
+      console.warn(`[ebay-orders] rejected signature: ${verdict.detail}`);
+      return NextResponse.json({ error: "Invalid signature" }, { status: 412 });
+    }
+    console.error(`[ebay-orders] signature check unavailable: ${verdict.detail}`);
+    return NextResponse.json(
+      { error: "Signature verification unavailable — retry" },
+      { status: 503 }
+    );
+  }
+
   let body: OrderNotification;
   try {
-    body = (await req.json()) as OrderNotification;
+    body = JSON.parse(rawBody) as OrderNotification;
   } catch {
     // Malformed body — 400 so eBay retries rather than assuming success.
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
@@ -105,6 +130,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // Not an order-shaped payload — ACK so eBay doesn't hammer retries; the
     // polling backstop covers anything we couldn't parse.
     console.warn(`[ebay-orders] Unparseable notification ${notificationId}`);
+    return new NextResponse(null, { status: 200 });
+  }
+
+  // Idempotent receipt: a re-delivered notification we already fully
+  // processed ACKs without touching the queue (sold_events dedupes anyway —
+  // this is the fast path).
+  if (
+    notificationId !== "unknown" &&
+    (await notificationAlreadyProcessed(notificationId))
+  ) {
     return new NextResponse(null, { status: 200 });
   }
 
@@ -150,6 +185,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       console.error(`[ebay-orders] processing failed for ${userId}:`, err);
       // Events stay 'pending'; the polling backstop will drain them.
     }
+  }
+
+  if (notificationId !== "unknown") {
+    await markNotificationProcessed(notificationId, "ORDER");
   }
 
   return new NextResponse(null, { status: 200 });

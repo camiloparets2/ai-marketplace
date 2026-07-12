@@ -82,6 +82,8 @@ function fakeDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
     recordListing: vi.fn().mockResolvedValue(undefined),
     markListed: vi.fn().mockResolvedValue(undefined),
     recordAttempt: vi.fn().mockResolvedValue(undefined),
+    beginAttempt: vi.fn().mockResolvedValue("attempt-1"),
+    completeAttempt: vi.fn().mockResolvedValue(true),
     setReview: vi.fn().mockResolvedValue(undefined),
     guardrails: evaluateGuardrails,
     audit: vi.fn().mockResolvedValue(undefined),
@@ -162,11 +164,11 @@ describe("runPipeline — happy path (sandbox)", () => {
       result.price.price
     );
     expect(deps.markListed).toHaveBeenCalledWith("item-1");
-    expect(deps.recordAttempt).toHaveBeenCalledWith(
-      "user-1",
-      "item-1",
-      "ebay",
-      "live"
+    // Persist-before-publish: pending row before the eBay call, completed live.
+    expect(deps.beginAttempt).toHaveBeenCalledWith("user-1", "item-1", "ebay");
+    expect(deps.completeAttempt).toHaveBeenCalledWith(
+      "attempt-1",
+      expect.objectContaining({ status: "live", externalId: "123" })
     );
 
     expect(result.publish).toMatchObject({
@@ -233,12 +235,9 @@ describe("runPipeline — publish edge cases", () => {
     });
     const result = await runPipeline(input, deps);
     expect(result.publish).toMatchObject({ status: "error", message: "eBay 500" });
-    expect(deps.recordAttempt).toHaveBeenCalledWith(
-      "user-1",
-      "item-1",
-      "ebay",
-      "error",
-      "eBay 500"
+    expect(deps.completeAttempt).toHaveBeenCalledWith(
+      "attempt-1",
+      expect.objectContaining({ status: "error", error: "eBay 500" })
     );
   });
 
@@ -522,15 +521,56 @@ describe("publishDraft — publish/retry a stored draft, zero AI, zero credits",
         message: "eBay is down",
       });
     }
-    expect(deps.recordAttempt).toHaveBeenCalledWith(
-      "user-1",
-      "item-1",
-      "ebay",
-      "error",
-      "eBay is down"
+    expect(deps.beginAttempt).toHaveBeenCalledWith("user-1", "item-1", "ebay");
+    expect(deps.completeAttempt).toHaveBeenCalledWith(
+      "attempt-1",
+      expect.objectContaining({ status: "error", error: "eBay is down" })
     );
     // Item never left draft — the same publish action retries it.
     expect(deps.markListed).not.toHaveBeenCalled();
+  });
+
+  it("marks reconciliation_required when eBay is live but local recording fails", async () => {
+    // A live listing must never become unmanaged: the attempt row keeps the
+    // platform ids and the outcome carries the flag.
+    const deps = fakeDeps({
+      getItem: vi.fn().mockResolvedValue(draftItem),
+      recordListing: vi.fn().mockRejectedValue(new Error("db down")),
+    });
+    const result = await publishDraft("user-1", "item-1", deps);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.publish).toMatchObject({
+        status: "live",
+        listingId: "123",
+        reconciliationRequired: true,
+      });
+    }
+    expect(deps.completeAttempt).toHaveBeenCalledWith(
+      "attempt-1",
+      expect.objectContaining({
+        status: "reconciliation_required",
+        externalId: "123",
+        meta: expect.objectContaining({ offerId: "off-1" }),
+      })
+    );
+  });
+
+  it("refuses to publish at all when the pending attempt row can't be written", async () => {
+    // Persist-before-publish: no row, no eBay call.
+    const deps = fakeDeps({
+      getItem: vi.fn().mockResolvedValue(draftItem),
+      beginAttempt: vi.fn().mockRejectedValue(new Error("db down")),
+    });
+    const result = await publishDraft("user-1", "item-1", deps);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.publish).toMatchObject({ status: "error" });
+      if (result.publish.status === "error") {
+        expect(result.publish.message).toMatch(/nothing was sent/i);
+      }
+    }
+    expect(deps.publishEbay).not.toHaveBeenCalled();
   });
 
   it("user-initiated publish is never silently dry-run — the flag only gates the auto pipeline", async () => {

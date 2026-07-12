@@ -1,13 +1,13 @@
 // Rate limiting for expensive / abuse-prone routes (server-only).
 //
 // Backed by the atomic bump_rate() Postgres function — one round trip, no
-// read-modify-write race. Keys are scoped per identity: the signed-in user
-// id when there is one, otherwise the caller's IP (good enough to blunt
-// anonymous abuse of the legacy beta-key path).
+// read-modify-write race. Keys are scoped to the signed-in user where
+// available, with an IP fallback for any future anonymous route.
 //
-// Fail-open: if the limiter itself errors (migration not applied, DB blip),
-// the request proceeds and we log — availability beats perfect metering, and
-// the AI route is still credit-gated per user.
+// FAIL-CLOSED: when the limiter itself is unavailable (DB blip, migration
+// missing) the caller gets "unavailable" and must respond with a retriable
+// 503 WITHOUT performing the expensive work. An unmetered path to Claude is
+// worse than a brief outage.
 
 import type { NextRequest } from "next/server";
 import { getSupabaseAdmin } from "@/lib/connections";
@@ -35,11 +35,14 @@ export function requestIdentity(req: NextRequest, userId: string | null): string
   return `ip:${ip}`;
 }
 
-/** True → allowed; false → over the limit (respond 429). */
+export type RateDecision = "allowed" | "limited" | "unavailable";
+
+/** "allowed" → proceed; "limited" → 429; "unavailable" → retriable 503,
+ *  and the caller must NOT perform the guarded work. */
 export async function checkRateLimit(
   rule: RateRule,
   identity: string
-): Promise<boolean> {
+): Promise<RateDecision> {
   try {
     const { data, error } = await getSupabaseAdmin().rpc("bump_rate", {
       p_key: `${rule.name}:${identity}`,
@@ -47,9 +50,14 @@ export async function checkRateLimit(
       p_max: rule.max,
     });
     if (error) throw new Error(error.message);
-    return data !== false;
+    return data !== false ? "allowed" : "limited";
   } catch (err) {
-    console.warn(`[rate-limit] ${rule.name} check failed — allowing:`, err);
-    return true;
+    console.error(`[rate-limit] ${rule.name} check failed — blocking:`, err);
+    return "unavailable";
   }
 }
+
+// Shared 503 body for the fail-closed paths so every route says the same
+// retriable thing.
+export const RATE_LIMIT_UNAVAILABLE_MESSAGE =
+  "We couldn't verify your request rate just now — please try again in a moment.";

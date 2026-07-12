@@ -9,15 +9,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
 vi.mock("@/lib/auth/guard", () => ({
-  authenticateRequest: vi.fn(async () => ({
-    authorized: true,
-    user: { id: "user-1" },
-  })),
+  requireUser: vi.fn(async () => ({ id: "user-1" })),
 }));
 vi.mock("@/lib/rate-limit", () => ({
-  checkRateLimit: vi.fn(async () => true),
+  checkRateLimit: vi.fn(async () => "allowed"),
   requestIdentity: vi.fn(() => "user-1"),
   RATE_RULES: { publish: { limit: 10, windowSeconds: 60 } },
+  RATE_LIMIT_UNAVAILABLE_MESSAGE: "rate limiter unavailable",
 }));
 vi.mock("@/lib/connections", () => ({
   getConnection: vi.fn(async () => ({
@@ -36,6 +34,8 @@ vi.mock("@/lib/inventory", () => ({
   createInventoryItem: vi.fn(async () => "item-1"),
   recordLiveListing: vi.fn(async () => undefined),
   recordPublishAttempt: vi.fn(async () => undefined),
+  beginPublishAttempt: vi.fn(async () => "attempt-1"),
+  completePublishAttempt: vi.fn(async () => true),
   markItemListed: vi.fn(async () => undefined),
 }));
 vi.mock("@/lib/telemetry", () => ({
@@ -134,5 +134,23 @@ describe("POST /api/publish — eBay seller readiness", () => {
     expect(data.results[0].status).toBe("error");
     expect(data.results[0].actionUrl).toBeUndefined();
     expect(data.results[0].message).toMatch(/few minutes|shortly/i);
+  });
+});
+
+describe("POST /api/publish — fail-closed auth and rate limiting", () => {
+  it("401s without a session — no beta-key path exists anymore", async () => {
+    const { requireUser } = await import("@/lib/auth/guard");
+    vi.mocked(requireUser).mockResolvedValueOnce(null);
+    const res = await POST(publishRequest());
+    expect(res.status).toBe(401);
+    expect(publishToEbay).not.toHaveBeenCalled();
+  });
+
+  it("503s (retriable) when the rate limiter is unavailable — publish never runs", async () => {
+    const { checkRateLimit } = await import("@/lib/rate-limit");
+    vi.mocked(checkRateLimit).mockResolvedValueOnce("unavailable");
+    const res = await POST(publishRequest());
+    expect(res.status).toBe(503);
+    expect(publishToEbay).not.toHaveBeenCalled();
   });
 });
