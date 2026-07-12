@@ -19,7 +19,12 @@ alter table public.inventory_items
   add column if not exists id_confidence numeric(3, 2)
     check (id_confidence is null or (id_confidence >= 0 and id_confidence <= 1));
 
-alter table public.inventory_items drop constraint inventory_items_status_check;
+-- Production previously created the same inline check after a table rename,
+-- which gave it a `...check1` suffix. Handle both histories idempotently.
+alter table public.inventory_items
+  drop constraint if exists inventory_items_status_check;
+alter table public.inventory_items
+  drop constraint if exists inventory_items_status_check1;
 alter table public.inventory_items add constraint inventory_items_status_check
   check (status in ('draft', 'review', 'listed', 'sold', 'archived'));
 
