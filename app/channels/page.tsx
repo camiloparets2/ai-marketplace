@@ -23,6 +23,13 @@ interface ChannelStatus {
     // Seller-registration CTA on the seller's own marketplace
     // (ebay.co.uk, ebay.de, …), derived server-side.
     registrationUrl?: string;
+    // The EXACT settings policy setup would create — shown for explicit
+    // confirmation before anything is written to the seller's eBay account.
+    proposedPolicies?: {
+      fulfillment: string;
+      payment: string;
+      returns: string;
+    };
   };
 }
 
@@ -35,7 +42,7 @@ interface ReadinessFixResponse {
 }
 
 const EBAY_POLICY_HELP =
-  "Business policies are eBay's shipping, payment, and return terms — every listing needs them. We create sensible defaults you can edit on eBay anytime (free shipping, 3-day handling, 30-day returns, buyer pays return shipping).";
+  "Business policies are eBay's shipping, payment, and return terms — every listing needs them. Review the exact settings below; nothing is written to your eBay account until you confirm, and you can edit them on eBay anytime.";
 
 const CHANNEL_META: Record<
   ChannelStatus["platform"],
@@ -63,7 +70,13 @@ export default function ChannelsPage() {
     setFixing(true);
     setFixNotice(null);
     try {
-      const res = await fetch("/api/channels/ebay-readiness", { method: "POST" });
+      const res = await fetch("/api/channels/ebay-readiness", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // The button sits under the exact proposed settings — clicking it IS
+        // the seller's confirmation.
+        body: JSON.stringify({ confirm: true }),
+      });
       const data = (await res.json()) as ReadinessFixResponse;
       if (!res.ok) {
         setFixNotice({
@@ -77,7 +90,14 @@ export default function ChannelsPage() {
         setChannels((prev) =>
           prev.map((ch) =>
             ch.platform === "ebay"
-              ? { ...ch, ebayReadiness: { shipFrom: true, policies: "ready" } }
+              ? {
+                  ...ch,
+                  ebayReadiness: {
+                    ...ch.ebayReadiness,
+                    shipFrom: true,
+                    policies: "ready" as const,
+                  },
+                }
               : ch
           )
         );
@@ -243,14 +263,23 @@ export default function ChannelsPage() {
                         )}
                       </span>
                       {ch.ebayReadiness?.policies === "missing" && (
-                        <span className="pl-6 flex flex-col gap-1">
+                        <span className="pl-6 flex flex-col gap-1.5">
                           <span className="text-xs text-gray-500">{EBAY_POLICY_HELP}</span>
+                          {ch.ebayReadiness.proposedPolicies && (
+                            <ul className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-1.5 space-y-0.5 list-disc pl-6">
+                              <li>{ch.ebayReadiness.proposedPolicies.fulfillment}</li>
+                              <li>{ch.ebayReadiness.proposedPolicies.payment}</li>
+                              <li>{ch.ebayReadiness.proposedPolicies.returns}</li>
+                            </ul>
+                          )}
                           <button
                             onClick={() => void fixEbayReadiness()}
                             disabled={fixing}
                             className="self-start px-3 py-1.5 rounded-lg btn-primary font-medium text-xs disabled:opacity-50 transition-colors"
                           >
-                            {fixing ? "Setting up…" : "Set up automatically"}
+                            {fixing
+                              ? "Creating…"
+                              : "I approve — create these policies on my eBay account"}
                           </button>
                         </span>
                       )}

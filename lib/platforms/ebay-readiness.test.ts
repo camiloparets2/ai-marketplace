@@ -176,7 +176,9 @@ describe("ensureEbayPolicies", () => {
   it("opts a registered-but-not-opted-in seller in, then creates all three defaults", async () => {
     stubEbayApi(newSellerHandler);
     const c = conn();
-    const ids = await ensureEbayPolicies(c, marketplaceForCountry("US"));
+    const ids = await ensureEbayPolicies(c, marketplaceForCountry("US"), {
+      mayCreate: true,
+    });
     expect(ids).toEqual({
       fulfillmentPolicyId: "f-new",
       paymentPolicyId: "p-new",
@@ -220,7 +222,9 @@ describe("ensureEbayPolicies", () => {
       ["AU", "EBAY_AU", "AU_Regular"],
     ] as const) {
       stubEbayApi(newSellerHandler);
-      await ensureEbayPolicies(conn(), marketplaceForCountry(country));
+      await ensureEbayPolicies(conn(), marketplaceForCountry(country), {
+        mayCreate: true,
+      });
 
       const creates = calls.filter((c2) => c2.method === "POST" && c2.path.includes("_policy"));
       expect(creates, country).toHaveLength(3);
@@ -261,10 +265,9 @@ describe("ensureEbayPolicies", () => {
       // Program still activating — eBay briefly keeps reporting ineligible.
       return jsonResponse(400, NOT_ELIGIBLE_BODY);
     });
-    const err = await ensureEbayPolicies(
-      conn(),
-      marketplaceForCountry("US")
-    ).catch((e: unknown) => e);
+    const err = await ensureEbayPolicies(conn(), marketplaceForCountry("US"), {
+      mayCreate: true,
+    }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(EbaySellerSetupError);
     expect((err as EbaySellerSetupError).kind).toBe("policies_pending");
     expect((err as Error).message).toMatch(/few minutes|shortly/i);
@@ -297,7 +300,9 @@ describe("ensureEbayPolicies", () => {
       }
       return jsonResponse(500, {});
     });
-    const ids = await ensureEbayPolicies(conn(), marketplaceForCountry("US"));
+    const ids = await ensureEbayPolicies(conn(), marketplaceForCountry("US"), {
+      mayCreate: true,
+    });
     expect(ids.fulfillmentPolicyId).toBe("f-race");
   });
 
@@ -321,7 +326,7 @@ describe("ensureEbayPolicies", () => {
   it("marks a freshly created fulfillment policy as the app default", async () => {
     stubEbayApi(newSellerHandler);
     const c = conn();
-    await ensureEbayPolicies(c, marketplaceForCountry("US"));
+    await ensureEbayPolicies(c, marketplaceForCountry("US"), { mayCreate: true });
     expect(c.meta.fulfillmentPolicyAppDefault).toBe("true");
     expect(fulfillmentPolicyIsAppDefault(c)).toBe(true);
   });
@@ -365,6 +370,52 @@ describe("ensureEbayPolicies", () => {
     ).toBe(false);
   });
 
+  it("NEVER writes to the seller's account without mayCreate — missing policies throw policies_unconfirmed", async () => {
+    // Registered + opted in, but owns no policies: detection is fine,
+    // creation must wait for explicit confirmation.
+    stubEbayApi((path, method) => {
+      if (path.includes("get_opted_in_programs")) {
+        return jsonResponse(200, {
+          programs: [{ programType: "SELLING_POLICY_MANAGEMENT" }],
+        });
+      }
+      if (method === "GET" && path.includes("_policy?")) {
+        return jsonResponse(200, {});
+      }
+      return jsonResponse(500, {});
+    });
+    const err = await ensureEbayPolicies(
+      conn(),
+      marketplaceForCountry("US")
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EbaySellerSetupError);
+    expect((err as EbaySellerSetupError).kind).toBe("policies_unconfirmed");
+    expect((err as Error).message).toMatch(/confirm/i);
+    // Detection only — not a single write left this call.
+    expect(calls.filter((c2) => c2.method !== "GET")).toHaveLength(0);
+  });
+
+  it("does not even opt into the policy program without mayCreate", async () => {
+    stubEbayApi((path) =>
+      path.includes("get_opted_in_programs")
+        ? jsonResponse(200, { programs: [] })
+        : jsonResponse(500, {})
+    );
+    const err = await ensureEbayPolicies(
+      conn(),
+      marketplaceForCountry("US")
+    ).catch((e: unknown) => e);
+    expect((err as EbaySellerSetupError).kind).toBe("policies_unconfirmed");
+    expect(calls.filter((c2) => c2.path.includes("opt_in"))).toHaveLength(0);
+  });
+
+  it("still ADOPTS existing policies without mayCreate (reads are safe)", async () => {
+    stubEbayApi(readySellerHandler);
+    const ids = await ensureEbayPolicies(conn(), marketplaceForCountry("US"));
+    expect(ids.fulfillmentPolicyId).toBe("f-existing");
+    expect(calls.filter((c2) => c2.method === "POST")).toHaveLength(0);
+  });
+
   it("carries the seller's own marketplace registration URL on the typed error", async () => {
     stubEbayApi(() => jsonResponse(400, NOT_ELIGIBLE_BODY));
     const err = await ensureEbayPolicies(
@@ -390,12 +441,14 @@ describe("detectEbayReadiness (detect-only, for the channels checklist)", () => 
         returnPolicyId: "r1",
       })
     );
-    expect(readiness).toEqual({
+    expect(readiness).toMatchObject({
       shipFrom: true,
       policies: "ready",
       // Registration CTA is derived from the seller's marketplace — GB here.
       registrationUrl: "https://www.ebay.co.uk/sl/sell",
     });
+    // The proposal shown for confirmation is marketplace-correct too.
+    expect(readiness.proposedPolicies.fulfillment).toContain("RoyalMail");
     expect(calls).toHaveLength(0);
   });
 
@@ -410,11 +463,12 @@ describe("detectEbayReadiness (detect-only, for the channels checklist)", () => 
       return jsonResponse(500, {});
     });
     const readiness = await detectEbayReadiness(conn());
-    expect(readiness).toEqual({
+    expect(readiness).toMatchObject({
       shipFrom: false,
       policies: "missing",
       registrationUrl: "https://www.ebay.com/sl/sell",
     });
+    expect(readiness.proposedPolicies.returns).toMatch(/30-day/);
     // Detect-only: a channels page view must not opt in or create anything.
     expect(calls.filter((c2) => c2.method !== "GET")).toHaveLength(0);
     expect(saveConnection).not.toHaveBeenCalled();
@@ -433,7 +487,7 @@ describe("detectEbayReadiness (detect-only, for the channels checklist)", () => 
   it("reports unknown on infra errors instead of blocking the page", async () => {
     stubEbayApi(() => jsonResponse(503, { errors: [{ message: "down" }] }));
     const readiness = await detectEbayReadiness(conn({ merchantLocationKey: "loc-1" }));
-    expect(readiness).toEqual({
+    expect(readiness).toMatchObject({
       shipFrom: true,
       policies: "unknown",
       registrationUrl: "https://www.ebay.com/sl/sell",

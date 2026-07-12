@@ -433,7 +433,12 @@ function mapPublishError(
             actionUrl: err.registrationUrl,
             actionLabel: "Finish your eBay seller setup →",
           }
-        : {}),
+        : err.kind === "policies_unconfirmed"
+          ? {
+              actionUrl: "/channels",
+              actionLabel: "Review & confirm your policies →",
+            }
+          : {}),
     };
   }
   return {

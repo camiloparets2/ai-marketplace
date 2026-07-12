@@ -1,11 +1,14 @@
-// "Set up automatically" — the explicit remediation action behind the eBay
+// "Create my policies" — the EXPLICIT seller confirmation behind the eBay
 // checklist on /channels (docs/design/ebay-seller-readiness.md).
 //
 // Runs the full ensure chains (ship-from location, then business policies:
-// opt-in + default-policy creation as needed). POST because it can mutate
-// the seller's eBay account — the channels GET stays detect-only.
+// opt-in + default-policy creation as needed). POST because it mutates the
+// seller's REAL eBay account — which is exactly why the body must carry
+// { confirm: true }: the UI shows the exact shipping/payment/return settings
+// (EbayReadiness.proposedPolicies) and nothing is written until the seller
+// approves them. The channels GET stays detect-only.
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
 import { getConnection } from "@/lib/connections";
 import {
@@ -22,10 +25,25 @@ export interface EbayReadinessFixResult {
   actionUrl?: string;
 }
 
-export async function POST(): Promise<NextResponse> {
+export async function POST(req: NextRequest): Promise<NextResponse> {
   const user = await requireUser();
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Explicit confirmation of the exact settings, or nothing is written.
+  let confirm = false;
+  try {
+    const body = (await req.json()) as { confirm?: unknown };
+    confirm = body.confirm === true;
+  } catch {
+    // missing/invalid body → not confirmed
+  }
+  if (!confirm) {
+    return NextResponse.json(
+      { error: "Confirm the proposed policy settings before setup runs." },
+      { status: 400 }
+    );
   }
 
   const conn = await getConnection(user.id, "ebay").catch(() => null);
@@ -38,7 +56,7 @@ export async function POST(): Promise<NextResponse> {
 
   try {
     const { marketplace } = await ensureEbayLocation(conn);
-    await ensureEbayPolicies(conn, marketplace);
+    await ensureEbayPolicies(conn, marketplace, { mayCreate: true });
     const result: EbayReadinessFixResult = { shipFrom: true, policies: "ready" };
     return NextResponse.json(result);
   } catch (err) {
