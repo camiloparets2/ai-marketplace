@@ -519,11 +519,25 @@ export async function setupEbayOnConnect(
 
 // ─── Publish steps ────────────────────────────────────────────────────────────
 
-async function suggestCategoryId(
+export interface ResolvedCategory {
+  categoryId: string;
+  // Localized aspect names eBay REQUIRES for this category — publish blocks
+  // until the item carries all of them.
+  requiredAspects: string[];
+  // Recommended / required-soon aspects — optimization prompts, not blockers.
+  recommendedAspects: string[];
+}
+
+// Resolve the title to a CURRENT LEAF category and its aspect requirements.
+// getItemAspectsForCategory doubles as the leaf check (eBay rejects non-leaf
+// ids), so a non-leaf suggestion falls through to the next candidate. There
+// is deliberately NO hardcoded fallback category — an unmappable item is the
+// seller's call, never a silent mislisting.
+async function resolveLeafCategory(
   accessToken: string,
   title: string,
   categoryTreeId: string
-): Promise<string> {
+): Promise<ResolvedCategory> {
   const res = await ebayFetch(
     accessToken,
     `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_category_suggestions?q=${encodeURIComponent(title)}`
@@ -532,13 +546,62 @@ async function suggestCategoryId(
   const data = (await res.json()) as {
     categorySuggestions?: Array<{ category: { categoryId: string } }>;
   };
-  const id = data.categorySuggestions?.[0]?.category.categoryId;
-  if (!id) {
+  const candidates = (data.categorySuggestions ?? [])
+    .map((sugg) => sugg.category.categoryId)
+    .filter(Boolean)
+    .slice(0, 3);
+  if (candidates.length === 0) {
     throw new Error(
       "eBay could not suggest a category for this title. Edit the title and retry."
     );
   }
-  return id;
+
+  for (const categoryId of candidates) {
+    const aspectsRes = await ebayFetch(
+      accessToken,
+      `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_item_aspects_for_category?category_id=${categoryId}`
+    );
+    if (!aspectsRes.ok) {
+      // Non-leaf (or retired) category id — try the next suggestion.
+      continue;
+    }
+    const aspectData = (await aspectsRes.json()) as {
+      aspects?: Array<{
+        localizedAspectName?: string;
+        aspectConstraint?: {
+          aspectRequired?: boolean;
+          aspectUsage?: string;
+        };
+      }>;
+    };
+    const requiredAspects: string[] = [];
+    const recommendedAspects: string[] = [];
+    for (const aspect of aspectData.aspects ?? []) {
+      const name = aspect.localizedAspectName;
+      if (!name) continue;
+      if (aspect.aspectConstraint?.aspectRequired) requiredAspects.push(name);
+      else if (aspect.aspectConstraint?.aspectUsage === "RECOMMENDED") {
+        recommendedAspects.push(name);
+      }
+    }
+    return { categoryId, requiredAspects, recommendedAspects };
+  }
+
+  throw new Error(
+    "eBay's suggested categories for this title are not current leaf categories. Edit the title and retry."
+  );
+}
+
+// Publish gate: every REQUIRED aspect must be present on the item. Loud and
+// actionable — never a listing eBay would reject or bury.
+export function missingRequiredAspects(
+  required: string[],
+  aspects: Record<string, string[]>
+): string[] {
+  const present = new Set(
+    Object.keys(aspects).map((name) => name.toLowerCase())
+  );
+  return required.filter((name) => !present.has(name.toLowerCase()));
 }
 
 // ─── Seller readiness: business policies ──────────────────────────────────────
@@ -1135,9 +1198,11 @@ export function buildEbayInventoryItemPayload(
       title: composed.title,
       description: composed.description,
       aspects,
-      // eBay accepts up to 12 picture URLs; our product cap is 8 (first =
-      // hero). Defensive slice in case a caller ever exceeds it.
-      imageUrls: imageUrls.slice(0, 12),
+      // eBay allows up to 24 pictures on a single-SKU listing; our product
+      // cap is 8 (first = the seller's own hero photo — originals always
+      // lead). Defensive slice in case a caller ever exceeds it. There is no
+      // stock-photo fallback anywhere: only the seller's uploads are listed.
+      imageUrls: imageUrls.slice(0, 24),
       ...(input.upc ? { upc: [input.upc] } : {}),
     },
     condition: EBAY_CONDITION_MAP[input.condition],
@@ -1285,13 +1350,32 @@ export async function publishToEbay(
   // tree, currency, policies, and Content-Language) for everything below.
   const { merchantLocationKey, marketplace } = await ensureEbayLocation(conn);
 
-  const [categoryId, policies] = await Promise.all([
-    suggestCategoryId(conn.accessToken, composed.title, marketplace.categoryTreeId),
+  const [resolvedCategory, policies] = await Promise.all([
+    resolveLeafCategory(conn.accessToken, composed.title, marketplace.categoryTreeId),
     // Seller-readiness ensure chain: cached ids, else detect / opt-in /
     // create defaults. Throws the typed onboarding error when the seller
     // hasn't finished eBay registration.
     ensureEbayPolicies(conn, marketplace),
   ]);
+  const categoryId = resolvedCategory.categoryId;
+
+  const itemPayload = buildEbayInventoryItemPayload(input, imageUrls);
+  const missing = missingRequiredAspects(
+    resolvedCategory.requiredAspects,
+    itemPayload.product.aspects
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `eBay requires these item specifics for this category: ${missing.join(", ")}. Add them to the item details and publish again.`
+    );
+  }
+  if (resolvedCategory.recommendedAspects.length > 0) {
+    // Optimization prompt (not a blocker) — surfaced in logs today; the
+    // draft-edit UI picks these up in a follow-up.
+    console.info(
+      `[ebay] recommended aspects for category ${categoryId}: ${resolvedCategory.recommendedAspects.join(", ")}`
+    );
+  }
 
   const itemRes = await ebayFetch(
     conn.accessToken,
@@ -1300,7 +1384,7 @@ export async function publishToEbay(
       // PUT by SKU is an idempotent upsert — a retry updates in place.
       method: "PUT",
       contentLanguage: marketplace.contentLanguage,
-      body: buildEbayInventoryItemPayload(input, imageUrls),
+      body: itemPayload,
     }
   );
   if (!itemRes.ok) throw await ebayError(itemRes, "inventory item creation");

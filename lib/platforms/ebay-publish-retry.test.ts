@@ -80,7 +80,34 @@ function stubEbay(
       if (path.includes("get_category_suggestions")) {
         return new Response(
           JSON.stringify({
-            categorySuggestions: [{ category: { categoryId: "112233" } }],
+            categorySuggestions: [
+              { category: { categoryId: "999" } }, // non-leaf — aspects 400s
+              { category: { categoryId: "112233" } },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      // Aspect metadata (doubles as the leaf check): 999 is non-leaf.
+      if (path.includes("get_item_aspects_for_category")) {
+        if (path.includes("category_id=999")) {
+          return new Response(
+            JSON.stringify({ errors: [{ message: "not a leaf category" }] }),
+            { status: 400 }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            aspects: [
+              {
+                localizedAspectName: "Brand",
+                aspectConstraint: { aspectRequired: true },
+              },
+              {
+                localizedAspectName: "Type",
+                aspectConstraint: { aspectRequired: false, aspectUsage: "RECOMMENDED" },
+              },
+            ],
           }),
           { status: 200 }
         );
@@ -180,5 +207,33 @@ describe("publishToEbay retry safety (deterministic SKU)", () => {
     const result = await publishToEbay(conn, listing, ["https://cdn.example/p.jpg"], SKU);
     expect(result).toMatchObject({ listingId: "listing-9", offerId: "off-new" });
     expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/offer"))).toBe(true);
+  });
+
+  it("skips non-leaf category suggestions — the leaf candidate wins, never a hardcoded fallback", async () => {
+    const calls = stubEbay(() => new Response(null, { status: 404 }));
+    await publishToEbay(conn, listing, ["https://cdn.example/p.jpg"], SKU);
+    // Both candidates were checked; the non-leaf (999) was rejected by the
+    // aspects call and 112233 was used for the offer.
+    expect(calls.some((c) => c.path.includes("category_id=999"))).toBe(true);
+    expect(calls.some((c) => c.path.includes("category_id=112233"))).toBe(true);
+  });
+
+  it("BLOCKS publish when a required aspect is missing from the item", async () => {
+    const calls = stubEbay(() => new Response(null, { status: 404 }));
+    // No brand and no specs → the category's required "Brand" aspect is absent.
+    await expect(
+      publishToEbay(
+        conn,
+        { ...listing, brand: null, model: null, specs: {} },
+        ["https://cdn.example/p.jpg"],
+        SKU
+      )
+    ).rejects.toThrow(/item specifics.*Brand/i);
+    // Blocked BEFORE any inventory/offer write.
+    expect(
+      calls.some(
+        (c) => c.method === "PUT" && c.path.includes("/inventory_item/")
+      )
+    ).toBe(false);
   });
 });
