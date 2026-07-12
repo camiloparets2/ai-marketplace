@@ -5,7 +5,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   ebayExchangeCode,
-  setupEbayLocationOnConnect,
+  setupEbayOnConnect,
 } from "@/lib/platforms/ebay";
 import { etsyExchangeCode } from "@/lib/platforms/etsy";
 import {
@@ -79,10 +79,11 @@ export async function GET(
         userId: user.id,
       };
       await saveConnection(connection);
-      // Least-friction ship-from resolution: reuse a location the seller
-      // already has on eBay (or create one from their stored ship-from
-      // address). Only when neither exists do we ask — once, right now.
-      const locationStatus = await setupEbayLocationOnConnect(connection);
+      // Least-friction onboarding: reuse a location the seller already has
+      // on eBay (or create one from their stored ship-from address) and
+      // resolve business-policy readiness, both best-effort. Only when no
+      // ship-from exists do we ask — once, right now.
+      const locationStatus = await setupEbayOnConnect(connection);
       if (locationStatus === "ship_from_needed") {
         return backToApp(
           origin,

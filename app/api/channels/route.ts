@@ -7,6 +7,8 @@ import { requireUser } from "@/lib/auth/guard";
 import { getConnection, getSupabaseAdmin, isExpired } from "@/lib/connections";
 import { API_PLATFORMS } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
+import { detectEbayReadiness } from "@/lib/platforms/ebay";
+import type { EbayReadiness } from "@/lib/platforms/ebay";
 
 interface ChannelStatus {
   platform: ApiPlatform;
@@ -16,6 +18,10 @@ interface ChannelStatus {
   lastSyncedAt: string | null;
   // Token health: connected but expired with no refresh token → reconnect.
   needsReconnect: boolean;
+  // eBay only: publish-readiness checklist (ship-from + business policies).
+  // Detect-only — this GET never mutates the seller's eBay account; fixes
+  // run at connect/publish time or via POST /api/channels/ebay-readiness.
+  ebayReadiness?: EbayReadiness;
 }
 
 export async function GET(): Promise<NextResponse> {
@@ -29,6 +35,7 @@ export async function GET(): Promise<NextResponse> {
     let connected = false;
     let accountLabel: string | null = null;
     let needsReconnect = false;
+    let ebayReadiness: EbayReadiness | undefined;
     try {
       const conn = await getConnection(user.id, platform);
       connected = conn !== null;
@@ -37,6 +44,9 @@ export async function GET(): Promise<NextResponse> {
       // Expired with no refresh token → the seller must reconnect.
       const canRefresh = conn?.refreshToken != null && conn.refreshToken !== "";
       needsReconnect = conn !== null && isExpired(conn) && !canRefresh;
+      if (platform === "ebay" && conn && !needsReconnect) {
+        ebayReadiness = await detectEbayReadiness(conn).catch(() => undefined);
+      }
     } catch {
       // Supabase not configured — report disconnected.
     }
@@ -54,7 +64,14 @@ export async function GET(): Promise<NextResponse> {
       // sync_state absent — leave null.
     }
 
-    channels.push({ platform, connected, accountLabel, lastSyncedAt, needsReconnect });
+    channels.push({
+      platform,
+      connected,
+      accountLabel,
+      lastSyncedAt,
+      needsReconnect,
+      ...(ebayReadiness ? { ebayReadiness } : {}),
+    });
   }
 
   return NextResponse.json({ channels });
