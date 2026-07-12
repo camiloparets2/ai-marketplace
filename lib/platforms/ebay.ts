@@ -38,6 +38,8 @@ import type { ShipFromLocation } from "@/lib/ship-from";
 import {
   marketplaceForCountry,
   marketplaceById,
+  sellerRegistrationUrl,
+  DEFAULT_EBAY_MARKETPLACE,
 } from "@/lib/platforms/ebay-marketplaces";
 import type { EbayMarketplace } from "@/lib/platforms/ebay-marketplaces";
 
@@ -513,7 +515,13 @@ export type EbaySellerSetupKind = "not_registered" | "policies_pending";
 // The states the app cannot silently fix. Messages are end-user safe:
 // never a raw eBay status code, never config language.
 export class EbaySellerSetupError extends Error {
-  constructor(public readonly kind: EbaySellerSetupKind) {
+  constructor(
+    public readonly kind: EbaySellerSetupKind,
+    // Seller-registration CTA on the seller's own marketplace (ebay.co.uk,
+    // ebay.de, …). Callers that know the marketplace pass the derived URL;
+    // the US entry is only the last-resort fallback.
+    public readonly registrationUrl: string = EBAY_SELLER_REGISTRATION_URL
+  ) {
     super(
       kind === "not_registered"
         ? "Your eBay account isn't set up for selling yet. Finish eBay's seller registration (identity + payout details), then publish again."
@@ -523,9 +531,11 @@ export class EbaySellerSetupError extends Error {
   }
 }
 
-// Where "Finish your eBay seller setup →" sends the user. eBay walks a
-// non-registered account through seller onboarding from its Sell entry.
-export const EBAY_SELLER_REGISTRATION_URL = "https://www.ebay.com/sl/sell";
+// Fallback "Finish your eBay seller setup →" target when no marketplace is
+// known yet; marketplace-aware paths use sellerRegistrationUrl(marketplace).
+export const EBAY_SELLER_REGISTRATION_URL = sellerRegistrationUrl(
+  DEFAULT_EBAY_MARKETPLACE
+);
 
 const POLICY_PROGRAM = "SELLING_POLICY_MANAGEMENT";
 
@@ -827,12 +837,14 @@ export async function ensureEbayPolicies(
       }
     }
   } catch (err) {
-    if (
-      justOptedIn &&
-      err instanceof EbaySellerSetupError &&
-      err.kind === "not_registered"
-    ) {
-      throw new EbaySellerSetupError("policies_pending");
+    if (err instanceof EbaySellerSetupError) {
+      // Re-raise with the seller's own marketplace registration URL (and the
+      // policies_pending reclassification right after a successful opt-in).
+      const kind =
+        justOptedIn && err.kind === "not_registered"
+          ? "policies_pending"
+          : err.kind;
+      throw new EbaySellerSetupError(kind, sellerRegistrationUrl(marketplace));
     }
     throw err;
   }
@@ -883,20 +895,30 @@ export type EbayPoliciesReadiness =
 export interface EbayReadiness {
   shipFrom: boolean;
   policies: EbayPoliciesReadiness;
+  // Seller-registration CTA target on the seller's own marketplace
+  // (ebay.co.uk, ebay.de, …) — used when policies === "not_registered".
+  registrationUrl: string;
 }
 
 export async function detectEbayReadiness(
   conn: PlatformConnection
 ): Promise<EbayReadiness> {
+  let marketplace = marketplaceById(conn.meta.marketplaceId);
+  const regUrl = (): string =>
+    sellerRegistrationUrl(marketplace ?? DEFAULT_EBAY_MARKETPLACE);
+
   let token: string;
   try {
     token = (await freshConnection(conn)).accessToken;
   } catch {
-    return { shipFrom: Boolean(conn.meta.merchantLocationKey), policies: "unknown" };
+    return {
+      shipFrom: Boolean(conn.meta.merchantLocationKey),
+      policies: "unknown",
+      registrationUrl: regUrl(),
+    };
   }
 
   let shipFrom = Boolean(conn.meta.merchantLocationKey);
-  let marketplace = marketplaceById(conn.meta.marketplaceId);
   if (!shipFrom) {
     try {
       const detected = await detectEbayLocation(token);
@@ -912,25 +934,31 @@ export async function detectEbayReadiness(
   const envReady = POLICY_KINDS.every(
     (spec) => process.env[spec.envVar] ?? conn.meta[spec.idKey]
   );
-  if (envReady) return { shipFrom, policies: "ready" };
+  if (envReady) {
+    return { shipFrom, policies: "ready", registrationUrl: regUrl() };
+  }
 
   const marketplaceId = (marketplace ?? marketplaceForCountry(null)).id;
   try {
     if (!(await isOptedIntoPolicies(token))) {
-      return { shipFrom, policies: "missing" };
+      return { shipFrom, policies: "missing", registrationUrl: regUrl() };
     }
     for (const spec of POLICY_KINDS) {
       if (process.env[spec.envVar] ?? conn.meta[spec.idKey]) continue;
       if ((await listFirstPolicy(token, spec, marketplaceId)) === null) {
-        return { shipFrom, policies: "missing" };
+        return { shipFrom, policies: "missing", registrationUrl: regUrl() };
       }
     }
-    return { shipFrom, policies: "ready" };
+    return { shipFrom, policies: "ready", registrationUrl: regUrl() };
   } catch (err) {
     if (err instanceof EbaySellerSetupError && err.kind === "not_registered") {
-      return { shipFrom, policies: "not_registered" };
+      return {
+        shipFrom,
+        policies: "not_registered",
+        registrationUrl: regUrl(),
+      };
     }
-    return { shipFrom, policies: "unknown" };
+    return { shipFrom, policies: "unknown", registrationUrl: regUrl() };
   }
 }
 

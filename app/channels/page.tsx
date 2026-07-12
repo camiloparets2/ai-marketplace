@@ -20,6 +20,9 @@ interface ChannelStatus {
   ebayReadiness?: {
     shipFrom: boolean;
     policies: "ready" | "missing" | "not_registered" | "unknown";
+    // Seller-registration CTA on the seller's own marketplace
+    // (ebay.co.uk, ebay.de, …), derived server-side.
+    registrationUrl?: string;
   };
 }
 
@@ -260,7 +263,10 @@ export default function ChannelsPage() {
                             you.
                           </span>
                           <a
-                            href="https://www.ebay.com/sl/sell"
+                            href={
+                              ch.ebayReadiness.registrationUrl ??
+                              "https://www.ebay.com/sl/sell"
+                            }
                             target="_blank"
                             rel="noopener noreferrer"
                             className="self-start text-blue-600 hover:underline text-sm font-medium"

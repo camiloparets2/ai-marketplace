@@ -365,6 +365,17 @@ describe("ensureEbayPolicies", () => {
     ).toBe(false);
   });
 
+  it("carries the seller's own marketplace registration URL on the typed error", async () => {
+    stubEbayApi(() => jsonResponse(400, NOT_ELIGIBLE_BODY));
+    const err = await ensureEbayPolicies(
+      conn(),
+      marketplaceForCountry("GB")
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EbaySellerSetupError);
+    expect((err as EbaySellerSetupError).registrationUrl).toBe(
+      "https://www.ebay.co.uk/sl/sell"
+    );
+  });
 });
 
 describe("detectEbayReadiness (detect-only, for the channels checklist)", () => {
@@ -379,7 +390,12 @@ describe("detectEbayReadiness (detect-only, for the channels checklist)", () => 
         returnPolicyId: "r1",
       })
     );
-    expect(readiness).toEqual({ shipFrom: true, policies: "ready" });
+    expect(readiness).toEqual({
+      shipFrom: true,
+      policies: "ready",
+      // Registration CTA is derived from the seller's marketplace — GB here.
+      registrationUrl: "https://www.ebay.co.uk/sl/sell",
+    });
     expect(calls).toHaveLength(0);
   });
 
@@ -394,7 +410,11 @@ describe("detectEbayReadiness (detect-only, for the channels checklist)", () => 
       return jsonResponse(500, {});
     });
     const readiness = await detectEbayReadiness(conn());
-    expect(readiness).toEqual({ shipFrom: false, policies: "missing" });
+    expect(readiness).toEqual({
+      shipFrom: false,
+      policies: "missing",
+      registrationUrl: "https://www.ebay.com/sl/sell",
+    });
     // Detect-only: a channels page view must not opt in or create anything.
     expect(calls.filter((c2) => c2.method !== "GET")).toHaveLength(0);
     expect(saveConnection).not.toHaveBeenCalled();
@@ -413,7 +433,11 @@ describe("detectEbayReadiness (detect-only, for the channels checklist)", () => 
   it("reports unknown on infra errors instead of blocking the page", async () => {
     stubEbayApi(() => jsonResponse(503, { errors: [{ message: "down" }] }));
     const readiness = await detectEbayReadiness(conn({ merchantLocationKey: "loc-1" }));
-    expect(readiness).toEqual({ shipFrom: true, policies: "unknown" });
+    expect(readiness).toEqual({
+      shipFrom: true,
+      policies: "unknown",
+      registrationUrl: "https://www.ebay.com/sl/sell",
+    });
   });
 });
 

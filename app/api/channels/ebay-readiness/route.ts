@@ -13,7 +13,6 @@ import {
   ensureEbayPolicies,
   EbayShipFromMissingError,
   EbaySellerSetupError,
-  EBAY_SELLER_REGISTRATION_URL,
 } from "@/lib/platforms/ebay";
 
 export interface EbayReadinessFixResult {
@@ -58,7 +57,7 @@ export async function POST(): Promise<NextResponse> {
         policies: err.kind === "not_registered" ? "not_registered" : "pending",
         message: err.message,
         ...(err.kind === "not_registered"
-          ? { actionUrl: EBAY_SELLER_REGISTRATION_URL }
+          ? { actionUrl: err.registrationUrl }
           : {}),
       };
       return NextResponse.json(result);

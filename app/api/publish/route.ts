@@ -28,7 +28,6 @@ import {
   publishToEbay,
   EbayShipFromMissingError,
   EbaySellerSetupError,
-  EBAY_SELLER_REGISTRATION_URL,
 } from "@/lib/platforms/ebay";
 import { publishToEtsy } from "@/lib/platforms/etsy";
 import { publishToShopify } from "@/lib/platforms/shopify";
@@ -289,7 +288,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           message: err.message,
           ...(err.kind === "not_registered"
             ? {
-                actionUrl: EBAY_SELLER_REGISTRATION_URL,
+                // The seller's own marketplace (ebay.co.uk, ebay.de, …).
+                actionUrl: err.registrationUrl,
                 actionLabel: "Finish your eBay seller setup →",
               }
             : {}),
