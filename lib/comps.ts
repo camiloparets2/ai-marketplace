@@ -26,6 +26,9 @@ export interface CompsSummary {
   // Which API grounded the band: Marketplace Insights sold comps, or the
   // Browse-API active-listings fallback (MI is limited-release).
   source: "sold" | "active";
+  // When the band was fetched (set by the network layer) — persisted with
+  // the price decision for audit.
+  fetchedAt?: string;
 
   // ── Legacy fields (existing consumers) ──
   medianSoldPrice: number | null;

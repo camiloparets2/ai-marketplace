@@ -259,6 +259,14 @@ export async function runPipeline(
     shippingCost: extraction.estimatedShippingCost,
     targetPrice: input.targetPrice,
     comps,
+    // Comps-grounded pricing (docs/design/comps-pricing.md): the AI price is
+    // only the seed when comps are sparse — such items go to review.
+    aiSuggestedPrice: extraction.suggestedPrice,
+    condition: extraction.condition,
+    defectCount: identified.defects.length,
+    completeInBox: Object.entries(extraction.specs).some(([k, v]) =>
+      /complete|in box|with box/i.test(`${k} ${v}`)
+    ),
   });
   await deps.recordPrice(input.userId, itemId, decision);
   await deps.setPrice(input.userId, itemId, decision.price);
@@ -281,6 +289,8 @@ export async function runPipeline(
     confidence: identified.confidence,
     price: decision.price,
     floor: decision.floor,
+    // Ungrounded price (no trusted comps, no seller target) → review.
+    priceGrounded: decision.grounded,
     // null (MANUAL_ESTIMATE_NEEDED) fails the shipping_unknown gate → review.
     shippingCost: extraction.estimatedShippingCost,
     title: extraction.title,
@@ -366,6 +376,7 @@ export async function approveAndPublish(
       price: overridePrice,
       floor: overridePrice,
       strategy: "user_target",
+      grounded: true, // the seller chose it
       rationale: "Review-queue approval with a manual price override.",
       inputs: { targetPrice: overridePrice },
     });

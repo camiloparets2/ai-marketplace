@@ -62,7 +62,22 @@ function fakeDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
     hostPhoto: vi.fn().mockResolvedValue("https://cdn.example/p.jpg"),
     createDraft: vi.fn().mockResolvedValue("item-1"),
     price: decidePrice,
-    fetchComps: vi.fn().mockResolvedValue(null),
+    // Trusted comps by default — the pipeline only auto-publishes grounded
+    // prices now (price_ungrounded gate); review-routing tests override this.
+    fetchComps: vi.fn().mockResolvedValue({
+      medianPrice: 120,
+      lowPrice: 100,
+      highPrice: 140,
+      sampleSize: 8,
+      demandSignal: "medium" as const,
+      source: "sold" as const,
+      fetchedAt: "2026-07-12T00:00:00.000Z",
+      medianSoldPrice: 120,
+      soldCount: 8,
+      activeCount: 12,
+      medianActivePrice: 125,
+      confidence: "high" as const,
+    }),
     recordPrice: vi.fn().mockResolvedValue(undefined),
     setPrice: vi.fn().mockResolvedValue(undefined),
     getEbayConnection: vi.fn().mockResolvedValue({
@@ -147,7 +162,8 @@ describe("runPipeline — happy path (sandbox)", () => {
     expect(deps.recordPrice).toHaveBeenCalledWith(
       "user-1",
       "item-1",
-      expect.objectContaining({ strategy: "floor_markup" })
+      // Comps-grounded: the engine anchors to the sold median, not a markup.
+      expect.objectContaining({ strategy: "comps", grounded: true })
     );
     expect(deps.setPrice).toHaveBeenCalledWith("user-1", "item-1", result.price.price);
 

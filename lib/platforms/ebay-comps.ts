@@ -161,7 +161,7 @@ export async function fetchEbayCompsFor(
     const summary =
       soldPrices.length === 0 && active.prices.length === 0
         ? null
-        : summarizeComps(soldPrices, active);
+        : { ...summarizeComps(soldPrices, active), fetchedAt: new Date().toISOString() };
     cache.set(key, { summary });
     return summary;
   } catch (err) {
