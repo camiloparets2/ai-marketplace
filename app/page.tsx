@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import Link from "next/link";
 import type { ExtractionResult } from "@/lib/types/extraction";
 import {
   CONFIDENCE_THRESHOLD,
@@ -513,9 +514,9 @@ export default function Page() {
                 Dashboard
               </a>
               {" · "}
-              <a href="/inventory" className="text-blue-600 hover:underline">
+              <Link href="/inventory" className="text-blue-600 hover:underline">
                 Inventory
-              </a>
+              </Link>
               {creditsLeft !== null && (
                 <>
                   {" · "}
@@ -1122,12 +1123,12 @@ export default function Page() {
 
             <div className="flex flex-col gap-1">
               {accountEmail && (
-                <a
+                <Link
                   href="/inventory"
                   className="text-sm text-blue-600 hover:underline text-center py-1"
                 >
                   Saved to your inventory — manage it there →
-                </a>
+                </Link>
               )}
               <button
                 onClick={reset}

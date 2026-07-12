@@ -246,9 +246,12 @@ export default function InventoryPage() {
                   <div className="w-16 h-16 rounded-lg bg-gray-100 flex-shrink-0" />
                 )}
                 <div className="min-w-0 flex-1">
-                  <p className="font-medium text-gray-900 text-sm truncate">
+                  <Link
+                    href={`/inventory/${item.id}`}
+                    className="block font-medium text-gray-900 text-sm truncate hover:text-blue-700 hover:underline"
+                  >
                     {item.title}
-                  </p>
+                  </Link>
                   <p className="text-sm text-gray-500">
                     {item.price !== null
                       ? `$${Number(item.price).toFixed(2)}`

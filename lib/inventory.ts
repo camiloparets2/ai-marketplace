@@ -184,6 +184,42 @@ export async function approveItemFromReview(
   return (data?.length ?? 0) > 0;
 }
 
+/** Seller-editable listing fields (item edit view). Only drafts and
+ *  review-held items are editable — a live listing is edited on the
+ *  marketplace, not here, so the stored row never desyncs from it. */
+export interface ItemUpdateInput {
+  title?: string;
+  price?: number;
+  condition?: string;
+  shippingCost?: number | null;
+  costOfGoods?: number | null;
+}
+
+export async function updateItemDetails(
+  userId: string,
+  itemId: string,
+  patch: ItemUpdateInput
+): Promise<boolean> {
+  const update: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+  };
+  if (patch.title !== undefined) update.title = patch.title;
+  if (patch.price !== undefined) update.price = patch.price;
+  if (patch.condition !== undefined) update.condition = patch.condition;
+  if (patch.shippingCost !== undefined) update.shipping_cost = patch.shippingCost;
+  if (patch.costOfGoods !== undefined) update.cost_of_goods = patch.costOfGoods;
+
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update(update)
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .in("status", ["draft", "review"])
+    .select("id");
+  if (error) throw new Error(`item update failed: ${error.message}`);
+  return (data?.length ?? 0) > 0;
+}
+
 /** Human rejected a held item — archive it, never publish. */
 export async function rejectItemFromReview(
   userId: string,

@@ -236,7 +236,7 @@ export default function ReviewPage() {
                   >
                     Reject
                   </Button>
-                  <Link href="/inventory" className="flex-shrink-0">
+                  <Link href={`/inventory/${item.id}`} className="flex-shrink-0">
                     <Button size="sm" variant="ghost">
                       Edit
                     </Button>
