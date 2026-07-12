@@ -8,7 +8,7 @@ export const maxDuration = 30;
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
 import { getConnection } from "@/lib/connections";
-import { fetchEbayComps } from "@/lib/comps";
+import { fetchEbayComps } from "@/lib/platforms/ebay-comps";
 import {
   checkRateLimit,
   requestIdentity,

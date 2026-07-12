@@ -4,7 +4,7 @@ import {
   extractSoldPrices,
   extractActivePrices,
   summarizeComps,
-  fetchEbayComps,
+  percentile,
 } from "./comps";
 import { decidePrice } from "./pricing";
 
@@ -53,35 +53,14 @@ describe("summarizeComps confidence", () => {
   });
 });
 
-describe("fetchEbayComps fallback behavior", () => {
-  const activeBody = {
-    total: 7,
-    itemSummaries: [{ price: { value: "50.00" } }],
-  };
-
-  it("degrades to Browse-only when Marketplace Insights is 403 (limited release)", async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, status: 403 }) // insights
-      .mockResolvedValueOnce({ ok: true, json: async () => activeBody }); // browse
-    const comps = await fetchEbayComps("tok", "sony headphones", fetchImpl as unknown as typeof fetch);
-    expect(comps).toMatchObject({
-      soldCount: 0,
-      confidence: "low",
-      activeCount: 7,
-      medianActivePrice: 50,
-    });
-  });
-
-  it("returns null when everything fails — pricing then goes conservative", async () => {
-    const fetchImpl = vi.fn().mockRejectedValue(new Error("network down"));
-    const comps = await fetchEbayComps("tok", "q", fetchImpl as unknown as typeof fetch);
-    expect(comps).toBeNull();
-  });
-});
-
 describe("decidePrice with comps", () => {
   const comps = {
+    medianPrice: 100,
+    lowPrice: 90,
+    highPrice: 115,
+    sampleSize: 8,
+    demandSignal: "medium" as const,
+    source: "sold" as const,
     medianSoldPrice: 100,
     soldCount: 8,
     activeCount: 12,
@@ -120,7 +99,13 @@ describe("decidePrice with comps", () => {
       costBasis: 20,
       shippingCost: 10,
       targetPrice: null,
-      comps: { ...comps, soldCount: 2, confidence: "low" },
+      comps: {
+        ...comps,
+        soldCount: 2,
+        sampleSize: 2,
+        source: "sold" as const,
+        confidence: "low" as const,
+      },
     });
     expect(d.strategy).toBe("floor_markup");
     expect(d.rationale).toContain("too sparse");

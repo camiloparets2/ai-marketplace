@@ -23,7 +23,7 @@ import type { GuardrailVerdict } from "@/lib/guardrails";
 import { recordAudit } from "@/lib/audit";
 import { decidePrice, recordPriceDecision } from "@/lib/pricing";
 import type { PriceDecision, PriceRequest } from "@/lib/pricing";
-import { fetchEbayComps } from "@/lib/comps";
+import { fetchEbayComps } from "@/lib/platforms/ebay-comps";
 import type { CompsSummary } from "@/lib/comps";
 import { publishToEbay, buildEbayInventoryItemPayload, ebaySkuForItem } from "@/lib/platforms/ebay";
 import type { EbayPublishResult, EbayInventoryItemPayload } from "@/lib/platforms/ebay";
