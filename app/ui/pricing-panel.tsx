@@ -62,13 +62,14 @@ export function PricingPanel({
     };
   }, [compsQuery]);
 
+  // null → no shipping estimate → NO floor exists (never treated as $0 ship).
   const floor = computeFloor(costBasis, shippingCost);
   const priceNum = parseFloat(price);
   const hasPrice = !isNaN(priceNum) && priceNum > 0;
-  const belowFloor = hasPrice && priceNum < floor;
+  const belowFloor = hasPrice && floor !== null && priceNum < floor;
   const median = comps?.medianSoldPrice ?? null;
   // A reference below the floor means the market won't clear a profitable price.
-  const marketBelowFloor = median !== null && median < floor;
+  const marketBelowFloor = median !== null && floor !== null && median < floor;
 
   return (
     <div className="flex flex-col gap-3">
@@ -105,23 +106,36 @@ export function PricingPanel({
         </p>
       )}
 
-      {/* Floor indicator. With no cost basis the true floor is uncomputable —
-          say so instead of presenting the $0-cost floor as authoritative. */}
-      <p id="price-floor" className="text-xs text-gray-500">
-        {costBasis === null ? (
-          <>
-            Break-even floor unknown — without your item cost it&apos;s at least{" "}
-            <span className="font-semibold text-gray-700">${floor.toFixed(2)}</span>{" "}
-            (fees {Math.round(PRICING_DEFAULTS.feeRate * 100)}% + shipping +
-            minimum margin). Add your cost for the real floor.
-          </>
-        ) : (
-          <>
-            Break-even floor <span className="font-semibold text-gray-700">${floor.toFixed(2)}</span>{" "}
-            — cost + fees ({Math.round(PRICING_DEFAULTS.feeRate * 100)}%) + shipping + minimum margin.
-          </>
-        )}
-      </p>
+      {/* Floor indicator. Missing shipping means NO floor at all (the money
+          rule: unknown shipping is never $0); missing cost shows the partial
+          floor with a caveat. */}
+      {floor === null ? (
+        <div
+          id="price-floor"
+          role="alert"
+          className="text-xs text-warn bg-warn-surface border border-amber-200 rounded-lg px-3 py-2"
+        >
+          ⚠ We couldn&apos;t estimate shipping for this item — enter a shipping
+          cost or pick a service. Without it there is no break-even floor and
+          the item can&apos;t publish.
+        </div>
+      ) : (
+        <p id="price-floor" className="text-xs text-gray-500">
+          {costBasis === null ? (
+            <>
+              Break-even floor unknown — without your item cost it&apos;s at least{" "}
+              <span className="font-semibold text-gray-700">${floor.toFixed(2)}</span>{" "}
+              (fees {Math.round(PRICING_DEFAULTS.feeRate * 100)}% + shipping +
+              minimum margin). Add your cost for the real floor.
+            </>
+          ) : (
+            <>
+              Break-even floor <span className="font-semibold text-gray-700">${floor.toFixed(2)}</span>{" "}
+              — cost + fees ({Math.round(PRICING_DEFAULTS.feeRate * 100)}%) + shipping + minimum margin.
+            </>
+          )}
+        </p>
+      )}
 
       {/* Comps snapshot */}
       {compsState === "loading" && (
