@@ -16,8 +16,8 @@
 import { identifyItem } from "@/lib/ai/vision";
 import type { IdentifiedItem } from "@/lib/ai/vision";
 import { hostListingPhoto } from "@/lib/storage";
-import { createDraftItem, setItemPrice, setItemReview, recordLiveListing, markItemListed, recordPublishAttempt, getItemDetail, approveItemFromReview } from "@/lib/inventory";
-import type { DraftItemInput, LiveListing, ItemDetailRow } from "@/lib/inventory";
+import { createDraftItem, setItemPrice, setItemReview, recordLiveListing, markItemListed, recordPublishAttempt, beginPublishAttempt, completePublishAttempt, getItemDetail, approveItemFromReview } from "@/lib/inventory";
+import type { DraftItemInput, LiveListing, ItemDetailRow, PublishAttemptCompletion } from "@/lib/inventory";
 import { evaluateGuardrails } from "@/lib/guardrails";
 import type { GuardrailVerdict } from "@/lib/guardrails";
 import { recordAudit } from "@/lib/audit";
@@ -50,10 +50,20 @@ export function resolvePublishMode(
 // ─── Result contract ──────────────────────────────────────────────────────────
 
 export type PipelinePublishOutcome =
-  | { mode: PublishMode; status: "live"; url: string; listingId: string }
+  | {
+      mode: PublishMode;
+      status: "live";
+      url: string;
+      listingId: string;
+      // The persist-before-publish attempt row for this publish.
+      attemptId?: string;
+      // True when the listing IS live on eBay but local recording failed —
+      // the attempt row carries the ids; do not treat the item as unlisted.
+      reconciliationRequired?: boolean;
+    }
   | { mode: "dry_run"; status: "dry_run"; payload: EbayInventoryItemPayload }
   | { mode: PublishMode; status: "not_connected"; connectUrl: string }
-  | { mode: PublishMode; status: "error"; message: string }
+  | { mode: PublishMode; status: "error"; message: string; attemptId?: string }
   // A guardrail failed — the item is parked in the review queue, unpublished.
   | {
       mode: PublishMode;
@@ -149,6 +159,17 @@ export interface PipelineDeps {
     status: "live" | "assist" | "not_connected" | "error",
     error?: string
   ): Promise<void>;
+  // Persist-before-publish: 'pending' row BEFORE the marketplace call;
+  // beginAttempt THROWS when it can't persist (then nothing is published).
+  beginAttempt(
+    userId: string,
+    itemId: string | null,
+    platform: string
+  ): Promise<string>;
+  completeAttempt(
+    attemptId: string,
+    completion: PublishAttemptCompletion
+  ): Promise<boolean>;
   publishMode(): PublishMode;
 }
 
@@ -181,6 +202,8 @@ const defaultDeps: PipelineDeps = {
   recordListing: recordLiveListing,
   markListed: markItemListed,
   recordAttempt: recordPublishAttempt,
+  beginAttempt: beginPublishAttempt,
+  completeAttempt: completePublishAttempt,
   publishMode: resolvePublishMode,
 };
 
@@ -528,8 +551,39 @@ async function publishStep(
     };
   }
 
+  // Persist-before-publish: the attempt row must exist BEFORE eBay is
+  // called. If it can't be written, nothing is published — an untracked
+  // live listing is the exact failure this prevents.
+  let attemptId: string;
   try {
-    const published = await deps.publishEbay(conn, listing, [photoUrl]);
+    attemptId = await deps.beginAttempt(userId, itemId, "ebay");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : "unknown error";
+    return {
+      mode,
+      status: "error",
+      message: `We couldn't record this publish attempt, so nothing was sent to eBay — try again. (${detail})`,
+    };
+  }
+
+  let published: EbayPublishResult;
+  try {
+    published = await deps.publishEbay(conn, listing, [photoUrl]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "publish failed";
+    await deps.completeAttempt(attemptId, { status: "error", error: message });
+    return { mode, status: "error", message, attemptId };
+  }
+
+  // The listing is LIVE on eBay from here on. Any local recording failure
+  // must leave a reconciliation_required row carrying the platform ids —
+  // never an unmanaged listing.
+  const platformIds = {
+    externalId: published.listingId,
+    url: published.url,
+    meta: { offerId: published.offerId, sku: published.sku },
+  };
+  try {
     await deps.recordListing(
       userId,
       itemId,
@@ -542,7 +596,7 @@ async function publishStep(
       listing.price
     );
     await deps.markListed(itemId);
-    await deps.recordAttempt(userId, itemId, "ebay", "live");
+    await deps.completeAttempt(attemptId, { status: "live", ...platformIds });
     // P0-8: every automated publish leaves an audit row.
     await deps.audit(userId, itemId, "auto_publish", "ebay", {
       listingId: published.listingId,
@@ -553,10 +607,26 @@ async function publishStep(
       status: "live",
       url: published.url,
       listingId: published.listingId,
+      attemptId,
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : "publish failed";
-    await deps.recordAttempt(userId, itemId, "ebay", "error", message);
-    return { mode, status: "error", message };
+    const message = err instanceof Error ? err.message : "recording failed";
+    console.error(
+      `[pipeline] RECONCILIATION: eBay listing ${published.listingId} is live but local recording failed:`,
+      message
+    );
+    await deps.completeAttempt(attemptId, {
+      status: "reconciliation_required",
+      error: message,
+      ...platformIds,
+    });
+    return {
+      mode,
+      status: "live",
+      url: published.url,
+      listingId: published.listingId,
+      attemptId,
+      reconciliationRequired: true,
+    };
   }
 }

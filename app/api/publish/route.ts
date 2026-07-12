@@ -44,6 +44,8 @@ import {
   createInventoryItem,
   recordLiveListing,
   recordPublishAttempt,
+  beginPublishAttempt,
+  completePublishAttempt,
   markItemListed,
 } from "@/lib/inventory";
 import type { LiveListing } from "@/lib/inventory";
@@ -61,12 +63,18 @@ interface PublishBody {
 }
 
 // "direct" produces the same result shapes as platforms; widen the platform
-// field on each union member (a plain Omit would collapse the union).
+// field on each union member (a plain Omit would collapse the union), and
+// every result may carry its persist-before-publish attempt row id plus the
+// reconciliation flag (live on the platform, local recording failed).
 type TargetResult = {
   [K in PublishResult["status"]]: Omit<
     Extract<PublishResult, { status: K }>,
     "platform"
-  > & { platform: PublishTarget };
+  > & {
+    platform: PublishTarget;
+    attemptId?: string;
+    reconciliationRequired?: boolean;
+  };
 }[PublishResult["status"]];
 
 const VALID_TARGETS: ReadonlySet<string> = new Set([
@@ -190,9 +198,92 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   const hostedUrl = async (): Promise<string> => (await hostedUrls())[0];
 
-  // Live publishes carry platform-side ids the inventory layer needs to end
-  // the listing later (anti-oversell). Collected during fan-out, written after.
-  const liveRecords: LiveListing[] = [];
+  // ── Persist BEFORE publish ─────────────────────────────────────────────────
+  // The inventory item exists before any marketplace is called, so a publish
+  // can never produce a listing the app doesn't know about. If we can't
+  // persist, we don't publish.
+  const photoUrl = await hostedUrl().catch(() => null);
+  let inventoryItemId: string;
+  try {
+    inventoryItemId = await createInventoryItem(userId, listing, photoUrl);
+  } catch (err) {
+    console.error("[publish] could not persist the item — refusing to publish:", err);
+    return NextResponse.json(
+      {
+        error:
+          "We couldn't save your item just now, so nothing was published. Please try again in a moment.",
+      },
+      { status: 503 }
+    );
+  }
+
+  // True when any live listing failed to record locally — the attempt row
+  // carries the platform ids for recovery.
+  let reconciliationRequired = false;
+  let anyLive = false;
+
+  // Publish one marketplace target with the persist-before-publish contract:
+  // pending attempt row → external call → record listing + complete row.
+  // A local recording failure AFTER the platform call marks the attempt
+  // reconciliation_required (with the platform ids) — never an untracked
+  // live listing.
+  async function publishExternal(
+    target: "ebay" | "etsy" | "shopify" | "direct",
+    call: () => Promise<LiveListing>
+  ): Promise<TargetResult> {
+    let attemptId: string;
+    try {
+      attemptId = await beginPublishAttempt(userId, inventoryItemId, target);
+    } catch (err) {
+      console.error(`[publish:${target}] attempt row failed — not publishing:`, err);
+      return {
+        platform: target,
+        status: "error",
+        message:
+          "We couldn't record this publish attempt, so nothing was sent — try again.",
+      };
+    }
+    let record: LiveListing;
+    try {
+      record = await call();
+    } catch (err) {
+      const mapped = mapPublishError(target, err);
+      await completePublishAttempt(attemptId, {
+        status: "error",
+        error: mapped.message,
+      });
+      return { ...mapped, attemptId };
+    }
+    anyLive = true;
+    const platformIds = {
+      externalId: record.externalId,
+      url: record.url,
+      meta: record.meta,
+    };
+    try {
+      await recordLiveListing(userId, inventoryItemId, record, listing.price);
+      await completePublishAttempt(attemptId, { status: "live", ...platformIds });
+      return { platform: target, status: "live", url: record.url, attemptId };
+    } catch (err) {
+      console.error(
+        `[publish:${target}] RECONCILIATION: live listing ${record.externalId} failed to record:`,
+        err
+      );
+      reconciliationRequired = true;
+      await completePublishAttempt(attemptId, {
+        status: "reconciliation_required",
+        error: err instanceof Error ? err.message : "recording failed",
+        ...platformIds,
+      });
+      return {
+        platform: target,
+        status: "live",
+        url: record.url,
+        attemptId,
+        reconciliationRequired: true,
+      };
+    }
+  }
 
   async function publishTo(target: PublishTarget): Promise<TargetResult> {
     try {
@@ -202,6 +293,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         case "shopify": {
           const conn = await getConnection(userId, target);
           if (!conn) {
+            await recordPublishAttempt(userId, inventoryItemId, target, "not_connected");
             return {
               platform: target,
               status: "not_connected",
@@ -211,37 +303,42 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             };
           }
           if (target === "ebay") {
-            const published = await publishToEbay(conn, listing, await hostedUrls());
-            liveRecords.push({
-              platform: "ebay",
-              url: published.url,
-              externalId: published.listingId,
-              meta: { offerId: published.offerId, sku: published.sku },
+            return publishExternal("ebay", async () => {
+              const published = await publishToEbay(conn, listing, await hostedUrls());
+              return {
+                platform: "ebay",
+                url: published.url,
+                externalId: published.listingId,
+                meta: { offerId: published.offerId, sku: published.sku },
+              };
             });
-            return { platform: target, status: "live", url: published.url };
           }
           if (target === "shopify") {
-            const published = await publishToShopify(conn, listing, image);
-            liveRecords.push({
-              platform: "shopify",
-              url: published.url,
-              externalId: published.productId,
-              meta: { shop: published.shop },
+            return publishExternal("shopify", async () => {
+              const published = await publishToShopify(conn, listing, image);
+              return {
+                platform: "shopify",
+                url: published.url,
+                externalId: published.productId,
+                meta: { shop: published.shop },
+              };
             });
-            return { platform: target, status: "live", url: published.url };
           }
-          const published = await publishToEtsy(conn, listing, imageBytes, mimeType);
-          liveRecords.push({
-            platform: "etsy",
-            url: published.url,
-            externalId: published.listingId,
-            meta: { shopId: published.shopId },
+          return publishExternal("etsy", async () => {
+            const published = await publishToEtsy(conn, listing, imageBytes, mimeType);
+            return {
+              platform: "etsy",
+              url: published.url,
+              externalId: published.listingId,
+              meta: { shopId: published.shopId },
+            };
           });
-          return { platform: target, status: "live", url: published.url };
         }
         case "facebook":
         case "offerup": {
+          // Pure copy composition — no external call, so a one-shot row.
           const composed = composeListing(target, listing);
+          await recordPublishAttempt(userId, inventoryItemId, target, "assist");
           return {
             platform: target,
             status: "assist",
@@ -253,87 +350,39 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           };
         }
         case "direct": {
-          const composed = composeListing("ebay", listing);
-          const link = await createPaymentLink(
-            listing.title,
-            listing.price,
-            composed.description
-          );
-          liveRecords.push({
-            platform: "direct",
-            url: link.url,
-            externalId: link.id,
-            meta: {},
+          return publishExternal("direct", async () => {
+            const composed = composeListing("ebay", listing);
+            const link = await createPaymentLink(
+              listing.title,
+              listing.price,
+              composed.description
+            );
+            return { platform: "direct", url: link.url, externalId: link.id, meta: {} };
           });
-          return { platform: target, status: "live", url: link.url };
         }
       }
     } catch (err) {
-      console.error(`[publish:${target}]`, err);
-      // Missing ship-from is fixable in-app — send the UI a CTA, never an
-      // env/config error.
-      if (err instanceof EbayShipFromMissingError) {
-        return {
-          platform: target,
-          status: "error",
-          message: err.message,
-          actionUrl: "/settings/ship-from",
-          actionLabel: "Add ship-from location →",
-        };
-      }
-      // Seller onboarding, not an error we can fix: incomplete eBay seller
-      // registration gets the registration CTA; a just-activating policy
-      // program gets the plain retry message. Never the raw eBay 400.
-      if (err instanceof EbaySellerSetupError) {
-        return {
-          platform: target,
-          status: "error",
-          message: err.message,
-          ...(err.kind === "not_registered"
-            ? {
-                // The seller's own marketplace (ebay.co.uk, ebay.de, …).
-                actionUrl: err.registrationUrl,
-                actionLabel: "Finish your eBay seller setup →",
-              }
-            : {}),
-        };
-      }
-      return {
-        platform: target,
-        status: "error",
-        message:
-          err instanceof Error ? err.message : "Publishing failed. Try again.",
-      };
+      // Failures before any external call (e.g. connection lookup).
+      const mapped = mapPublishError(target, err);
+      await recordPublishAttempt(
+        userId,
+        inventoryItemId,
+        target,
+        "error",
+        mapped.message
+      );
+      return mapped;
     }
   }
 
   const results = await Promise.all(targets.map(publishTo));
-
-  // ── Inventory: source of truth ───────────────────────────────────────────
-  // Record the item + its live listings so sold/delist sync can end them
-  // everywhere later. Best-effort: an inventory write failure must never
-  // undo a publish that already succeeded on the marketplaces.
-  let inventoryItemId: string | null = null;
-  try {
-    const photoUrl = await hostedUrl().catch(() => null);
-    inventoryItemId = await createInventoryItem(user.id, listing, photoUrl);
-
-    for (const record of liveRecords) {
-      await recordLiveListing(user.id, inventoryItemId, record, listing.price);
-    }
-    if (liveRecords.length > 0) await markItemListed(inventoryItemId);
-
-    for (const result of results) {
-      await recordPublishAttempt(
-        user.id,
-        inventoryItemId,
-        result.platform,
-        result.status,
-        result.status === "error" ? result.message : undefined
-      );
-    }
-  } catch (err) {
-    console.error("[publish] inventory recording failed:", err);
+  if (anyLive) {
+    await markItemListed(inventoryItemId).catch((err: unknown) => {
+      // Listings + attempts are already recorded; only the item's lifecycle
+      // stamp failed. Flag it rather than lose the signal.
+      console.error("[publish] RECONCILIATION: markItemListed failed:", err);
+      reconciliationRequired = true;
+    });
   }
 
   // Funnel: one event per publish run, plus one per failed target so
@@ -343,6 +392,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     targets,
     liveCount,
     inventoryItemId,
+    reconciliationRequired,
   });
   for (const result of results) {
     if (result.status === "error") {
@@ -353,5 +403,42 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  return NextResponse.json({ results, inventoryItemId });
+  return NextResponse.json({ results, inventoryItemId, reconciliationRequired });
+}
+
+// Map a marketplace failure to the actionable per-target error result.
+// Missing ship-from is fixable in-app; seller onboarding gets the
+// registration CTA on the seller's own marketplace; never a raw eBay 400.
+function mapPublishError(
+  target: PublishTarget,
+  err: unknown
+): Extract<TargetResult, { status: "error" }> {
+  console.error(`[publish:${target}]`, err);
+  if (err instanceof EbayShipFromMissingError) {
+    return {
+      platform: target,
+      status: "error",
+      message: err.message,
+      actionUrl: "/settings/ship-from",
+      actionLabel: "Add ship-from location →",
+    };
+  }
+  if (err instanceof EbaySellerSetupError) {
+    return {
+      platform: target,
+      status: "error",
+      message: err.message,
+      ...(err.kind === "not_registered"
+        ? {
+            actionUrl: err.registrationUrl,
+            actionLabel: "Finish your eBay seller setup →",
+          }
+        : {}),
+    };
+  }
+  return {
+    platform: target,
+    status: "error",
+    message: err instanceof Error ? err.message : "Publishing failed. Try again.",
+  };
 }

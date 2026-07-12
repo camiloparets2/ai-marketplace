@@ -34,6 +34,8 @@ vi.mock("@/lib/inventory", () => ({
   createInventoryItem: vi.fn(async () => "item-1"),
   recordLiveListing: vi.fn(async () => undefined),
   recordPublishAttempt: vi.fn(async () => undefined),
+  beginPublishAttempt: vi.fn(async () => "attempt-1"),
+  completePublishAttempt: vi.fn(async () => true),
   markItemListed: vi.fn(async () => undefined),
 }));
 vi.mock("@/lib/telemetry", () => ({

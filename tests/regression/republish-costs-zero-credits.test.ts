@@ -79,6 +79,8 @@ function deps(over: Partial<PipelineDeps> = {}): PipelineDeps {
     recordListing: vi.fn().mockResolvedValue(undefined),
     markListed: vi.fn().mockResolvedValue(undefined),
     recordAttempt: vi.fn().mockResolvedValue(undefined),
+    beginAttempt: vi.fn().mockResolvedValue("attempt-1"),
+    completeAttempt: vi.fn().mockResolvedValue(true),
     publishMode: () => "sandbox" as const,
     ...over,
   };
