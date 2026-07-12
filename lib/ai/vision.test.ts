@@ -158,6 +158,57 @@ describe("identifyItem", () => {
     });
   });
 
+  it("derives the shipping estimate from the flat-rate table — a hallucinated $0 never survives", async () => {
+    // MONEY RULE: the model picked Flat Rate Medium but emitted $0 — the
+    // stored estimate must be the TABLE's price, never the model's number.
+    const client = clientReturning([
+      {
+        type: "tool_use",
+        name: "extract_listing",
+        input: extraction({
+          suggestedShippingService: "USPS_FLAT_RATE_MEDIUM",
+          estimatedShippingCost: 0,
+        }),
+      },
+    ]);
+    const result = await identifyItem("aGk=", "image/jpeg", client);
+    expect(result.extraction.estimatedShippingCost).toBe(16.1);
+  });
+
+  it("forces a null estimate for MANUAL_ESTIMATE_NEEDED and unknown services", async () => {
+    const manual = clientReturning([
+      {
+        type: "tool_use",
+        name: "extract_listing",
+        input: extraction({
+          suggestedShippingService: "MANUAL_ESTIMATE_NEEDED",
+          estimatedShippingCost: 5, // model contradiction — never trusted
+        }),
+      },
+    ]);
+    expect(
+      (await identifyItem("aGk=", "image/jpeg", manual)).extraction
+        .estimatedShippingCost
+    ).toBeNull();
+
+    const bogus = clientReturning([
+      {
+        type: "tool_use",
+        name: "extract_listing",
+        input: extraction({
+          suggestedShippingService:
+            "UPS_GROUND" as ExtractionResult["suggestedShippingService"],
+          estimatedShippingCost: 0,
+        }),
+      },
+    ]);
+    const result = await identifyItem("aGk=", "image/jpeg", bogus);
+    expect(result.extraction.suggestedShippingService).toBe(
+      "MANUAL_ESTIMATE_NEEDED"
+    );
+    expect(result.extraction.estimatedShippingCost).toBeNull();
+  });
+
   it("throws bad_response when no tool_use block comes back", async () => {
     const client = clientReturning([{ type: "text", text: "hello" }]);
     await expect(identifyItem("aGk=", "image/jpeg", client)).rejects.toThrow(

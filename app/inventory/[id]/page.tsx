@@ -16,7 +16,11 @@ import { ItemSpecificsCard } from "@/app/ui/item-specifics";
 import type { ItemSpecificsStatus } from "@/app/ui/item-specifics";
 import { useToast } from "@/app/ui/toast";
 import { getAllFlatRates } from "@/lib/shipping";
-import { missingRequiredAspectValues } from "@/lib/ebay-aspects";
+import {
+  missingRequiredAspectValues,
+  EBAY_CATEGORY_SPEC_KEY,
+  EBAY_CATEGORY_NAME_SPEC_KEY,
+} from "@/lib/ebay-aspects";
 import type { AspectField } from "@/lib/ebay-aspects";
 
 interface ItemDetail {
@@ -72,13 +76,40 @@ export default function ItemDetailPage() {
     setTitle(it.title);
     setCondition(it.condition);
     setPrice(it.price !== null ? String(it.price) : "");
-    setShipCost(it.shipping_cost !== null ? String(it.shipping_cost) : "");
+    // MONEY RULE: a stored $0 shipping cost is never trusted as a default —
+    // it means free shipping the seller silently absorbs (the concrete-bag
+    // bug). Open the field EMPTY so publishing stays blocked until the
+    // seller deliberately types a cost (0 included — but typed, not
+    // defaulted).
+    setShipCost(
+      it.shipping_cost !== null && it.shipping_cost > 0
+        ? String(it.shipping_cost)
+        : ""
+    );
     setCostBasis(it.cost_of_goods !== null ? String(it.cost_of_goods) : "");
     setSpecs(it.specs ?? {});
   }, []);
 
   const onAspectStatus = useCallback((status: ItemSpecificsStatus) => {
     setAspectFields(status.aspects);
+    // Mirror the ONE resolved category into the client specs (functional
+    // update — this fires from the card's fetch) so Save never wipes the
+    // server-side pin and the breadcrumb below shows the same answer as the
+    // dropdown and the publish step.
+    if (status.categoryId !== null) {
+      const id = status.categoryId;
+      const name = status.categoryName;
+      setSpecs((prev) =>
+        prev[EBAY_CATEGORY_SPEC_KEY] === id &&
+        (name === null || prev[EBAY_CATEGORY_NAME_SPEC_KEY] === name)
+          ? prev
+          : {
+              ...prev,
+              [EBAY_CATEGORY_SPEC_KEY]: id,
+              ...(name ? { [EBAY_CATEGORY_NAME_SPEC_KEY]: name } : {}),
+            }
+      );
+    }
   }, []);
 
   useEffect(() => {
@@ -233,8 +264,13 @@ export default function ItemDetailPage() {
                   </div>
                 )}
                 <div className="min-w-0 flex-1">
-                  {item.category && (
-                    <p className="text-xs text-gray-400">{item.category}</p>
+                  {/* ONE category answer: the resolved eBay leaf (same as the
+                      specifics dropdown + what publish uses); the AI's guess
+                      only until resolution arrives. */}
+                  {(specs[EBAY_CATEGORY_NAME_SPEC_KEY] ?? item.category) && (
+                    <p className="text-xs text-gray-400">
+                      {specs[EBAY_CATEGORY_NAME_SPEC_KEY] ?? item.category}
+                    </p>
                   )}
                   <p className="text-sm text-gray-500 mt-1">
                     {editable

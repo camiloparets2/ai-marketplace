@@ -11,6 +11,7 @@ import Anthropic, {
 import { EXTRACTION_TOOL_SCHEMA } from "@/lib/types/extraction";
 import type { ExtractionResult } from "@/lib/types/extraction";
 import type { AcceptedMimeType } from "@/lib/image-validation";
+import { getShippingRate } from "@/lib/shipping";
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -187,6 +188,25 @@ export async function identifyItem(
   raw.style ??= null;
   raw.pattern ??= null;
   raw.specs ??= {};
+
+  // MONEY RULE: the shipping estimate is DERIVED from the flat-rate table
+  // for the service the model picked — never the model's own number. A
+  // hallucinated $0 (or any wrong amount) here becomes free/mispriced
+  // shipping the seller silently absorbs. MANUAL_ESTIMATE_NEEDED (or an
+  // unknown service value) → null, which blocks publish until the seller
+  // enters a real cost.
+  const KNOWN_SERVICES: ReadonlyArray<ExtractionResult["suggestedShippingService"]> = [
+    "USPS_FLAT_RATE_SMALL",
+    "USPS_FLAT_RATE_MEDIUM",
+    "USPS_FLAT_RATE_LARGE",
+    "MANUAL_ESTIMATE_NEEDED",
+  ];
+  if (!KNOWN_SERVICES.includes(raw.suggestedShippingService)) {
+    raw.suggestedShippingService = "MANUAL_ESTIMATE_NEEDED";
+  }
+  raw.estimatedShippingCost = getShippingRate(
+    raw.suggestedShippingService
+  ).cost;
 
   // Brand guard: never assert a brand that wasn't readable in the photo.
   // A downgrade caps overall confidence below the auto-post bar → review.

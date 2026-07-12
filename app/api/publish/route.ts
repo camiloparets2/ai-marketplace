@@ -110,6 +110,17 @@ function parseBody(raw: unknown): PublishBody | string {
     !isFinite(listing.price)
   )
     return "Price must be a positive number";
+  // MONEY RULE: shippingCost is either null (unknown — blocks eBay publish)
+  // or an explicit non-negative number. It previously flowed through
+  // UNVALIDATED, so a malformed client value could store a bogus $0 —
+  // silent free shipping the seller absorbs.
+  if (
+    listing.shippingCost !== null &&
+    (typeof listing.shippingCost !== "number" ||
+      !isFinite(listing.shippingCost) ||
+      listing.shippingCost < 0)
+  )
+    return "shippingCost must be null or a non-negative number";
   if (typeof image !== "string" || !image) return "Missing image";
   if (
     mimeType !== "image/jpeg" &&

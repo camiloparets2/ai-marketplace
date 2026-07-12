@@ -154,3 +154,43 @@ describe("POST /api/publish — fail-closed auth and rate limiting", () => {
     expect(publishToEbay).not.toHaveBeenCalled();
   });
 });
+
+describe("POST /api/publish — shippingCost validation (money rule)", () => {
+  function requestWithShipping(shippingCost: unknown): NextRequest {
+    return new NextRequest("https://app.example.com/api/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        listing: {
+          title: "Sony WH-1000XM4 Wireless Headphones",
+          brand: "Sony",
+          model: null,
+          upc: null,
+          condition: "Good",
+          category: "Electronics > Headphones",
+          specs: {},
+          price: 149.99,
+          shippingCost,
+        },
+        image: jpegBase64(),
+        mimeType: "image/jpeg",
+        targets: ["ebay"],
+      }),
+    });
+  }
+
+  // Previously UNVALIDATED: a malformed client value could store a bogus
+  // $0 = silent free shipping the seller absorbs (the concrete-bag bug).
+  it.each([
+    ["a string", "free"],
+    ["a negative number", -3],
+    ["an object", {}],
+    ["missing entirely", undefined],
+  ])("rejects shippingCost that is %s — nothing publishes", async (_label, value) => {
+    const res = await POST(requestWithShipping(value));
+    expect(res.status).toBe(400);
+    const data = (await res.json()) as { error?: string };
+    expect(data.error).toMatch(/shippingCost/);
+    expect(publishToEbay).not.toHaveBeenCalled();
+  });
+});
