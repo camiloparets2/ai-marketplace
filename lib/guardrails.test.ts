@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   confidenceGate,
+  shippingKnownGate,
   priceFloorGate,
   priceRangeGate,
   prohibitedItemGate,
@@ -25,6 +26,7 @@ function passingInput(over: Partial<GuardrailInput> = {}): GuardrailInput {
     confidence: 0.9,
     price: 49.99,
     floor: 25,
+    shippingCost: 16.1,
     title: "Sony WH-1000XM4 Wireless Headphones",
     brand: "Sony",
     category: "Electronics > Headphones",
@@ -101,12 +103,33 @@ describe("photoQualityGate", () => {
   });
 });
 
+describe("shippingKnownGate", () => {
+  it("fails when there is no shipping estimate (the concrete-mix money bug)", () => {
+    const gate = shippingKnownGate(null);
+    expect(gate.pass).toBe(false);
+    expect(gate.reason).toMatch(/enter a shipping cost or pick a service/i);
+  });
+
+  it("passes with a known estimate, including a genuine $0", () => {
+    expect(shippingKnownGate(16.1).pass).toBe(true);
+    expect(shippingKnownGate(0).pass).toBe(true);
+  });
+});
+
+describe("priceFloorGate with an unknowable floor", () => {
+  it("fails when floor is null — unknown profitability never auto-posts", () => {
+    const gate = priceFloorGate(49.99, null);
+    expect(gate.pass).toBe(false);
+    expect(gate.reason).toMatch(/floor unknown/i);
+  });
+});
+
 describe("evaluateGuardrails", () => {
   it("auto-posts only when every gate passes", () => {
     const verdict = evaluateGuardrails(passingInput());
     expect(verdict.autoPost).toBe(true);
     expect(verdict.failures).toEqual([]);
-    expect(verdict.gates).toHaveLength(6);
+    expect(verdict.gates).toHaveLength(7);
   });
 
   it("one failing gate blocks auto-post and is reported", () => {

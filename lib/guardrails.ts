@@ -96,7 +96,8 @@ export type GateName =
   | "price_range"
   | "prohibited_item"
   | "vero_brand"
-  | "photo_quality";
+  | "photo_quality"
+  | "shipping_unknown";
 
 export interface GateResult {
   gate: GateName;
@@ -127,7 +128,21 @@ export function confidenceGate(
   };
 }
 
-export function priceFloorGate(price: number, floor: number): GateResult {
+export function priceFloorGate(
+  price: number,
+  floor: number | null
+): GateResult {
+  // A null floor means the break-even is UNKNOWN (no shipping estimate).
+  // Unknown profitability never auto-posts — the live money bug this guards
+  // against was $6.50 concrete shipped free at a $30-60 loss.
+  if (floor === null) {
+    return {
+      gate: "price_floor",
+      pass: false,
+      reason:
+        "break-even floor unknown — no shipping estimate, so profitability can't be verified",
+    };
+  }
   const pass = price >= floor;
   return {
     gate: "price_floor",
@@ -206,12 +221,29 @@ export function photoQualityGate(
   };
 }
 
+// The item has no shipping estimate at all (MANUAL_ESTIMATE_NEEDED — often
+// "too large for any flat-rate box", i.e. the most expensive items to ship).
+// A human must supply a shipping cost before this can publish anywhere.
+export function shippingKnownGate(shippingCost: number | null): GateResult {
+  const pass = shippingCost !== null;
+  return {
+    gate: "shipping_unknown",
+    pass,
+    reason: pass
+      ? `shipping estimated at $${(shippingCost as number).toFixed(2)}`
+      : "no shipping estimate — enter a shipping cost or pick a service before this item can publish",
+  };
+}
+
 // ─── The combined verdict ─────────────────────────────────────────────────────
 
 export interface GuardrailInput {
   confidence: number;
   price: number;
-  floor: number;
+  // null → break-even unknown (no shipping estimate); always fails the gate.
+  floor: number | null;
+  // the shipping estimate the floor was built from; null → shipping_unknown
+  shippingCost: number | null;
   title: string;
   brand: string | null;
   category: string;
@@ -233,6 +265,7 @@ export function evaluateGuardrails(
 
   const gates: GateResult[] = [
     confidenceGate(input.confidence, cfg),
+    shippingKnownGate(input.shippingCost),
     priceFloorGate(input.price, input.floor),
     priceRangeGate(input.price, cfg),
     prohibitedItemGate(listingText),
