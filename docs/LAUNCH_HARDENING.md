@@ -138,9 +138,14 @@ Camilo's review**).
       descriptions carry condition + defects; no active content generated.
 - [x] Policy confirmation (1.1c, Phase 1 PR) — readiness detector kept.
 - [x] Order polling paginates (limit 200 + offset until eBay's total);
-      backstop cron tightened to */15 (⚠ Vercel Hobby caps crons at daily —
-      needs Pro, else revert to daily); oversell races surface as an URGENT
-      dashboard banner + top next-best-action; orders are NEVER auto-cancelled.
+      oversell races surface as an URGENT dashboard banner + top
+      next-best-action; orders are NEVER auto-cancelled.
+      - [ ] ⚠ 15-minute polling backstop BLOCKED by the Vercel Hobby plan
+            (deploy REJECTED `*/15 * * * *`: "Hobby accounts are limited to
+            daily cron jobs"). Cron stays daily (23:09 UTC); the SIGNED order
+            webhook is the primary sold signal. To get the 15-minute
+            backstop: upgrade Vercel to Pro, then set
+            `vercel.json → crons[0].schedule = "*/15 * * * *"`.
 
 ### Phase 3 — Broken core loop — ✅ DONE via #24 (folded in Phase 0)
 Draft publish/retry (zero AI, zero credits, regression-locked), item
