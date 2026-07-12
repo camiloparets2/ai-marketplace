@@ -36,6 +36,15 @@ export interface ListingRow {
   last_error: string | null;
 }
 
+// Latest publish attempt for an item — how a draft card explains WHY the
+// item isn't live yet ("eBay: seller registration incomplete", …).
+export interface LastPublishAttempt {
+  platform: string;
+  status: "live" | "assist" | "not_connected" | "error";
+  error: string | null;
+  created_at: string;
+}
+
 export interface InventoryItemRow {
   id: string;
   title: string;
@@ -53,6 +62,8 @@ export interface InventoryItemRow {
   sold_platform: string | null;
   created_at: string;
   listings: ListingRow[];
+  // most recent publish attempt (null when the item was never published)
+  last_attempt: LastPublishAttempt | null;
 }
 
 export interface EndResult {
@@ -358,9 +369,34 @@ export async function listInventory(userId: string): Promise<InventoryItemRow[]>
     byItem.set(key, rows);
   }
 
+  // Latest publish attempt per item — the "why isn't this live?" a draft
+  // card shows. Best-effort: a read failure must not break the inventory.
+  const attemptByItem = new Map<string, LastPublishAttempt>();
+  const { data: attempts } = await supabase
+    .from("publish_attempts")
+    .select("inventory_item_id, platform, status, error, created_at")
+    .in(
+      "inventory_item_id",
+      items.map((i) => i.id)
+    )
+    .order("created_at", { ascending: false })
+    .limit(500);
+  for (const a of attempts ?? []) {
+    const key = a.inventory_item_id as string;
+    if (!attemptByItem.has(key)) {
+      attemptByItem.set(key, {
+        platform: a.platform as string,
+        status: a.status as LastPublishAttempt["status"],
+        error: (a.error as string | null) ?? null,
+        created_at: a.created_at as string,
+      });
+    }
+  }
+
   return items.map((item) => ({
-    ...(item as Omit<InventoryItemRow, "listings">),
+    ...(item as Omit<InventoryItemRow, "listings" | "last_attempt">),
     listings: byItem.get(item.id) ?? [],
+    last_attempt: attemptByItem.get(item.id) ?? null,
   }));
 }
 
