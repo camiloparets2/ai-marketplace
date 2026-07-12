@@ -65,7 +65,8 @@ describe("buildEbayOfferPayload", () => {
       "112233",
       "loc-1",
       policies,
-      marketplaceForCountry("US")
+      marketplaceForCountry("US"),
+      false
     );
     expect(p).toMatchObject({
       sku: "snap-1",
@@ -87,7 +88,8 @@ describe("buildEbayOfferPayload", () => {
       "112233",
       "loc-1",
       policies,
-      marketplaceForCountry("GB")
+      marketplaceForCountry("GB"),
+      false
     );
     expect(gb.marketplaceId).toBe("EBAY_GB");
     expect(gb.pricingSummary.price).toEqual({
@@ -101,9 +103,75 @@ describe("buildEbayOfferPayload", () => {
       "112233",
       "loc-1",
       policies,
-      marketplaceForCountry("DE")
+      marketplaceForCountry("DE"),
+      false
     );
     expect(de.marketplaceId).toBe("EBAY_DE");
     expect(de.pricingSummary.price.currency).toBe("EUR");
+  });
+
+  // The buyer-paid shipping rule: the app-default fulfillment policy carries
+  // no shipping amount, so the offer must charge the buyer the per-item
+  // estimate — and must refuse to publish without one.
+  describe("shipping charge with the app-default fulfillment policy", () => {
+    it("charges the buyer the item's shipping estimate via shippingCostOverrides", () => {
+      const p = buildEbayOfferPayload(
+        listing,
+        "snap-4",
+        "112233",
+        "loc-1",
+        policies,
+        marketplaceForCountry("US"),
+        true
+      );
+      expect(p.listingPolicies.shippingCostOverrides).toEqual([
+        {
+          priority: 1,
+          shippingServiceType: "DOMESTIC",
+          shippingCost: { value: "10.40", currency: "USD" },
+        },
+      ]);
+    });
+
+    it("never overrides a seller-owned fulfillment policy", () => {
+      const p = buildEbayOfferPayload(
+        listing,
+        "snap-5",
+        "112233",
+        "loc-1",
+        policies,
+        marketplaceForCountry("US"),
+        false
+      );
+      expect("shippingCostOverrides" in p.listingPolicies).toBe(false);
+    });
+
+    it("REFUSES to publish with unknown shipping — never a silent $0 charge", () => {
+      expect(() =>
+        buildEbayOfferPayload(
+          { ...listing, shippingCost: null },
+          "snap-6",
+          "112233",
+          "loc-1",
+          policies,
+          marketplaceForCountry("US"),
+          true
+        )
+      ).toThrow(/no shipping cost/i);
+    });
+
+    it("omits the override for marketplaces without a vetted default service", () => {
+      // PL's default policy has no shippingOptions — nothing to override.
+      const p = buildEbayOfferPayload(
+        { ...listing, shippingCost: null },
+        "snap-7",
+        "112233",
+        "loc-1",
+        policies,
+        marketplaceForCountry("PL"),
+        true
+      );
+      expect("shippingCostOverrides" in p.listingPolicies).toBe(false);
+    });
   });
 });

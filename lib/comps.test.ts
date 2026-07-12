@@ -97,7 +97,8 @@ describe("decidePrice with comps", () => {
       comps,
     });
     expect(d.strategy).toBe("comps");
-    expect(d.price).toBeGreaterThanOrEqual(d.floor);
+    expect(d.floor).not.toBeNull();
+    expect(d.price).toBeGreaterThanOrEqual(d.floor as number);
     expect(d.price).toBeGreaterThanOrEqual(100);
     expect(d.rationale).toContain("8 sold comp(s)");
     expect(d.inputs.compsMedianSold).toBe(100);

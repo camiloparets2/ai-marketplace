@@ -32,6 +32,8 @@ const GATE_LABELS: Record<string, string> = {
   prohibited_item: "Possibly prohibited / restricted",
   vero_brand: "Brand-protected (VeRO) — verify authenticity",
   photo_quality: "Photo quality too low",
+  shipping_unknown:
+    "No shipping estimate — enter a shipping cost or pick a service",
 };
 
 export default function ReviewPage() {
@@ -234,7 +236,7 @@ export default function ReviewPage() {
                   >
                     Reject
                   </Button>
-                  <Link href="/inventory" className="flex-shrink-0">
+                  <Link href={`/inventory/${item.id}`} className="flex-shrink-0">
                     <Button size="sm" variant="ghost">
                       Edit
                     </Button>

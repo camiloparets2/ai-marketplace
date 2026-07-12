@@ -29,19 +29,30 @@ describe("computeFloor", () => {
       [0, 0],
       [null, 16.1],
       [250, 22.45],
-      [3.5, null],
     ];
     for (const [cost, ship] of cases) {
       const floor = computeFloor(cost, ship);
-      expect(netProfit(floor, cost ?? 0, ship ?? 0)).toBeGreaterThanOrEqual(
-        requiredMargin(floor) - 0.011 // cent rounding tolerance
+      expect(floor).not.toBeNull();
+      expect(
+        netProfit(floor as number, cost ?? 0, ship as number)
+      ).toBeGreaterThanOrEqual(
+        requiredMargin(floor as number) - 0.011 // cent rounding tolerance
       );
     }
   });
 
+  it("NEVER computes a floor with $0 shipping when shippingCost is null", () => {
+    // The live money bug: 50 lb concrete, MANUAL_ESTIMATE_NEEDED shipping,
+    // floor silently assumed free shipping. Unknown shipping = no floor.
+    expect(computeFloor(3.5, null)).toBeNull();
+    expect(computeFloor(null, null)).toBeNull();
+    // and a KNOWN $0 shipping (genuinely free to ship) still computes
+    expect(computeFloor(3.5, 0)).not.toBeNull();
+  });
+
   it("uses the percent margin branch for expensive items", () => {
     // $250 cost: 15% of price dwarfs the $3 flat margin
-    const floor = computeFloor(250, 10);
+    const floor = computeFloor(250, 10) as number;
     expect(PRICING_DEFAULTS.minMarginPct * floor).toBeGreaterThan(
       PRICING_DEFAULTS.minMarginFlat
     );
@@ -51,7 +62,7 @@ describe("computeFloor", () => {
   });
 
   it("uses the flat margin branch for cheap items", () => {
-    const floor = computeFloor(2, 0);
+    const floor = computeFloor(2, 0) as number;
     // At this floor the binding constraint is the $3 flat margin
     expect(netProfit(floor, 2, 0)).toBeGreaterThanOrEqual(
       PRICING_DEFAULTS.minMarginFlat - 0.011
@@ -77,9 +88,18 @@ describe("decidePrice", () => {
   it("prices floor × markup with .99 styling when there is no target", () => {
     const d = decidePrice({ costBasis: 10, shippingCost: 5, targetPrice: null });
     expect(d.strategy).toBe("floor_markup");
-    expect(d.price).toBeGreaterThanOrEqual(d.floor);
+    expect(d.floor).not.toBeNull();
+    expect(d.price).toBeGreaterThanOrEqual(d.floor as number);
     expect(Math.round((d.price % 1) * 100)).toBe(99);
     expect(d.rationale).toContain("markup");
+  });
+
+  it("reports a null floor and a loud rationale when shipping is unknown", () => {
+    const d = decidePrice({ costBasis: 10, shippingCost: null, targetPrice: null });
+    expect(d.floor).toBeNull();
+    expect(d.rationale).toMatch(/no shipping estimate/i);
+    // the seed price never pretends to be a profitable floor
+    expect(d.rationale).toMatch(/provisional|excludes shipping/i);
   });
 
   it("flags a missing cost basis in the rationale and inputs", () => {

@@ -67,8 +67,10 @@ function nextBestAction(d: DashboardData): { text: string; href: string } {
   }
   if (d.items.draft > 0) {
     return {
+      // Lands on the draft-filtered inventory, where every draft now has a
+      // List it / Retry action — a CTA that can actually finish them.
       text: `Finish ${d.items.draft} draft${d.items.draft === 1 ? "" : "s"} waiting in inventory`,
-      href: "/inventory",
+      href: "/inventory?filter=draft",
     };
   }
   return { text: "List your next item — snap a photo", href: "/" };

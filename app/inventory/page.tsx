@@ -32,6 +32,13 @@ interface Item {
   sold_platform: string | null;
   created_at: string;
   listings: ListingRow[];
+  // most recent publish attempt — why a draft isn't live yet
+  last_attempt: {
+    platform: string;
+    status: "live" | "assist" | "not_connected" | "error";
+    error: string | null;
+    created_at: string;
+  } | null;
 }
 
 const PLATFORM_NAMES: Record<string, string> = {
@@ -52,10 +59,20 @@ export default function InventoryPage() {
   // Item id whose cost editor is open, and its in-progress value
   const [costEditor, setCostEditor] = useState<string>("");
   const [costValue, setCostValue] = useState<string>("");
-  // Lifecycle filter chip
+  // Lifecycle filter chip. Deep-linkable (?filter=draft) so the dashboard's
+  // "Finish N drafts" CTA lands directly on the drafts.
   const [filter, setFilter] = useState<
     "all" | "draft" | "review" | "listed" | "sold"
-  >("all");
+  >(() => {
+    if (typeof window === "undefined") return "all";
+    const fromUrl = new URLSearchParams(window.location.search).get("filter");
+    return fromUrl === "draft" ||
+      fromUrl === "review" ||
+      fromUrl === "listed" ||
+      fromUrl === "sold"
+      ? fromUrl
+      : "all";
+  });
 
   const load = useCallback(async () => {
     try {
@@ -96,9 +113,24 @@ export default function InventoryPage() {
         ok?: boolean;
         error?: string;
         endResults?: Array<{ platform: string; ok: boolean; error?: string }>;
+        publish?: {
+          status: string;
+          url?: string;
+          message?: string;
+          connectUrl?: string;
+        };
       };
       if (!res.ok) {
         setNotice(data.error ?? "Action failed. Please try again.");
+      } else if (data.publish) {
+        // Draft publish outcome — success or the exact reason it failed.
+        setNotice(
+          data.publish.status === "live"
+            ? "Listed! The live listing is linked on the card."
+            : data.publish.status === "not_connected"
+              ? "Connect your eBay account first — see Channels."
+              : (data.publish.message ?? "Publish failed. Try again.")
+        );
       } else if (data.endResults && data.endResults.some((r) => !r.ok)) {
         const failed = data.endResults.filter((r) => !r.ok);
         setNotice(
@@ -246,9 +278,12 @@ export default function InventoryPage() {
                   <div className="w-16 h-16 rounded-lg bg-gray-100 flex-shrink-0" />
                 )}
                 <div className="min-w-0 flex-1">
-                  <p className="font-medium text-gray-900 text-sm truncate">
+                  <Link
+                    href={`/inventory/${item.id}`}
+                    className="block font-medium text-gray-900 text-sm truncate hover:text-blue-700 hover:underline"
+                  >
                     {item.title}
-                  </p>
+                  </Link>
                   <p className="text-sm text-gray-500">
                     {item.price !== null
                       ? `$${Number(item.price).toFixed(2)}`
@@ -374,6 +409,32 @@ export default function InventoryPage() {
                 </div>
               )}
 
+              {/* Draft: why the last publish failed + fix/retry CTAs */}
+              {item.status === "draft" &&
+                item.last_attempt &&
+                (item.last_attempt.status === "error" ||
+                  item.last_attempt.status === "not_connected") && (
+                  <div className="rounded-lg bg-red-50 border border-red-200 p-2.5 space-y-1">
+                    <p className="text-xs font-medium text-red-700">
+                      Last publish to{" "}
+                      {PLATFORM_NAMES[item.last_attempt.platform] ??
+                        item.last_attempt.platform}{" "}
+                      failed:
+                    </p>
+                    <p className="text-xs text-red-600">
+                      {item.last_attempt.status === "not_connected"
+                        ? "Account not connected — connect it on the Channels page."
+                        : (item.last_attempt.error ?? "Unknown error.")}
+                    </p>
+                    <Link
+                      href={`/inventory/${item.id}`}
+                      className="inline-block text-xs font-medium text-red-700 underline"
+                    >
+                      Fix & retry →
+                    </Link>
+                  </div>
+                )}
+
               {/* Review queue: why the item is held + the human decision */}
               {item.status === "review" && (
                 <div className="rounded-lg bg-amber-50 border border-amber-200 p-2.5 space-y-1.5">
@@ -406,6 +467,23 @@ export default function InventoryPage() {
 
               {item.status !== "archived" && item.status !== "review" && (
                 <div className="flex gap-2">
+                  {/* The action every draft was missing: publish (or retry)
+                      from the stored data — no new photo, no new credit. */}
+                  {item.status === "draft" && (
+                    <button
+                      onClick={() => void runAction(item.id, { action: "publish" })}
+                      disabled={busyItem === item.id}
+                      className="flex-1 py-1.5 rounded-lg bg-blue-600 text-white font-medium text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                    >
+                      {busyItem === item.id
+                        ? "Working..."
+                        : item.last_attempt &&
+                            item.last_attempt.status !== "live" &&
+                            item.last_attempt.status !== "assist"
+                          ? "Retry publish"
+                          : "List it"}
+                    </button>
+                  )}
                   {item.status !== "sold" && (
                     <>
                       {soldPicker === item.id ? (

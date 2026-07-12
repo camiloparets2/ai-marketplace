@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { runPipeline, approveAndPublish, resolvePublishMode } from "./pipeline";
+import {
+  runPipeline,
+  approveAndPublish,
+  publishDraft,
+  resolvePublishMode,
+} from "./pipeline";
 import type { PipelineDeps, PipelineInput } from "./pipeline";
 import type { IdentifiedItem } from "@/lib/ai/vision";
 import type { ExtractionResult } from "@/lib/types/extraction";
@@ -105,6 +110,8 @@ function fakeDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
       specs: { Color: "Black" },
       photo_url: "https://cdn.example/p.jpg",
       price: 94.99,
+      cost_of_goods: 40,
+      shipping_cost: 16.1,
       status: "review",
       review_reasons: [{ gate: "confidence", reason: "low" }],
     }),
@@ -127,6 +134,9 @@ describe("runPipeline — happy path (sandbox)", () => {
         defects: ["light scuff on right earcup"],
         idConfidence: 0.85,
         costOfGoods: 40,
+        // Persisted so a later republish never re-runs AI or loses the
+        // shipping estimate.
+        shippingCost: 16.1,
       }),
       "https://cdn.example/p.jpg"
     );
@@ -164,7 +174,10 @@ describe("runPipeline — happy path (sandbox)", () => {
       status: "live",
       listingId: "123",
     });
-    expect(result.price.price).toBeGreaterThanOrEqual(result.price.floor);
+    expect(result.price.floor).not.toBeNull();
+    expect(result.price.price).toBeGreaterThanOrEqual(
+      result.price.floor as number
+    );
 
     // P0-8: the automated publish left an audit row
     expect(deps.audit).toHaveBeenCalledWith(
@@ -281,6 +294,34 @@ describe("runPipeline — guardrail routing", () => {
     );
   });
 
+  it("NEVER auto-publishes an item with unknown shipping (the money bug)", async () => {
+    // MANUAL_ESTIMATE_NEEDED → estimatedShippingCost null → no floor exists.
+    // Live proof this guards: 50 lb concrete mix priced $6.50 with free
+    // shipping = $30-60 loss per unit.
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue({
+        ...identified,
+        extraction: {
+          ...extraction,
+          suggestedShippingService: "MANUAL_ESTIMATE_NEEDED",
+          estimatedShippingCost: null,
+        },
+      }),
+    });
+    const result = await runPipeline(input, deps);
+
+    expect(result.publish.status).toBe("review");
+    if (result.publish.status === "review") {
+      const gates = result.publish.failures.map((f) => f.gate);
+      expect(gates).toContain("shipping_unknown");
+      expect(gates).toContain("price_floor");
+    }
+    expect(deps.publishEbay).not.toHaveBeenCalled();
+    expect(deps.recordListing).not.toHaveBeenCalled();
+    // the priced decision records an honest null floor
+    expect(result.price.floor).toBeNull();
+  });
+
   it("holds VeRO-listed brands for a human authenticity check", async () => {
     const deps = fakeDeps({
       identify: vi.fn().mockResolvedValue({
@@ -383,6 +424,18 @@ describe("approveAndPublish — the review queue's human override", () => {
     if (result.ok) expect(result.publish.status).toBe("live");
   });
 
+  it("publishes with the item's STORED shipping estimate — never a silent null", async () => {
+    // The old code hardcoded shippingCost: null on approval, which the money
+    // rule (unknown shipping ≠ $0) now refuses at the eBay payload builder.
+    const deps = fakeDeps();
+    await approveAndPublish("user-1", "item-1", null, deps);
+    expect(deps.publishEbay).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ shippingCost: 16.1 }),
+      expect.anything()
+    );
+  });
+
   it("records a manual price override in price_history", async () => {
     const deps = fakeDeps();
     await approveAndPublish("user-1", "item-1", 120, deps);
@@ -408,6 +461,125 @@ describe("approveAndPublish — the review queue's human override", () => {
     const result = await approveAndPublish("user-1", "item-1", null, unpriced);
     expect(result).toMatchObject({ ok: false, error: expect.stringContaining("price") });
     expect(unpriced.publishEbay).not.toHaveBeenCalled();
+  });
+});
+
+describe("publishDraft — publish/retry a stored draft, zero AI, zero credits", () => {
+  const draftItem = {
+    id: "item-1",
+    title: "Sony WH-1000XM4 Wireless Headphones",
+    brand: "Sony",
+    model: "WH-1000XM4",
+    upc: null,
+    condition: "Very Good",
+    category: "Electronics > Headphones",
+    specs: { Color: "Black" },
+    photo_url: "https://cdn.example/p.jpg",
+    price: 94.99,
+    cost_of_goods: 40,
+    shipping_cost: 16.1,
+    status: "draft",
+    review_reasons: [],
+  };
+
+  it("publishes entirely from the stored row — identify is NEVER called", async () => {
+    const deps = fakeDeps({ getItem: vi.fn().mockResolvedValue(draftItem) });
+    const result = await publishDraft("user-1", "item-1", deps);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.publish.status).toBe("live");
+    // The whole point: no AI extraction, so no credit can possibly be spent.
+    expect(deps.identify).not.toHaveBeenCalled();
+    expect(deps.publishEbay).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        title: draftItem.title,
+        price: 94.99,
+        shippingCost: 16.1,
+      }),
+      ["https://cdn.example/p.jpg"]
+    );
+    expect(deps.markListed).toHaveBeenCalledWith("item-1");
+    expect(deps.audit).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "draft_publish",
+      null,
+      { price: 94.99 }
+    );
+  });
+
+  it("retrying after a failed publish records the attempt and keeps the item retryable", async () => {
+    const deps = fakeDeps({
+      getItem: vi.fn().mockResolvedValue(draftItem),
+      publishEbay: vi.fn().mockRejectedValue(new Error("eBay is down")),
+    });
+    const result = await publishDraft("user-1", "item-1", deps);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.publish).toMatchObject({
+        status: "error",
+        message: "eBay is down",
+      });
+    }
+    expect(deps.recordAttempt).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "ebay",
+      "error",
+      "eBay is down"
+    );
+    // Item never left draft — the same publish action retries it.
+    expect(deps.markListed).not.toHaveBeenCalled();
+  });
+
+  it("user-initiated publish is never silently dry-run — the flag only gates the auto pipeline", async () => {
+    // Production config: EBAY_ENV unset, PIPELINE_LIVE_PUBLISH off → the
+    // automated pipeline dry-runs, but a seller clicking Publish must
+    // actually publish (same standing as /api/publish).
+    const deps = fakeDeps({
+      getItem: vi.fn().mockResolvedValue(draftItem),
+      publishMode: () => "dry_run" as const,
+    });
+    const result = await publishDraft("user-1", "item-1", deps);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.publish).toMatchObject({ mode: "live", status: "live" });
+    expect(deps.publishEbay).toHaveBeenCalled();
+
+    // Approval from the review queue is the same explicit human intent.
+    const approve = fakeDeps({ publishMode: () => "dry_run" as const });
+    const approved = await approveAndPublish("user-1", "item-1", null, approve);
+    expect(approved.ok).toBe(true);
+    if (approved.ok) expect(approved.publish.status).toBe("live");
+  });
+
+  it("refuses non-drafts, unpriced drafts, and unknown-shipping drafts", async () => {
+    const review = fakeDeps({
+      getItem: vi.fn().mockResolvedValue({ ...draftItem, status: "review" }),
+    });
+    expect(await publishDraft("user-1", "item-1", review)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("review"),
+    });
+
+    const unpriced = fakeDeps({
+      getItem: vi.fn().mockResolvedValue({ ...draftItem, price: null }),
+    });
+    expect(await publishDraft("user-1", "item-1", unpriced)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("price"),
+    });
+
+    // The money rule: unknown shipping can never publish as free.
+    const noShip = fakeDeps({
+      getItem: vi.fn().mockResolvedValue({ ...draftItem, shipping_cost: null }),
+    });
+    const result = await publishDraft("user-1", "item-1", noShip);
+    expect(result).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/shipping cost/i),
+    });
+    expect(noShip.publishEbay).not.toHaveBeenCalled();
   });
 });
 

@@ -36,6 +36,15 @@ export interface ListingRow {
   last_error: string | null;
 }
 
+// Latest publish attempt for an item — how a draft card explains WHY the
+// item isn't live yet ("eBay: seller registration incomplete", …).
+export interface LastPublishAttempt {
+  platform: string;
+  status: "live" | "assist" | "not_connected" | "error";
+  error: string | null;
+  created_at: string;
+}
+
 export interface InventoryItemRow {
   id: string;
   title: string;
@@ -53,6 +62,8 @@ export interface InventoryItemRow {
   sold_platform: string | null;
   created_at: string;
   listings: ListingRow[];
+  // most recent publish attempt (null when the item was never published)
+  last_attempt: LastPublishAttempt | null;
 }
 
 export interface EndResult {
@@ -76,6 +87,10 @@ export interface DraftItemInput {
   // 0-1 from lib/ai/vision.ts
   idConfidence: number;
   costOfGoods: number | null;
+  // Estimated shipping cost from extraction; null = MANUAL_ESTIMATE_NEEDED.
+  // Persisted so republishing a draft never re-runs AI — and never silently
+  // downgrades a known shipping cost to "unknown".
+  shippingCost: number | null;
 }
 
 export async function createDraftItem(
@@ -97,6 +112,7 @@ export async function createDraftItem(
       defects: input.defects,
       id_confidence: input.idConfidence,
       cost_of_goods: input.costOfGoods,
+      shipping_cost: input.shippingCost,
       photo_url: photoUrl,
     })
     .select("id")
@@ -128,7 +144,8 @@ export async function setItemReview(
   if (error) throw new Error(`set review failed: ${error.message}`);
 }
 
-/** Full item detail — what the review queue and approval publish need. */
+/** Full item detail — what the review queue, approval publish, draft
+ *  publish/retry, and the item edit view need. */
 export interface ItemDetailRow {
   id: string;
   title: string;
@@ -140,6 +157,8 @@ export interface ItemDetailRow {
   specs: Record<string, string>;
   photo_url: string | null;
   price: number | null;
+  cost_of_goods: number | null;
+  shipping_cost: number | null;
   status: "draft" | "review" | "listed" | "sold" | "archived";
   review_reasons: Array<{ gate: string; reason: string }>;
 }
@@ -151,7 +170,7 @@ export async function getItemDetail(
   const { data, error } = await getSupabaseAdmin()
     .from("inventory_items")
     .select(
-      "id, title, brand, model, upc, condition, category, specs, photo_url, price, status, review_reasons"
+      "id, title, brand, model, upc, condition, category, specs, photo_url, price, cost_of_goods, shipping_cost, status, review_reasons"
     )
     .eq("id", itemId)
     .eq("user_id", userId)
@@ -173,6 +192,42 @@ export async function approveItemFromReview(
     .eq("status", "review")
     .select("id");
   if (error) throw new Error(`approve failed: ${error.message}`);
+  return (data?.length ?? 0) > 0;
+}
+
+/** Seller-editable listing fields (item edit view). Only drafts and
+ *  review-held items are editable — a live listing is edited on the
+ *  marketplace, not here, so the stored row never desyncs from it. */
+export interface ItemUpdateInput {
+  title?: string;
+  price?: number;
+  condition?: string;
+  shippingCost?: number | null;
+  costOfGoods?: number | null;
+}
+
+export async function updateItemDetails(
+  userId: string,
+  itemId: string,
+  patch: ItemUpdateInput
+): Promise<boolean> {
+  const update: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+  };
+  if (patch.title !== undefined) update.title = patch.title;
+  if (patch.price !== undefined) update.price = patch.price;
+  if (patch.condition !== undefined) update.condition = patch.condition;
+  if (patch.shippingCost !== undefined) update.shipping_cost = patch.shippingCost;
+  if (patch.costOfGoods !== undefined) update.cost_of_goods = patch.costOfGoods;
+
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update(update)
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .in("status", ["draft", "review"])
+    .select("id");
+  if (error) throw new Error(`item update failed: ${error.message}`);
   return (data?.length ?? 0) > 0;
 }
 
@@ -226,6 +281,7 @@ export async function createInventoryItem(
       specs: listing.specs,
       photo_url: photoUrl,
       price: listing.price,
+      shipping_cost: listing.shippingCost,
     })
     .select("id")
     .single<{ id: string }>();
@@ -313,9 +369,34 @@ export async function listInventory(userId: string): Promise<InventoryItemRow[]>
     byItem.set(key, rows);
   }
 
+  // Latest publish attempt per item — the "why isn't this live?" a draft
+  // card shows. Best-effort: a read failure must not break the inventory.
+  const attemptByItem = new Map<string, LastPublishAttempt>();
+  const { data: attempts } = await supabase
+    .from("publish_attempts")
+    .select("inventory_item_id, platform, status, error, created_at")
+    .in(
+      "inventory_item_id",
+      items.map((i) => i.id)
+    )
+    .order("created_at", { ascending: false })
+    .limit(500);
+  for (const a of attempts ?? []) {
+    const key = a.inventory_item_id as string;
+    if (!attemptByItem.has(key)) {
+      attemptByItem.set(key, {
+        platform: a.platform as string,
+        status: a.status as LastPublishAttempt["status"],
+        error: (a.error as string | null) ?? null,
+        created_at: a.created_at as string,
+      });
+    }
+  }
+
   return items.map((item) => ({
-    ...(item as Omit<InventoryItemRow, "listings">),
+    ...(item as Omit<InventoryItemRow, "listings" | "last_attempt">),
     listings: byItem.get(item.id) ?? [],
+    last_attempt: attemptByItem.get(item.id) ?? null,
   }));
 }
 
