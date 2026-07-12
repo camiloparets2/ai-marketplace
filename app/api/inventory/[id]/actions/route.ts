@@ -13,8 +13,13 @@
 //       → release a guardrail-held item from review and publish it
 //   { action: "reject" }
 //       → archive a guardrail-held item, never publish
+//   { action: "publish" }
+//       → publish (or retry) a draft from its stored data — no AI re-run,
+//         no credit spend; the credit already paid for the extraction
 //
 // Sold/delist are idempotent: repeating retries any listing whose end failed.
+// Publish retries are too: each try records a publish_attempts row and the
+// item only leaves draft when a publish goes live.
 
 export const maxDuration = 60;
 
@@ -27,7 +32,7 @@ import {
   setItemCost,
   rejectItemFromReview,
 } from "@/lib/inventory";
-import { approveAndPublish } from "@/lib/pipeline";
+import { approveAndPublish, publishDraft } from "@/lib/pipeline";
 import { recordAudit } from "@/lib/audit";
 import { trackEvent } from "@/lib/telemetry";
 
@@ -126,6 +131,17 @@ export async function POST(
         }
         return NextResponse.json(result);
       }
+      case "publish": {
+        const result = await publishDraft(user.id, id);
+        if (!result.ok) {
+          return NextResponse.json({ error: result.error }, { status: 400 });
+        }
+        await trackEvent(user.id, "draft_publish", {
+          itemId: id,
+          status: result.publish.status,
+        });
+        return NextResponse.json(result);
+      }
       case "reject": {
         const ok = await rejectItemFromReview(user.id, id);
         if (!ok) {
@@ -141,7 +157,7 @@ export async function POST(
         return NextResponse.json(
           {
             error:
-              "action must be sold, delist, archive, set_cost, approve, or reject",
+              "action must be sold, delist, archive, set_cost, approve, publish, or reject",
           },
           { status: 400 }
         );

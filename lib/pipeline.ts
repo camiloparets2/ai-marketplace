@@ -360,6 +360,61 @@ export async function approveAndPublish(
   return { ok: true, publish };
 }
 
+// ─── Draft publish / retry ────────────────────────────────────────────────────
+
+export type DraftPublishResult =
+  | { ok: true; publish: PipelinePublishOutcome }
+  | { ok: false; error: string };
+
+/**
+ * Publish (or retry) a stored draft — the action every orphaned draft was
+ * missing: items whose one-shot publish failed, or that were delisted back
+ * to draft. Rebuilds the listing entirely from the stored row; NEVER re-runs
+ * AI identification and NEVER spends a credit — the credit already paid for
+ * the extraction that created this draft. Retrying a failed publish is the
+ * same call: publish_attempts records each try, and the item only leaves
+ * draft when a publish actually goes live.
+ */
+export async function publishDraft(
+  userId: string,
+  itemId: string,
+  deps: PipelineDeps = defaultDeps
+): Promise<DraftPublishResult> {
+  const item = await deps.getItem(userId, itemId);
+  if (!item) return { ok: false, error: "Item not found" };
+  if (item.status !== "draft") {
+    return {
+      ok: false,
+      error:
+        item.status === "review"
+          ? "This item is held for review — approve or reject it in the review queue."
+          : "Only drafts can be published.",
+    };
+  }
+  if (item.price === null || item.price <= 0) {
+    return { ok: false, error: "Set a price before publishing." };
+  }
+  // The money rule at the door: unknown shipping never publishes as $0.
+  if (item.shipping_cost === null) {
+    return {
+      ok: false,
+      error:
+        "We couldn't estimate shipping for this item — enter a shipping cost before publishing.",
+    };
+  }
+
+  await deps.audit(userId, itemId, "draft_publish", null, { price: item.price });
+  const publish = await publishStep(
+    userId,
+    itemId,
+    listingFromItem(item, item.price),
+    item.photo_url,
+    item.photo_url === null ? "no stored photo for this item" : null,
+    deps
+  );
+  return { ok: true, publish };
+}
+
 // Rebuild the publishable listing from what the draft already stored — the
 // republish path must never need a fresh AI extraction (or a credit).
 function listingFromItem(item: ItemDetailRow, price: number): ListingInput {

@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { runPipeline, approveAndPublish, resolvePublishMode } from "./pipeline";
+import {
+  runPipeline,
+  approveAndPublish,
+  publishDraft,
+  resolvePublishMode,
+} from "./pipeline";
 import type { PipelineDeps, PipelineInput } from "./pipeline";
 import type { IdentifiedItem } from "@/lib/ai/vision";
 import type { ExtractionResult } from "@/lib/types/extraction";
@@ -456,6 +461,105 @@ describe("approveAndPublish — the review queue's human override", () => {
     const result = await approveAndPublish("user-1", "item-1", null, unpriced);
     expect(result).toMatchObject({ ok: false, error: expect.stringContaining("price") });
     expect(unpriced.publishEbay).not.toHaveBeenCalled();
+  });
+});
+
+describe("publishDraft — publish/retry a stored draft, zero AI, zero credits", () => {
+  const draftItem = {
+    id: "item-1",
+    title: "Sony WH-1000XM4 Wireless Headphones",
+    brand: "Sony",
+    model: "WH-1000XM4",
+    upc: null,
+    condition: "Very Good",
+    category: "Electronics > Headphones",
+    specs: { Color: "Black" },
+    photo_url: "https://cdn.example/p.jpg",
+    price: 94.99,
+    cost_of_goods: 40,
+    shipping_cost: 16.1,
+    status: "draft",
+    review_reasons: [],
+  };
+
+  it("publishes entirely from the stored row — identify is NEVER called", async () => {
+    const deps = fakeDeps({ getItem: vi.fn().mockResolvedValue(draftItem) });
+    const result = await publishDraft("user-1", "item-1", deps);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.publish.status).toBe("live");
+    // The whole point: no AI extraction, so no credit can possibly be spent.
+    expect(deps.identify).not.toHaveBeenCalled();
+    expect(deps.publishEbay).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        title: draftItem.title,
+        price: 94.99,
+        shippingCost: 16.1,
+      }),
+      ["https://cdn.example/p.jpg"]
+    );
+    expect(deps.markListed).toHaveBeenCalledWith("item-1");
+    expect(deps.audit).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "draft_publish",
+      null,
+      { price: 94.99 }
+    );
+  });
+
+  it("retrying after a failed publish records the attempt and keeps the item retryable", async () => {
+    const deps = fakeDeps({
+      getItem: vi.fn().mockResolvedValue(draftItem),
+      publishEbay: vi.fn().mockRejectedValue(new Error("eBay is down")),
+    });
+    const result = await publishDraft("user-1", "item-1", deps);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.publish).toMatchObject({
+        status: "error",
+        message: "eBay is down",
+      });
+    }
+    expect(deps.recordAttempt).toHaveBeenCalledWith(
+      "user-1",
+      "item-1",
+      "ebay",
+      "error",
+      "eBay is down"
+    );
+    // Item never left draft — the same publish action retries it.
+    expect(deps.markListed).not.toHaveBeenCalled();
+  });
+
+  it("refuses non-drafts, unpriced drafts, and unknown-shipping drafts", async () => {
+    const review = fakeDeps({
+      getItem: vi.fn().mockResolvedValue({ ...draftItem, status: "review" }),
+    });
+    expect(await publishDraft("user-1", "item-1", review)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("review"),
+    });
+
+    const unpriced = fakeDeps({
+      getItem: vi.fn().mockResolvedValue({ ...draftItem, price: null }),
+    });
+    expect(await publishDraft("user-1", "item-1", unpriced)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("price"),
+    });
+
+    // The money rule: unknown shipping can never publish as free.
+    const noShip = fakeDeps({
+      getItem: vi.fn().mockResolvedValue({ ...draftItem, shipping_cost: null }),
+    });
+    const result = await publishDraft("user-1", "item-1", noShip);
+    expect(result).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/shipping cost/i),
+    });
+    expect(noShip.publishEbay).not.toHaveBeenCalled();
   });
 });
 
