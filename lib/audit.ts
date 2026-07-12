@@ -11,7 +11,9 @@ export type AuditAction =
   | "oos_cancel"
   | "review_hold"
   | "review_approve"
-  | "review_reject";
+  | "review_reject"
+  // Seller published (or retried) a stored draft — no AI, no credit.
+  | "draft_publish";
 
 export async function recordAudit(
   userId: string,

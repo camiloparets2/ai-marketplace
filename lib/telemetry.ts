@@ -21,6 +21,8 @@ export type AppEvent =
   | "draft_failed"
   | "published"
   | "publish_error"
+  // draft published/retried from stored data — no AI call, no credit
+  | "draft_publish"
   | "item_sold"
   | "item_delisted"
   | "credits_granted"

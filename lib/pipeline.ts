@@ -220,6 +220,7 @@ export async function runPipeline(
       defects: identified.defects,
       idConfidence: identified.confidence,
       costOfGoods: input.costBasis,
+      shippingCost: extraction.estimatedShippingCost,
     },
     photoUrl
   );
@@ -348,7 +349,78 @@ export async function approveAndPublish(
   if (!released) return { ok: false, error: "Item is not awaiting review" };
   await deps.audit(userId, itemId, "review_approve", null, { price });
 
-  const listing: ListingInput = {
+  const publish = await publishStep(
+    userId,
+    itemId,
+    listingFromItem(item, price),
+    item.photo_url,
+    item.photo_url === null ? "no stored photo for this item" : null,
+    deps,
+    true // human approval — never a silent dry run
+  );
+  return { ok: true, publish };
+}
+
+// ─── Draft publish / retry ────────────────────────────────────────────────────
+
+export type DraftPublishResult =
+  | { ok: true; publish: PipelinePublishOutcome }
+  | { ok: false; error: string };
+
+/**
+ * Publish (or retry) a stored draft — the action every orphaned draft was
+ * missing: items whose one-shot publish failed, or that were delisted back
+ * to draft. Rebuilds the listing entirely from the stored row; NEVER re-runs
+ * AI identification and NEVER spends a credit — the credit already paid for
+ * the extraction that created this draft. Retrying a failed publish is the
+ * same call: publish_attempts records each try, and the item only leaves
+ * draft when a publish actually goes live.
+ */
+export async function publishDraft(
+  userId: string,
+  itemId: string,
+  deps: PipelineDeps = defaultDeps
+): Promise<DraftPublishResult> {
+  const item = await deps.getItem(userId, itemId);
+  if (!item) return { ok: false, error: "Item not found" };
+  if (item.status !== "draft") {
+    return {
+      ok: false,
+      error:
+        item.status === "review"
+          ? "This item is held for review — approve or reject it in the review queue."
+          : "Only drafts can be published.",
+    };
+  }
+  if (item.price === null || item.price <= 0) {
+    return { ok: false, error: "Set a price before publishing." };
+  }
+  // The money rule at the door: unknown shipping never publishes as $0.
+  if (item.shipping_cost === null) {
+    return {
+      ok: false,
+      error:
+        "We couldn't estimate shipping for this item — enter a shipping cost before publishing.",
+    };
+  }
+
+  await deps.audit(userId, itemId, "draft_publish", null, { price: item.price });
+  const publish = await publishStep(
+    userId,
+    itemId,
+    listingFromItem(item, item.price),
+    item.photo_url,
+    item.photo_url === null ? "no stored photo for this item" : null,
+    deps,
+    true // seller clicked Publish — same standing as /api/publish
+  );
+  return { ok: true, publish };
+}
+
+// Rebuild the publishable listing from what the draft already stored — the
+// republish path must never need a fresh AI extraction (or a credit).
+function listingFromItem(item: ItemDetailRow, price: number): ListingInput {
+  return {
     title: item.title,
     brand: item.brand,
     model: item.model,
@@ -359,18 +431,10 @@ export async function approveAndPublish(
     category: item.category ?? "",
     specs: item.specs ?? {},
     price,
-    shippingCost: null,
+    // The stored estimate — null only when extraction said
+    // MANUAL_ESTIMATE_NEEDED and the seller hasn't entered one yet.
+    shippingCost: item.shipping_cost,
   };
-
-  const publish = await publishStep(
-    userId,
-    itemId,
-    listing,
-    item.photo_url,
-    item.photo_url === null ? "no stored photo for this item" : null,
-    deps
-  );
-  return { ok: true, publish };
 }
 
 // The optional Etsy leg. Etsy has no sandbox environment, so a real Etsy
@@ -426,9 +490,16 @@ async function publishStep(
   listing: ListingInput,
   photoUrl: string | null,
   photoError: string | null,
-  deps: PipelineDeps
+  deps: PipelineDeps,
+  // PIPELINE_LIVE_PUBLISH exists so the AUTOMATED pipeline can't list on
+  // production eBay by accident. A human clicking "Publish" / "Approve &
+  // post" is explicit intent — same standing as /api/publish, which has
+  // never been gated by the flag — so user-initiated publishes upgrade
+  // dry_run to live. Sandbox stays sandbox either way.
+  userInitiated = false
 ): Promise<PipelinePublishOutcome> {
-  const mode = deps.publishMode();
+  let mode = deps.publishMode();
+  if (userInitiated && mode === "dry_run") mode = "live";
 
   if (mode === "dry_run") {
     // Build the exact payload eBay would receive; touch nothing.

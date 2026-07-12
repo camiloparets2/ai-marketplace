@@ -33,6 +33,7 @@ import {
   EBAY_CONDITION_MAP,
 } from "@/lib/platforms/compose";
 import { saveConnection, isExpired } from "@/lib/connections";
+import { assertPhotosPubliclyReachable } from "@/lib/storage";
 import { getShipFromLocation } from "@/lib/locations";
 import type { ShipFromLocation } from "@/lib/ship-from";
 import {
@@ -1098,6 +1099,11 @@ export async function publishToEbay(
   input: ListingInput,
   imageUrls: string[]
 ): Promise<EbayPublishResult> {
+  // Preflight BEFORE any eBay write: a photo URL that isn't publicly
+  // fetchable (private storage bucket → 400/403/503) must fail the publish
+  // with the fix, never produce a photoless or rejected listing.
+  await assertPhotosPubliclyReachable(imageUrls);
+
   const conn = await freshConnection(connection);
   const composed = composeListing("ebay", input);
 
