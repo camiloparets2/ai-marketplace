@@ -1149,7 +1149,23 @@ export async function publishToEbay(
     `/sell/inventory/v1/offer/${offer.offerId}/publish`,
     { method: "POST", contentLanguage: marketplace.contentLanguage, body: {} }
   );
-  if (!publishRes.ok) throw await ebayError(publishRes, "offer publish");
+  if (!publishRes.ok) {
+    const err = await ebayError(publishRes, "offer publish");
+    // The app-default policy on a marketplace with no vetted service code is
+    // created with handling time only (shippingOptions is optional at policy
+    // creation, but eBay refuses to PUBLISH an offer whose policy has no
+    // shipping service). Give the seller the fix instead of the raw eBay 400.
+    if (
+      fulfillmentPolicyIsAppDefault(conn) &&
+      !marketplace.defaultShippingService &&
+      /shipping service/i.test(err.message)
+    ) {
+      throw new Error(
+        `Your eBay shipping policy has no shipping service yet — open eBay's Business Policies manager, add a service to "${DEFAULT_FULFILLMENT_POLICY_NAME}", then publish again.`
+      );
+    }
+    throw err;
+  }
   const published = (await publishRes.json()) as { listingId: string };
 
   const url = isProduction()
