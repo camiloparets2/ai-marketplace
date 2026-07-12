@@ -355,7 +355,8 @@ export async function approveAndPublish(
     listingFromItem(item, price),
     item.photo_url,
     item.photo_url === null ? "no stored photo for this item" : null,
-    deps
+    deps,
+    true // human approval — never a silent dry run
   );
   return { ok: true, publish };
 }
@@ -410,7 +411,8 @@ export async function publishDraft(
     listingFromItem(item, item.price),
     item.photo_url,
     item.photo_url === null ? "no stored photo for this item" : null,
-    deps
+    deps,
+    true // seller clicked Publish — same standing as /api/publish
   );
   return { ok: true, publish };
 }
@@ -488,9 +490,16 @@ async function publishStep(
   listing: ListingInput,
   photoUrl: string | null,
   photoError: string | null,
-  deps: PipelineDeps
+  deps: PipelineDeps,
+  // PIPELINE_LIVE_PUBLISH exists so the AUTOMATED pipeline can't list on
+  // production eBay by accident. A human clicking "Publish" / "Approve &
+  // post" is explicit intent — same standing as /api/publish, which has
+  // never been gated by the flag — so user-initiated publishes upgrade
+  // dry_run to live. Sandbox stays sandbox either way.
+  userInitiated = false
 ): Promise<PipelinePublishOutcome> {
-  const mode = deps.publishMode();
+  let mode = deps.publishMode();
+  if (userInitiated && mode === "dry_run") mode = "live";
 
   if (mode === "dry_run") {
     // Build the exact payload eBay would receive; touch nothing.

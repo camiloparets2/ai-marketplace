@@ -533,6 +533,26 @@ describe("publishDraft — publish/retry a stored draft, zero AI, zero credits",
     expect(deps.markListed).not.toHaveBeenCalled();
   });
 
+  it("user-initiated publish is never silently dry-run — the flag only gates the auto pipeline", async () => {
+    // Production config: EBAY_ENV unset, PIPELINE_LIVE_PUBLISH off → the
+    // automated pipeline dry-runs, but a seller clicking Publish must
+    // actually publish (same standing as /api/publish).
+    const deps = fakeDeps({
+      getItem: vi.fn().mockResolvedValue(draftItem),
+      publishMode: () => "dry_run" as const,
+    });
+    const result = await publishDraft("user-1", "item-1", deps);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.publish).toMatchObject({ mode: "live", status: "live" });
+    expect(deps.publishEbay).toHaveBeenCalled();
+
+    // Approval from the review queue is the same explicit human intent.
+    const approve = fakeDeps({ publishMode: () => "dry_run" as const });
+    const approved = await approveAndPublish("user-1", "item-1", null, approve);
+    expect(approved.ok).toBe(true);
+    if (approved.ok) expect(approved.publish.status).toBe("live");
+  });
+
   it("refuses non-drafts, unpriced drafts, and unknown-shipping drafts", async () => {
     const review = fakeDeps({
       getItem: vi.fn().mockResolvedValue({ ...draftItem, status: "review" }),
