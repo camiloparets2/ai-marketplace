@@ -5,7 +5,7 @@
 > (all removed 2026-07-12; recoverable in git history). Next session: resume
 > at the first unchecked item of the lowest-numbered phase.
 
-**Last updated:** 2026-07-12 (Phase 2 core complete — PR pending)
+**Last updated:** 2026-07-12 (Phases 0–5 complete; 6/7 partial — see below)
 **Branch under review:** `codex/ebay-beta-launch` (consolidation base — every
 phase lands as a small stacked PR on top of it; **nothing merges without
 Camilo's review**).
@@ -152,23 +152,27 @@ Draft publish/retry (zero AI, zero credits, regression-locked), item
 detail/edit view (`/inventory/[id]`), failure reason + CTA on draft cards,
 dashboard CTA lands on `?filter=draft`. Remaining delta: none known.
 
-### Phase 4 — Honest product copy — ☐ not started
-- [ ] Replace "List it everywhere in seconds" / "never oversell" with the
-      honest beta promise; label Etsy/Shopify/Facebook/OfferUp/direct per
-      VERIFIED state; explicit simultaneous-sale disclosure.
-      (#20's copy diff is a starting point; verify each claim.)
+### Phase 4 — Honest product copy — ✅ DONE (branch codex/lh-phase4-honest-copy, PR #28)
+- [x] All 8 surfaces rewritten (hero, SEO metadata, manifest, login,
+      welcome, help, inventory, channels); channels labeled by VERIFIED
+      state (eBay BETA / Etsy+Shopify EARLY unverified / FB+OfferUp
+      assisted); explicit simultaneous-sale disclosure + "we never cancel
+      orders" in help and dashboard.
 
-### Phase 5 — Dependencies, infra, isolation — ☐ not started
-- [ ] Upgrade/pin next ≥16.2.10, React, @anthropic-ai/sdk ≥0.111,
-      Supabase, Stripe, PostHog, Vitest + transitives; Node 24 (`.nvmrc` ✅,
-      `engines` pending); zero production audit findings.
-- [ ] middleware.ts → proxy.ts (Next 16 convention), nested route
-      protection, preserve refreshed cookies, fail closed on missing config.
-- [ ] Supabase: leaked-password protection (dashboard toggle — Camilo),
-      production SMTP (Camilo), keep service-role-only grants.
-- [ ] ⚠ ISOLATION: document OSHA blast radius; recommend dedicated Supabase
-      project pre-scale. DO NOT touch `inspections*`, `corrective_actions`,
-      or `la_patrona`/legacy tables.
+### Phase 5 — Dependencies, infra, isolation — ✅ DONE (branch codex/lh-phase5-deps-infra)
+- [x] next 16.2.10 (clears the high advisory), @anthropic-ai/sdk 0.111,
+      postcss override, engines Node >=24. `npm audit --omit=dev`: **0
+      vulnerabilities**. Supabase/Stripe/Vitest already current-major; no
+      PostHog dependency exists yet (Phase 7).
+- [x] middleware.ts → proxy.ts: nested routes protected (incl. the
+      previously-unprotected /inventory/[id] and /settings/*), refreshed
+      cookies preserved on redirects, FAIL CLOSED when auth config is
+      missing or the auth check throws. Tests via
+      next/experimental/testing/server.
+- [ ] Supabase dashboard (Camilo only): leaked-password protection toggle;
+      production SMTP.
+- [x] ⚠ ISOLATION: `docs/design/supabase-isolation.md` — blast radius table
+      + dedicated-project migration sequence; OSHA/legacy tables untouched.
 
 ### Phase 6 — Test & release gates — ☐ not started
 Contract tests (GTC, deterministic retry, aspects, condition policies, image
