@@ -23,6 +23,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { handleEbayAccountDeletion } from "@/lib/platforms/ebay-deletion";
+import { verifyEbaySignature } from "@/lib/platforms/ebay-signature";
+import {
+  notificationAlreadyProcessed,
+  markNotificationProcessed,
+} from "@/lib/notification-receipts";
 
 // ─── GET: challenge validation ────────────────────────────────────────────────
 
@@ -83,9 +88,29 @@ interface EbayDeletionNotification {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Signature FIRST, over the raw bytes — an unsigned or forged notification
+  // is never parsed, let alone acted on. 412 invalid; 503 when the key
+  // infrastructure is unreachable (eBay redelivers).
+  const rawBody = await req.text();
+  const verdict = await verifyEbaySignature(
+    rawBody,
+    req.headers.get("x-ebay-signature")
+  );
+  if (!verdict.ok) {
+    if (verdict.reason === "invalid") {
+      console.warn(`[ebay-deletion] rejected signature: ${verdict.detail}`);
+      return NextResponse.json({ error: "Invalid signature" }, { status: 412 });
+    }
+    console.error(`[ebay-deletion] signature check unavailable: ${verdict.detail}`);
+    return NextResponse.json(
+      { error: "Signature verification unavailable — retry" },
+      { status: 503 }
+    );
+  }
+
   let body: EbayDeletionNotification;
   try {
-    body = (await req.json()) as EbayDeletionNotification;
+    body = JSON.parse(rawBody) as EbayDeletionNotification;
   } catch {
     // Malformed body — 400 so eBay retries rather than assuming success.
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
@@ -104,6 +129,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: "Invalid account deletion notification" },
       { status: 400 }
     );
+  }
+
+  // Idempotent receipt: a re-delivered notification we already fully
+  // processed ACKs immediately without re-erasing.
+  if (
+    notificationId !== "unknown" &&
+    (await notificationAlreadyProcessed(notificationId))
+  ) {
+    return new NextResponse(null, { status: 200 });
   }
 
   // Safe logging: identifiers only, never tokens/secrets. userId is what eBay
@@ -132,6 +166,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: "Erasure failed — retry" },
       { status: 500 }
     );
+  }
+
+  if (notificationId !== "unknown") {
+    await markNotificationProcessed(notificationId, "MARKETPLACE_ACCOUNT_DELETION");
   }
 
   // 200 (or 202) tells eBay the notification was accepted.

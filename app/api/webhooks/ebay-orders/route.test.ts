@@ -2,6 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createHash } from "crypto";
 import { NextRequest } from "next/server";
 
+vi.mock("@/lib/platforms/ebay-signature", () => ({
+  verifyEbaySignature: vi.fn(async () => ({ ok: true })),
+}));
+vi.mock("@/lib/notification-receipts", () => ({
+  notificationAlreadyProcessed: vi.fn(async () => false),
+  markNotificationProcessed: vi.fn(async () => undefined),
+}));
 vi.mock("@/lib/sold-events", () => ({
   recordSoldEvent: vi.fn().mockResolvedValue(1),
   findListingOwner: vi
@@ -18,6 +25,8 @@ import {
   findListingOwner,
   processPendingSoldEvents,
 } from "@/lib/sold-events";
+import { verifyEbaySignature } from "@/lib/platforms/ebay-signature";
+import { notificationAlreadyProcessed } from "@/lib/notification-receipts";
 
 const TOKEN = "order-webhook-verification-token-1234567890";
 const ENDPOINT = "https://app.example.com/api/webhooks/ebay-orders";
@@ -118,5 +127,51 @@ describe("POST order notification", () => {
     const req = new NextRequest(ENDPOINT, { method: "POST", body: "{nope" });
     const res = await POST(req);
     expect(res.status).toBe(400);
+  });
+});
+
+
+describe("POST signature enforcement", () => {
+  it("412s an invalid signature and never touches the queue", async () => {
+    vi.mocked(verifyEbaySignature).mockResolvedValueOnce({
+      ok: false,
+      reason: "invalid",
+      detail: "signature mismatch",
+    });
+    const res = await POST(
+      postReq({ notification: { notificationId: "n-sig", data: {} } })
+    );
+    expect(res.status).toBe(412);
+    expect(recordSoldEvent).not.toHaveBeenCalled();
+  });
+
+  it("503s when key infrastructure is down so eBay redelivers", async () => {
+    vi.mocked(verifyEbaySignature).mockResolvedValueOnce({
+      ok: false,
+      reason: "unavailable",
+      detail: "key endpoint down",
+    });
+    const res = await POST(
+      postReq({ notification: { notificationId: "n-sig2", data: {} } })
+    );
+    expect(res.status).toBe(503);
+    expect(recordSoldEvent).not.toHaveBeenCalled();
+  });
+
+  it("ACKs an already-processed notification without reprocessing", async () => {
+    vi.mocked(notificationAlreadyProcessed).mockResolvedValueOnce(true);
+    const res = await POST(
+      postReq({
+        notification: {
+          notificationId: "n-dupe",
+          data: {
+            orderId: "o-1",
+            lineItems: [{ legacyItemId: "l-1", total: { value: "10.00" } }],
+          },
+        },
+      })
+    );
+    expect(res.status).toBe(200);
+    expect(recordSoldEvent).not.toHaveBeenCalled();
   });
 });

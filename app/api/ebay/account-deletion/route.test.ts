@@ -2,6 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "crypto";
 import { NextRequest } from "next/server";
 
+vi.mock("@/lib/platforms/ebay-signature", () => ({
+  verifyEbaySignature: vi.fn(async () => ({ ok: true })),
+}));
+vi.mock("@/lib/notification-receipts", () => ({
+  notificationAlreadyProcessed: vi.fn(async () => false),
+  markNotificationProcessed: vi.fn(async () => undefined),
+}));
 vi.mock("@/lib/platforms/ebay-deletion", () => ({
   handleEbayAccountDeletion: vi.fn(async () => ({
     deletedConnections: 1,
@@ -14,6 +21,7 @@ vi.mock("@/lib/platforms/ebay-deletion", () => ({
 
 import { GET, POST } from "./route";
 import { handleEbayAccountDeletion } from "@/lib/platforms/ebay-deletion";
+import { verifyEbaySignature } from "@/lib/platforms/ebay-signature";
 
 // The three inputs eBay hashes, in the exact mandated order.
 const TOKEN = "test-verification-token-1234567890";
@@ -150,6 +158,22 @@ describe("eBay account deletion — POST notification", () => {
       })
     );
     expect(res.status).toBe(400);
+    expect(handleEbayAccountDeletion).not.toHaveBeenCalled();
+  });
+
+  it("412s an invalid signature before parsing anything", async () => {
+    vi.mocked(verifyEbaySignature).mockResolvedValueOnce({
+      ok: false,
+      reason: "invalid",
+      detail: "missing X-EBAY-SIGNATURE",
+    });
+    const res = await POST(
+      post({
+        metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" },
+        notification: { notificationId: "n-sig", data: { userId: "u-1" } },
+      })
+    );
+    expect(res.status).toBe(412);
     expect(handleEbayAccountDeletion).not.toHaveBeenCalled();
   });
 

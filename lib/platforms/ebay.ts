@@ -54,7 +54,8 @@ function isProduction(): boolean {
   return (process.env.EBAY_ENV ?? "production").toLowerCase() !== "sandbox";
 }
 
-function apiBase(): string {
+// Exported for the Notification API public-key lookup (ebay-signature.ts).
+export function apiBase(): string {
   return isProduction()
     ? "https://api.ebay.com"
     : "https://api.sandbox.ebay.com";
