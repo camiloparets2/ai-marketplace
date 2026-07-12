@@ -1,7 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "crypto";
 import { NextRequest } from "next/server";
+
+vi.mock("@/lib/platforms/ebay-deletion", () => ({
+  handleEbayAccountDeletion: vi.fn(async () => ({
+    deletedConnections: 1,
+    scrubbedListings: 0,
+    scrubbedAttempts: 0,
+    scrubbedSoldEvents: 0,
+    scrubbedAuditRows: 0,
+  })),
+}));
+
 import { GET, POST } from "./route";
+import { handleEbayAccountDeletion } from "@/lib/platforms/ebay-deletion";
 
 // The three inputs eBay hashes, in the exact mandated order.
 const TOKEN = "test-verification-token-1234567890";
@@ -75,43 +87,83 @@ describe("eBay account deletion — GET challenge", () => {
 });
 
 describe("eBay account deletion — POST notification", () => {
-  it("ACKs a valid deletion notification with 200", async () => {
-    const req = new NextRequest(
+  function post(body: unknown): NextRequest {
+    return new NextRequest(
       new Request("https://example.com/api/ebay/account-deletion", {
         method: "POST",
-        body: JSON.stringify({
-          metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" },
-          notification: {
-            notificationId: "n-1",
-            data: { username: "someuser", userId: "u-99" },
-          },
-        }),
+        body: typeof body === "string" ? body : JSON.stringify(body),
       })
     );
-    const res = await POST(req);
+  }
+
+  beforeEach(() => {
+    vi.mocked(handleEbayAccountDeletion).mockClear();
+    vi.mocked(handleEbayAccountDeletion).mockResolvedValue({
+      deletedConnections: 1,
+      scrubbedListings: 0,
+      scrubbedAttempts: 0,
+      scrubbedSoldEvents: 0,
+      scrubbedAuditRows: 0,
+    });
+  });
+
+  it("ACKs a valid deletion notification with 200 after erasing", async () => {
+    const res = await POST(
+      post({
+        metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" },
+        notification: {
+          notificationId: "n-1",
+          data: { username: "someuser", userId: "u-99" },
+        },
+      })
+    );
     expect(res.status).toBe(200);
+    expect(handleEbayAccountDeletion).toHaveBeenCalledWith({
+      userId: "u-99",
+      username: "someuser",
+      notificationId: "n-1",
+    });
   });
 
   it("400s on malformed JSON so eBay retries", async () => {
-    const req = new NextRequest(
-      new Request("https://example.com/api/ebay/account-deletion", {
-        method: "POST",
-        body: "not json",
-      })
-    );
-    const res = await POST(req);
+    const res = await POST(post("not json"));
     expect(res.status).toBe(400);
+    expect(handleEbayAccountDeletion).not.toHaveBeenCalled();
   });
 
-  it("still ACKs when the notification has no data block", async () => {
-    const req = new NextRequest(
-      new Request("https://example.com/api/ebay/account-deletion", {
-        method: "POST",
-        body: JSON.stringify({ notification: { notificationId: "n-2" } }),
+  it("400s when the notification has no data block — never a silent success", async () => {
+    const res = await POST(
+      post({
+        metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" },
+        notification: { notificationId: "n-2" },
       })
     );
-    const res = await POST(req);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
+    expect(handleEbayAccountDeletion).not.toHaveBeenCalled();
+  });
+
+  it("400s on a topic mismatch", async () => {
+    const res = await POST(
+      post({
+        metadata: { topic: "SOMETHING_ELSE" },
+        notification: { notificationId: "n-3", data: { userId: "u-1" } },
+      })
+    );
+    expect(res.status).toBe(400);
+    expect(handleEbayAccountDeletion).not.toHaveBeenCalled();
+  });
+
+  it("500s when erasure fails so eBay RETRIES — no acked-but-not-erased", async () => {
+    vi.mocked(handleEbayAccountDeletion).mockRejectedValueOnce(
+      new Error("db down")
+    );
+    const res = await POST(
+      post({
+        metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" },
+        notification: { notificationId: "n-4", data: { userId: "u-99" } },
+      })
+    );
+    expect(res.status).toBe(500);
   });
 });
 

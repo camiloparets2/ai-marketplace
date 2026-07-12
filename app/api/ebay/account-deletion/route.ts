@@ -94,33 +94,44 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const data = body.notification?.data;
   const notificationId = body.notification?.notificationId ?? "unknown";
 
+  // Topic mismatch or a notification with nobody to erase is malformed —
+  // 400 so eBay flags it instead of counting a silent success.
+  if (
+    body.metadata?.topic !== "MARKETPLACE_ACCOUNT_DELETION" ||
+    (!data?.userId && !data?.username)
+  ) {
+    return NextResponse.json(
+      { error: "Invalid account deletion notification" },
+      { status: 400 }
+    );
+  }
+
   // Safe logging: identifiers only, never tokens/secrets. userId is what eBay
   // wants us to act on; that's an eBay-side account id, not a credential.
   console.log(
     `[ebay-deletion] Received notification ${notificationId} for eBay userId=${
-      data?.userId ?? "unknown"
+      data.userId ?? "unknown"
     }`
   );
 
-  // Hand off the actual erasure. We deliberately do NOT await long-running work
-  // in a way that would risk eBay's ACK timeout — the hook is written to be
-  // fast (or to enqueue). Any failure is logged but we still ACK, because eBay
-  // will re-send on non-2xx and duplicate deletions are idempotent for us.
+  // Real erasure — tokens, identity metadata, eBay listing/order ids, raw
+  // payloads. A failure returns 500 so eBay RETRIES: acking an erasure that
+  // didn't happen would report compliance that never happened.
   try {
-    if (data?.userId || data?.username) {
-      await handleEbayAccountDeletion({
-        userId: data?.userId ?? null,
-        username: data?.username ?? null,
-        notificationId,
-      });
-    }
+    await handleEbayAccountDeletion({
+      userId: data.userId ?? null,
+      username: data.username ?? null,
+      notificationId,
+    });
   } catch (err) {
     console.error(
-      `[ebay-deletion] Erasure hook failed for notification ${notificationId}:`,
+      `[ebay-deletion] Erasure failed for notification ${notificationId}:`,
       err instanceof Error ? err.message : err
     );
-    // Fall through to 200 anyway — see note above. If you'd rather have eBay
-    // retry, return status 500 here instead.
+    return NextResponse.json(
+      { error: "Erasure failed — retry" },
+      { status: 500 }
+    );
   }
 
   // 200 (or 202) tells eBay the notification was accepted.
