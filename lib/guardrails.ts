@@ -97,7 +97,10 @@ export type GateName =
   | "prohibited_item"
   | "vero_brand"
   | "photo_quality"
-  | "shipping_unknown";
+  | "shipping_unknown"
+  // The price is not anchored to trusted market comps (or a seller target) —
+  // an ungrounded price never auto-publishes (docs/design/comps-pricing.md).
+  | "price_ungrounded";
 
 export interface GateResult {
   gate: GateName;
@@ -149,7 +152,7 @@ export function priceFloorGate(
     pass,
     reason: pass
       ? `price $${price.toFixed(2)} covers the $${floor.toFixed(2)} floor`
-      : `price $${price.toFixed(2)} is below the $${floor.toFixed(2)} floor (cost + fees + shipping + margin)`,
+      : `price $${price.toFixed(2)} is below the $${floor.toFixed(2)} floor (cost + fees incl. on shipping + margin)`,
   };
 }
 
@@ -224,6 +227,16 @@ export function photoQualityGate(
 // The item has no shipping estimate at all (MANUAL_ESTIMATE_NEEDED — often
 // "too large for any flat-rate box", i.e. the most expensive items to ship).
 // A human must supply a shipping cost before this can publish anywhere.
+export function priceGroundedGate(grounded: boolean): GateResult {
+  return {
+    gate: "price_ungrounded",
+    pass: grounded,
+    reason: grounded
+      ? "price anchored to market comps or a seller target"
+      : "price is an AI estimate with no trusted market comps — confirm or adjust it before posting",
+  };
+}
+
 export function shippingKnownGate(shippingCost: number | null): GateResult {
   const pass = shippingCost !== null;
   return {
@@ -242,6 +255,8 @@ export interface GuardrailInput {
   price: number;
   // null → break-even unknown (no shipping estimate); always fails the gate.
   floor: number | null;
+  // whether the price decision was grounded (comps/seller target)
+  priceGrounded: boolean;
   // the shipping estimate the floor was built from; null → shipping_unknown
   shippingCost: number | null;
   title: string;
@@ -266,6 +281,7 @@ export function evaluateGuardrails(
   const gates: GateResult[] = [
     confidenceGate(input.confidence, cfg),
     shippingKnownGate(input.shippingCost),
+    priceGroundedGate(input.priceGrounded),
     priceFloorGate(input.price, input.floor),
     priceRangeGate(input.price, cfg),
     prohibitedItemGate(listingText),

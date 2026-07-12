@@ -1,4 +1,5 @@
-// Market comps for the pricing panel: GET /api/comps?q=<title>
+// Market comps for the pricing panel:
+//   GET /api/comps?q=<title>[&brand=..][&condition=..][&category=<leaf id>]
 // Returns { comps: CompsSummary | null } — null means "no data, price
 // conservatively" (no eBay connection, Insights not granted, lookup failed).
 // Same graceful-degrade contract as the pipeline's pricing step.
@@ -8,7 +9,8 @@ export const maxDuration = 30;
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
 import { getConnection } from "@/lib/connections";
-import { fetchEbayComps } from "@/lib/comps";
+import { fetchEbayCompsFor } from "@/lib/platforms/ebay-comps";
+import type { ListingInput } from "@/lib/platforms/types";
 import {
   checkRateLimit,
   requestIdentity,
@@ -41,10 +43,31 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Missing q" }, { status: 400 });
   }
 
+  // Optional structured hints — anything unrecognized is simply dropped.
+  const brand = req.nextUrl.searchParams.get("brand")?.trim() || null;
+  const categoryId =
+    req.nextUrl.searchParams.get("category")?.trim() || null;
+  const rawCondition = req.nextUrl.searchParams.get("condition")?.trim();
+  const CONDITIONS: ReadonlyArray<ListingInput["condition"]> = [
+    "New",
+    "Like New",
+    "Very Good",
+    "Good",
+    "Acceptable",
+  ];
+  const condition =
+    CONDITIONS.find((c) => c === rawCondition) ?? null;
+
   try {
     const conn = await getConnection(user.id, "ebay");
     if (!conn) return NextResponse.json({ comps: null });
-    const comps = await fetchEbayComps(conn.accessToken, q);
+    const comps = await fetchEbayCompsFor({
+      accessToken: conn.accessToken,
+      brand,
+      categoryId,
+      titleKeywords: q,
+      condition,
+    });
     return NextResponse.json({ comps });
   } catch {
     // Comps are advisory — never fail the caller over them.

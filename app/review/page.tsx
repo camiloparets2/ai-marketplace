@@ -34,6 +34,8 @@ const GATE_LABELS: Record<string, string> = {
   photo_quality: "Photo quality too low",
   shipping_unknown:
     "No shipping estimate — enter a shipping cost or pick a service",
+  price_ungrounded:
+    "Price is an AI estimate with no market comps — confirm or adjust it",
 };
 
 export default function ReviewPage() {

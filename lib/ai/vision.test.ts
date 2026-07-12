@@ -8,6 +8,7 @@ function extraction(over: Partial<ExtractionResult> = {}): ExtractionResult {
   return {
     title: "Sony WH-1000XM4 Wireless Headphones",
     brand: "Sony",
+    brandSource: "tag_or_label",
     model: "WH-1000XM4",
     upc: null,
     condition: "Very Good",
@@ -16,6 +17,13 @@ function extraction(over: Partial<ExtractionResult> = {}): ExtractionResult {
     handmade: false,
     estimatedYearMade: 2020,
     craftSupply: false,
+    material: null,
+    colorPrimary: "Black",
+    colorSecondary: null,
+    size: null,
+    sizeSystem: null,
+    style: null,
+    pattern: null,
     specs: { Color: "Black" },
     estimatedDimensions: null,
     estimatedWeightLbs: null,
@@ -24,7 +32,7 @@ function extraction(over: Partial<ExtractionResult> = {}): ExtractionResult {
     suggestedPrice: 165,
     priceRationale:
       "Used WH-1000XM4 in Very Good condition sells for $150-180 on eBay; $165 targets a quick sale.",
-    confidence: { title: 95, category: 90, condition: 85 },
+    confidence: { title: 95, category: 90, condition: 85, brand: 92 },
     ...over,
   };
 }
@@ -104,6 +112,50 @@ describe("identifyItem", () => {
     ]);
     const result = await identifyItem("aGk=", "image/jpeg", client);
     expect(result.defects).toEqual([]);
+  });
+
+  it("replaces a styling-inferred brand with Unbranded and caps confidence below the auto-post bar", async () => {
+    const client = clientReturning([
+      {
+        type: "tool_use",
+        name: "extract_listing",
+        input: extraction({
+          brand: "Gucci",
+          brandSource: "inferred",
+          confidence: { title: 95, category: 90, condition: 85, brand: 85 },
+        }),
+      },
+    ]);
+    const result = await identifyItem("aGk=", "image/jpeg", client);
+    expect(result.extraction.brand).toBe("Unbranded");
+    // Capped under the 0.8 guardrail bar → the item routes to review.
+    expect(result.confidence).toBeLessThan(0.8);
+  });
+
+  it("treats an omitted brandSource on a claimed brand as inferred → Unbranded", async () => {
+    const bare = extraction({ brand: "Gucci" });
+    delete (bare as Partial<ExtractionResult>).brandSource;
+    const client = clientReturning([
+      { type: "tool_use", name: "extract_listing", input: bare },
+    ]);
+    const result = await identifyItem("aGk=", "image/jpeg", client);
+    expect(result.extraction.brand).toBe("Unbranded");
+  });
+
+  it("folds aspect fields into specs under their eBay aspect names", async () => {
+    const client = clientReturning([
+      {
+        type: "tool_use",
+        name: "extract_listing",
+        input: extraction({ material: "Aluminum", style: "Over-Ear" }),
+      },
+    ]);
+    const result = await identifyItem("aGk=", "image/jpeg", client);
+    expect(result.extraction.specs).toMatchObject({
+      Material: "Aluminum",
+      Style: "Over-Ear",
+      Color: "Black", // pre-existing spec key wins over colorPrimary
+    });
   });
 
   it("throws bad_response when no tool_use block comes back", async () => {

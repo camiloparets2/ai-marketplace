@@ -1,10 +1,10 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   median,
   extractSoldPrices,
   extractActivePrices,
   summarizeComps,
-  fetchEbayComps,
+  percentile,
 } from "./comps";
 import { decidePrice } from "./pricing";
 
@@ -42,6 +42,15 @@ describe("payload extraction", () => {
   });
 });
 
+describe("percentile", () => {
+  it("computes interpolated p25/p75 for the band", () => {
+    expect(percentile([10, 20, 30, 40], 0.25)).toBe(17.5);
+    expect(percentile([10, 20, 30, 40], 0.75)).toBe(32.5);
+    expect(percentile([], 0.5)).toBeNull();
+    expect(percentile([7], 0.25)).toBe(7);
+  });
+});
+
 describe("summarizeComps confidence", () => {
   it("is high with 3+ sold comps, low below", () => {
     expect(summarizeComps([10, 11, 12], { total: 5, prices: [] }).confidence).toBe(
@@ -53,35 +62,14 @@ describe("summarizeComps confidence", () => {
   });
 });
 
-describe("fetchEbayComps fallback behavior", () => {
-  const activeBody = {
-    total: 7,
-    itemSummaries: [{ price: { value: "50.00" } }],
-  };
-
-  it("degrades to Browse-only when Marketplace Insights is 403 (limited release)", async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, status: 403 }) // insights
-      .mockResolvedValueOnce({ ok: true, json: async () => activeBody }); // browse
-    const comps = await fetchEbayComps("tok", "sony headphones", fetchImpl as unknown as typeof fetch);
-    expect(comps).toMatchObject({
-      soldCount: 0,
-      confidence: "low",
-      activeCount: 7,
-      medianActivePrice: 50,
-    });
-  });
-
-  it("returns null when everything fails — pricing then goes conservative", async () => {
-    const fetchImpl = vi.fn().mockRejectedValue(new Error("network down"));
-    const comps = await fetchEbayComps("tok", "q", fetchImpl as unknown as typeof fetch);
-    expect(comps).toBeNull();
-  });
-});
-
 describe("decidePrice with comps", () => {
   const comps = {
+    medianPrice: 100,
+    lowPrice: 90,
+    highPrice: 115,
+    sampleSize: 8,
+    demandSignal: "medium" as const,
+    source: "sold" as const,
     medianSoldPrice: 100,
     soldCount: 8,
     activeCount: 12,
@@ -120,7 +108,13 @@ describe("decidePrice with comps", () => {
       costBasis: 20,
       shippingCost: 10,
       targetPrice: null,
-      comps: { ...comps, soldCount: 2, confidence: "low" },
+      comps: {
+        ...comps,
+        soldCount: 2,
+        sampleSize: 2,
+        source: "sold" as const,
+        confidence: "low" as const,
+      },
     });
     expect(d.strategy).toBe("floor_markup");
     expect(d.rationale).toContain("too sparse");
@@ -135,5 +129,97 @@ describe("decidePrice with comps", () => {
     });
     expect(d.strategy).toBe("user_target");
     expect(d.price).toBe(150);
+  });
+});
+
+describe("decidePrice comps anchoring (docs/design/comps-pricing.md)", () => {
+  const soldComps = {
+    medianPrice: 100,
+    lowPrice: 90,
+    highPrice: 115,
+    sampleSize: 8,
+    demandSignal: "medium" as const,
+    source: "sold" as const,
+    fetchedAt: "2026-07-12T00:00:00.000Z",
+    medianSoldPrice: 100,
+    soldCount: 8,
+    activeCount: 12,
+    medianActivePrice: 110,
+    confidence: "high" as const,
+  };
+
+  it("adjusts the anchor down for condition and defects, never below floor", () => {
+    const d = decidePrice({
+      costBasis: 20,
+      shippingCost: 10,
+      targetPrice: null,
+      comps: soldComps,
+      condition: "Good", // ⚑ factor 0.88
+      defectCount: 2, // −6%
+    });
+    expect(d.strategy).toBe("comps");
+    expect(d.grounded).toBe(true);
+    // 100 × 0.88 × 0.94 = 82.72 → styled ≥ floor
+    expect(d.inputs.compsAdjustedAnchor).toBe(82.72);
+    expect(d.price).toBeGreaterThanOrEqual(d.floor as number);
+    expect(d.rationale).toContain("Adjusted for Good, 2 defect(s)");
+    // Snapshot persisted for the price_history audit row.
+    expect(d.inputs).toMatchObject({
+      compsMedian: 100,
+      compsLow: 90,
+      compsHigh: 115,
+      compsSampleSize: 8,
+      compsSource: "sold",
+      compsDemand: "medium",
+      compsFetchedAt: "2026-07-12T00:00:00.000Z",
+    });
+  });
+
+  it("anchors from an ACTIVE band (MI not granted) with the caution note", () => {
+    const d = decidePrice({
+      costBasis: 20,
+      shippingCost: 10,
+      targetPrice: null,
+      comps: {
+        ...soldComps,
+        source: "active" as const,
+        sampleSize: 6,
+        demandSignal: "low" as const,
+        medianSoldPrice: null,
+        soldCount: 0,
+      },
+    });
+    expect(d.strategy).toBe("comps");
+    expect(d.rationale).toContain("ACTIVE listing(s)");
+    expect(d.rationale).toContain("Marketplace Insights");
+  });
+
+  it("keeps the AI estimate when comps are sparse — UNGROUNDED, held for review", () => {
+    const d = decidePrice({
+      costBasis: 20,
+      shippingCost: 10,
+      targetPrice: null,
+      comps: { ...soldComps, sampleSize: 2, soldCount: 2 },
+      aiSuggestedPrice: 75,
+    });
+    expect(d.strategy).toBe("ai_estimate");
+    expect(d.grounded).toBe(false);
+    expect(d.price).toBeGreaterThanOrEqual(Math.max(75, d.floor as number));
+    expect(d.rationale).toMatch(/NOT grounded/i);
+    // The guardrail consumes `grounded` — ungrounded never auto-publishes
+    // (see lib/guardrails.test.ts priceGroundedGate).
+  });
+
+  it("an ungrounded AI estimate below the floor is raised to it", () => {
+    const d = decidePrice({
+      costBasis: 50,
+      shippingCost: 20,
+      targetPrice: null,
+      comps: null,
+      aiSuggestedPrice: 6.5, // the concrete-bag guess
+    });
+    expect(d.strategy).toBe("ai_estimate");
+    expect(d.grounded).toBe(false);
+    expect(d.price).toBe(d.floor); // never a $6.50 loss-maker again
   });
 });

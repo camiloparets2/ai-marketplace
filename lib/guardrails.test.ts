@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   confidenceGate,
   shippingKnownGate,
+  priceGroundedGate,
   priceFloorGate,
   priceRangeGate,
   prohibitedItemGate,
@@ -26,6 +27,7 @@ function passingInput(over: Partial<GuardrailInput> = {}): GuardrailInput {
     confidence: 0.9,
     price: 49.99,
     floor: 25,
+    priceGrounded: true,
     shippingCost: 16.1,
     title: "Sony WH-1000XM4 Wireless Headphones",
     brand: "Sony",
@@ -103,6 +105,22 @@ describe("photoQualityGate", () => {
   });
 });
 
+describe("priceGroundedGate", () => {
+  it("holds ungrounded (AI-estimate) prices for review — never auto-publish", () => {
+    const gate = priceGroundedGate(false);
+    expect(gate.pass).toBe(false);
+    expect(gate.reason).toMatch(/no trusted market comps/i);
+    // End-to-end: an ungrounded price fails the verdict.
+    const verdict = evaluateGuardrails(passingInput({ priceGrounded: false }));
+    expect(verdict.autoPost).toBe(false);
+    expect(verdict.failures.map((f) => f.gate)).toContain("price_ungrounded");
+  });
+
+  it("passes grounded prices", () => {
+    expect(priceGroundedGate(true).pass).toBe(true);
+  });
+});
+
 describe("shippingKnownGate", () => {
   it("fails when there is no shipping estimate (the concrete-mix money bug)", () => {
     const gate = shippingKnownGate(null);
@@ -129,7 +147,7 @@ describe("evaluateGuardrails", () => {
     const verdict = evaluateGuardrails(passingInput());
     expect(verdict.autoPost).toBe(true);
     expect(verdict.failures).toEqual([]);
-    expect(verdict.gates).toHaveLength(7);
+    expect(verdict.gates).toHaveLength(8);
   });
 
   it("one failing gate blocks auto-post and is reported", () => {

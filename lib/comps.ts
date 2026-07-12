@@ -8,10 +8,29 @@
 //   - ACTIVE listings: Browse API (item_summary/search) — generally
 //     available; used for competition count and asking-price context.
 //
-// The caller supplies an OAuth access token (the seller's stored eBay
-// connection token works for both APIs). No token minting happens here.
 
 export interface CompsSummary {
+  // ── Unified market band (docs/design/comps-pricing.md) ──
+  // Anchor price: SOLD median when sold data exists, else the active median.
+  medianPrice: number | null;
+  // 25th–75th percentile of the source prices — robust to the one $1
+  // parts-only listing and the one $999 fantasy ask.
+  lowPrice: number | null;
+  highPrice: number | null;
+  // How many prices the band was computed from (of the anchoring source).
+  sampleSize: number;
+  // Demand is only measurable from SOLD velocity: sold ≥10 → high, ≥3 →
+  // medium, else low. Active-only data is supply, not demand → always
+  // "low" (pretending otherwise is the $6.50-concrete mistake again). ⚑
+  demandSignal: "high" | "medium" | "low";
+  // Which API grounded the band: Marketplace Insights sold comps, or the
+  // Browse-API active-listings fallback (MI is limited-release).
+  source: "sold" | "active";
+  // When the band was fetched (set by the network layer) — persisted with
+  // the price decision for audit.
+  fetchedAt?: string;
+
+  // ── Legacy fields (existing consumers) ──
   medianSoldPrice: number | null;
   soldCount: number;
   activeCount: number | null;
@@ -20,8 +39,13 @@ export interface CompsSummary {
   confidence: "high" | "low";
 }
 
-// Fewer sold comps than this → comps are ignored for pricing (too noisy). ⚑
+// Fewer sold comps than this → sold comps are ignored for pricing (too noisy). ⚑
 export const MIN_SOLD_COMPS = 3;
+// With no MI grant, an active-listings band needs at least this many prices
+// to anchor a price (with demand "low" + a caution note). ⚑
+export const MIN_ACTIVE_COMPS = 5;
+// Sold velocity thresholds for the demand signal. ⚑
+export const HIGH_DEMAND_SOLD = 10;
 
 export function median(values: number[]): number | null {
   if (values.length === 0) return null;
@@ -30,6 +54,17 @@ export function median(values: number[]): number | null {
   return sorted.length % 2 === 1
     ? sorted[mid]
     : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+// Linear-interpolated percentile (p in 0–1) — the band uses p25/p75.
+export function percentile(values: number[], p: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = (sorted.length - 1) * p;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
 }
 
 // ─── Tolerant payload extraction (pure, tested) ───────────────────────────────
@@ -78,7 +113,27 @@ export function summarizeComps(
   soldPrices: number[],
   active: { total: number | null; prices: number[] }
 ): CompsSummary {
+  // SOLD prices anchor whenever any exist; the Browse active band is the
+  // fallback for keysets without the Marketplace Insights grant.
+  const source: CompsSummary["source"] = soldPrices.length > 0 ? "sold" : "active";
+  const bandPrices = source === "sold" ? soldPrices : active.prices;
+  const demandSignal: CompsSummary["demandSignal"] =
+    source === "sold"
+      ? soldPrices.length >= HIGH_DEMAND_SOLD
+        ? "high"
+        : soldPrices.length >= MIN_SOLD_COMPS
+          ? "medium"
+          : "low"
+      : "low";
+  const round2 = (n: number | null): number | null =>
+    n === null ? null : Math.round(n * 100) / 100;
   return {
+    medianPrice: round2(median(bandPrices)),
+    lowPrice: round2(percentile(bandPrices, 0.25)),
+    highPrice: round2(percentile(bandPrices, 0.75)),
+    sampleSize: bandPrices.length,
+    demandSignal,
+    source,
     medianSoldPrice: median(soldPrices),
     soldCount: soldPrices.length,
     activeCount: active.total,
@@ -87,47 +142,16 @@ export function summarizeComps(
   };
 }
 
-// ─── Fetch (network; every failure → null) ────────────────────────────────────
-
-function apiBase(): string {
-  const production =
-    (process.env.EBAY_ENV ?? "PRODUCTION").toUpperCase() !== "SANDBOX";
-  return production ? "https://api.ebay.com" : "https://api.sandbox.ebay.com";
+/** A band trustworthy enough to ANCHOR a price: enough sold comps, or —
+ *  when MI isn't granted — a wide-enough active band (demand stays "low"
+ *  and the rationale carries a caution note). ⚑ */
+export function compsTrusted(comps: CompsSummary | null): comps is CompsSummary {
+  if (comps === null || comps.medianPrice === null) return false;
+  return comps.source === "sold"
+    ? comps.sampleSize >= MIN_SOLD_COMPS
+    : comps.sampleSize >= MIN_ACTIVE_COMPS;
 }
 
-export async function fetchEbayComps(
-  accessToken: string,
-  query: string,
-  fetchImpl: typeof fetch = fetch
-): Promise<CompsSummary | null> {
-  const headers = {
-    Authorization: `Bearer ${accessToken}`,
-    "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-  };
-  const q = encodeURIComponent(query.slice(0, 100));
-
-  try {
-    const [salesRes, browseRes] = await Promise.all([
-      fetchImpl(
-        `${apiBase()}/buy/marketplace_insights/v1_beta/item_sales/search?q=${q}&limit=50`,
-        { headers }
-      ),
-      fetchImpl(
-        `${apiBase()}/buy/browse/v1/item_summary/search?q=${q}&limit=50`,
-        { headers }
-      ),
-    ]);
-
-    // Insights is limited-release: 403/404 just means "no sold comps for us".
-    const soldPrices = salesRes.ok ? extractSoldPrices(await salesRes.json()) : [];
-    const active = browseRes.ok
-      ? extractActivePrices(await browseRes.json())
-      : { total: null, prices: [] };
-
-    if (soldPrices.length === 0 && active.prices.length === 0) return null;
-    return summarizeComps(soldPrices, active);
-  } catch (err) {
-    console.warn("[comps] lookup failed — pricing falls back:", err);
-    return null;
-  }
-}
+// The network layer lives in lib/platforms/ebay-comps.ts (structured
+// queries, caching, Marketplace Insights grant detection). This module
+// stays pure and client-safe — PricingPanel imports the type from here.

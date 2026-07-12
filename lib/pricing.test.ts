@@ -6,12 +6,15 @@ import {
   PRICING_DEFAULTS,
 } from "./pricing";
 
-// Independent fee/margin recomputation to verify floors against.
+// Independent fee/margin recomputation to verify floors against — the
+// exact buyer-paid-shipping model: the buyer's shipping payment cancels the
+// label, and eBay's final value fee applies to the TOTAL (price + ship).
 function netProfit(price: number, cost: number, ship: number): number {
   return (
-    price -
-    (PRICING_DEFAULTS.feeRate * price + PRICING_DEFAULTS.feeFlat) -
-    ship -
+    price +
+    ship - // buyer pays shipping at checkout…
+    ship - // …seller pays the label
+    (PRICING_DEFAULTS.feeRate * (price + ship) + PRICING_DEFAULTS.feeFlat) -
     cost
   );
 }
@@ -39,6 +42,28 @@ describe("computeFloor", () => {
         requiredMargin(floor as number) - 0.011 // cent rounding tolerance
       );
     }
+  });
+
+  it("charges only the FEE on shipping, not shipping itself (exact model)", () => {
+    // Heavy-cheap regression (the SAKRETE 50 lb bag): the buyer pays the
+    // $25 shipping at checkout, so the floor must carry only eBay's fee on
+    // that shipping revenue — folding all $25 in priced the item ~a full
+    // shipping cost above market.
+    const floor = computeFloor(3.5, 25) as number;
+    const feeOnShip = PRICING_DEFAULTS.feeRate * 25;
+    // Exactly the flat-branch algebra with feeRate*ship, not ship:
+    expect(floor).toBeCloseTo(
+      (3.5 + feeOnShip + PRICING_DEFAULTS.feeFlat + PRICING_DEFAULTS.minMarginFlat) /
+        (1 - PRICING_DEFAULTS.feeRate),
+      1
+    );
+    // Sanity: the old model would have demanded ≥ $36; market for the bag
+    // is ~$7-10, so the exact floor must land far below that.
+    expect(floor).toBeLessThan(15);
+    // …and the seller still clears the minimum margin at the floor.
+    expect(netProfit(floor, 3.5, 25)).toBeGreaterThanOrEqual(
+      requiredMargin(floor) - 0.011
+    );
   });
 
   it("NEVER computes a floor with $0 shipping when shippingCost is null", () => {

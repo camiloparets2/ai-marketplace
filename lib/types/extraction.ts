@@ -19,9 +19,16 @@ export const SHIPPING_DISPLAY_NAMES: Record<ShippingService, string> = {
 // Every field is either a concrete value or null — no undefined, no optional fields.
 // The confidence map keys are constrained to actual ExtractionResult field names,
 // preventing typos that would silently hide the "needs review" indicator in the UI.
+// Where a brand claim came from. Only READABLE sources (a tag/label, or a
+// printed logo cross-checked against known brands) survive the brand guard
+// in lib/ai/brand-guard.ts — styling-based inference never does.
+export type BrandSource = "tag_or_label" | "logo" | "inferred" | "none";
+
 export interface ExtractionResult {
   title: string;
   brand: string | null;
+  // How the brand was determined — feeds the brand-hallucination guard.
+  brandSource: BrandSource;
   model: string | null;
   // UPC extracted via OCR from visible barcode or label text.
   upc: string | null;
@@ -40,6 +47,19 @@ export interface ExtractionResult {
   estimatedYearMade: number | null;
   // The item is a supply used to MAKE things (yarn, beads, fabric, tools-for-craft).
   craftSupply: boolean;
+  // Aspect-mapped fields — each corresponds to a high-frequency eBay item
+  // aspect (getItemAspectsForCategory): Material, Color, Size, Style,
+  // Pattern. Folded into `specs` under those aspect names by
+  // foldAspectsIntoSpecs, so they flow to item specifics AND tighten comps
+  // queries with no extra plumbing. All null when not visible.
+  material: string | null;
+  colorPrimary: string | null;
+  colorSecondary: string | null;
+  size: string | null;
+  // The sizing standard the size is expressed in, when determinable.
+  sizeSystem: "US" | "UK" | "EU" | null;
+  style: string | null;
+  pattern: string | null;
   // Open-ended key-value spec pairs (wattage, color, size, material, etc.).
   // In Phase 2 these will be mapped to eBay/Etsy item specifics schemas.
   specs: Record<string, string>;
@@ -99,7 +119,14 @@ export const EXTRACTION_TOOL_SCHEMA = {
       },
       brand: {
         type: ["string", "null"],
-        description: "Brand or manufacturer name, null if not visible",
+        description:
+          "Brand name ONLY if actually readable in the photo (on a tag, label, or printed logo). NEVER infer a brand from styling, shape, or quality — null when no brand text is readable.",
+      },
+      brandSource: {
+        type: "string",
+        enum: ["tag_or_label", "logo", "inferred", "none"],
+        description:
+          "Where the brand was read: 'tag_or_label' when readable on a sewn tag, sticker, or product label; 'logo' when readable as a printed/embossed logo on the item; 'inferred' if you guessed from styling (avoid); 'none' when brand is null.",
       },
       model: {
         type: ["string", "null"],
@@ -140,6 +167,41 @@ export const EXTRACTION_TOOL_SCHEMA = {
         type: "boolean",
         description:
           "True when the item is a supply used to make things (yarn, beads, fabric, leather blanks, craft tools)",
+      },
+      material: {
+        type: ["string", "null"],
+        description:
+          "Primary material when visible or labeled (e.g. 'Leather', 'Cotton', 'Stainless Steel'), null if not determinable",
+      },
+      colorPrimary: {
+        type: ["string", "null"],
+        description: "Dominant color of the item, null if not determinable",
+      },
+      colorSecondary: {
+        type: ["string", "null"],
+        description:
+          "Secondary/accent color when clearly present, null otherwise",
+      },
+      size: {
+        type: ["string", "null"],
+        description:
+          "Size as printed on tag/label (e.g. 'M', '10.5', '32x34'), null when no size is readable",
+      },
+      sizeSystem: {
+        type: ["string", "null"],
+        enum: ["US", "UK", "EU", null],
+        description:
+          "The sizing standard the size uses when determinable from the tag, null otherwise",
+      },
+      style: {
+        type: ["string", "null"],
+        description:
+          "Style descriptor buyers filter by (e.g. 'Crewneck', 'Chelsea Boot', 'Mid-Century'), null if not applicable",
+      },
+      pattern: {
+        type: ["string", "null"],
+        description:
+          "Visible pattern (e.g. 'Striped', 'Floral', 'Solid'), null if not determinable",
       },
       specs: {
         type: "object",
@@ -203,6 +265,7 @@ export const EXTRACTION_TOOL_SCHEMA = {
     required: [
       "title",
       "brand",
+      "brandSource",
       "model",
       "upc",
       "condition",
@@ -211,6 +274,13 @@ export const EXTRACTION_TOOL_SCHEMA = {
       "handmade",
       "estimatedYearMade",
       "craftSupply",
+      "material",
+      "colorPrimary",
+      "colorSecondary",
+      "size",
+      "sizeSystem",
+      "style",
+      "pattern",
       "specs",
       "estimatedDimensions",
       "estimatedWeightLbs",
