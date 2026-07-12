@@ -5,7 +5,7 @@
 > (all removed 2026-07-12; recoverable in git history). Next session: resume
 > at the first unchecked item of the lowest-numbered phase.
 
-**Last updated:** 2026-07-12 (Phase 1 complete — PR pending)
+**Last updated:** 2026-07-12 (Phase 2 core complete — PR pending)
 **Branch under review:** `codex/ebay-beta-launch` (consolidation base — every
 phase lands as a small stacked PR on top of it; **nothing merges without
 Camilo's review**).
@@ -109,24 +109,38 @@ Camilo's review**).
       mismatch → 400; failed erasure → 500 for retry. Matching via
       meta.ebayUserId (Phase 2 captures it) with username fallback.
 
-### Phase 2 — eBay compliance + retry safety — ☐ not started
-- [ ] `commerce.identity.readonly` scope; store immutable ebayUserId,
-      username, registration marketplace at OAuth; reconnect/backfill path.
-- [ ] Deterministic SKU (inventory item + marketplace), retry reuses
-      inventory item/offer — no duplicate listings.
-- [ ] Offer payload: listingDuration GTC, merchant location, quantity,
-      marketplace currency, 3 policy IDs, category-specific condition enum.
-- [ ] Leaf-category validation; never a hardcoded fallback category.
-- [ ] getItemAspectsForCategory: BLOCK on missing REQUIRED aspects; surface
-      required-soon/recommended. Metadata API condition policies + product
-      identifier requirements.
-- [ ] Images: ≤24 single-SKU, ≥500px (recommend 1600), no watermarks/text
-      overlays, seller originals FIRST, REMOVE stock-photo fallback for used.
-- [ ] Title optimizer (≤80 relevant chars) + description content rules.
-- [ ] Keep #23 readiness detector; defaults only after explicit confirmation
-      (same work item as 1.1c).
-- [ ] Order polling pagination + verified notifications + 15-min backstop;
-      oversell races → urgent manual alert, never auto-cancel.
+### Phase 2 — eBay compliance + retry safety — ◕ core done (branch codex/lh-phase2-ebay-compliance)
+- [x] `commerce.identity.readonly` scope; immutable ebayUserId + username +
+      registration marketplace stored at OAuth; unidentifiable connections
+      refused; `needsReconnect` flags pre-identity connections through
+      /api/channels + /api/connections (existing prod connection will prompt
+      reconnect).
+- [x] Deterministic SKU `ebaySkuForItem(itemId)`; retry reuses the inventory
+      item (idempotent PUT) and the offer (published → returned as-is;
+      unpublished → updated + published; race → adopt). Contract tests
+      script the full flow.
+- [x] Offer payload: explicit `listingDuration: "GTC"` (merchant location,
+      quantity, marketplace currency, 3 policy ids, condition were present).
+- [x] Leaf-category validation via getItemAspectsForCategory (doubles as the
+      leaf check); non-leaf suggestions fall through; NO hardcoded fallback.
+- [x] Required aspects BLOCK publish with an actionable message;
+      recommended/required-soon logged as optimization signals.
+      - [ ] Follow-up: surface recommended aspects in the draft-edit UI.
+      - [ ] Follow-up: Metadata API condition policies + product-identifier
+            requirements per category (current map covers the common enums).
+- [x] Images: cap raised to eBay's single-SKU 24; seller originals always
+      first; verified NO stock-photo fallback exists anywhere (prototype's
+      was never salvaged — picture-policy/IP risk).
+      - [ ] Follow-up: server-side pixel-dimension check (≥500px, recommend
+            1600px) and watermark/text-overlay detection need an image
+            decoder / vision pass — not in this branch.
+- [x] Titles ≤80 chars enforced in composeListing (existing, test-locked);
+      descriptions carry condition + defects; no active content generated.
+- [x] Policy confirmation (1.1c, Phase 1 PR) — readiness detector kept.
+- [x] Order polling paginates (limit 200 + offset until eBay's total);
+      backstop cron tightened to */15 (⚠ Vercel Hobby caps crons at daily —
+      needs Pro, else revert to daily); oversell races surface as an URGENT
+      dashboard banner + top next-best-action; orders are NEVER auto-cancelled.
 
 ### Phase 3 — Broken core loop — ✅ DONE via #24 (folded in Phase 0)
 Draft publish/retry (zero AI, zero credits, regression-locked), item
