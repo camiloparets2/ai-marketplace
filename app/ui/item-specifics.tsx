@@ -33,6 +33,11 @@ export interface ItemSpecificsStatus {
   // null → requirements unknown (not connected / lookup failed): the parent
   // must NOT gate publish on it (the server-side guard is the backstop).
   aspects: AspectField[] | null;
+  // The ONE resolved eBay category (also pinned on the draft server-side) —
+  // the parent mirrors it into its specs state and the breadcrumb so every
+  // surface shows the same answer.
+  categoryId: string | null;
+  categoryName: string | null;
 }
 
 export interface ItemSpecificsCardProps {
@@ -142,11 +147,15 @@ export function ItemSpecificsCard({
         const payload = (await res.json()) as AspectsPayload;
         setData(payload);
         setState("done");
-        onStatus({ aspects: payload.connected ? payload.aspects : null });
+        onStatus({
+          aspects: payload.connected ? payload.aspects : null,
+          categoryId: payload.categoryId,
+          categoryName: payload.categoryName,
+        });
       } catch {
         setData(null);
         setState("error");
-        onStatus({ aspects: null });
+        onStatus({ aspects: null, categoryId: null, categoryName: null });
       }
     },
     [itemId, onStatus]
@@ -276,8 +285,9 @@ export function ItemSpecificsCard({
           role="alert"
           className="text-xs text-warn bg-warn-surface border border-amber-200 rounded-lg px-3 py-2"
         >
-          eBay requires {missing.map((f) => f.name).join(", ")} for this
-          category — publishing is blocked until they&apos;re filled in.
+          {/* Single template string — JSX whitespace collapsing around the
+              expression rendered "Typefor this category" in production. */}
+          {`eBay requires ${missing.map((f) => f.name).join(", ")} for this category — publishing is blocked until they're filled in.`}
         </p>
       )}
 

@@ -15,7 +15,7 @@ export const maxDuration = 30;
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
 import { getConnection } from "@/lib/connections";
-import { getItemDetail } from "@/lib/inventory";
+import { getItemDetail, mergeItemSpecs } from "@/lib/inventory";
 import {
   freshConnection,
   getCategoryAspects,
@@ -25,7 +25,10 @@ import {
   marketplaceById,
   DEFAULT_EBAY_MARKETPLACE,
 } from "@/lib/platforms/ebay-marketplaces";
-import { EBAY_CATEGORY_SPEC_KEY } from "@/lib/ebay-aspects";
+import {
+  EBAY_CATEGORY_SPEC_KEY,
+  EBAY_CATEGORY_NAME_SPEC_KEY,
+} from "@/lib/ebay-aspects";
 import type { AspectField, CategoryOption } from "@/lib/ebay-aspects";
 
 export interface AspectsResponse {
@@ -109,12 +112,32 @@ export async function GET(
       break;
     }
 
+    const categoryName =
+      suggestions.find((s) => s.categoryId === categoryId)?.categoryName ??
+      null;
+
+    // ONE resolver, ONE answer: pin this resolution on the draft so the
+    // breadcrumb, the form, and the publish step (which honors the saved
+    // __ebayCategoryId, never re-suggesting from the title) all agree.
+    // Editable items only; a failure here degrades to unpinned, not a 5xx.
+    if (
+      categoryId !== null &&
+      categoryId !== saved &&
+      (item.status === "draft" || item.status === "review")
+    ) {
+      await mergeItemSpecs(user.id, id, {
+        [EBAY_CATEGORY_SPEC_KEY]: categoryId,
+        ...(categoryName ? { [EBAY_CATEGORY_NAME_SPEC_KEY]: categoryName } : {}),
+      }).catch((err) => {
+        console.warn(`[inventory] category pin failed for ${id}:`, err);
+        return false;
+      });
+    }
+
     const body: AspectsResponse = {
       connected: true,
       categoryId,
-      categoryName:
-        suggestions.find((s) => s.categoryId === categoryId)?.categoryName ??
-        null,
+      categoryName,
       suggestions,
       aspects,
       staleCategory,

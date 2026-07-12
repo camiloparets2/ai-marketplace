@@ -242,6 +242,36 @@ export async function updateItemDetails(
   return (data?.length ?? 0) > 0;
 }
 
+/**
+ * Merge keys into a draft's specs jsonb without replacing the rest — used by
+ * the draft-time aspects endpoint to PIN its category resolution
+ * (__ebayCategoryId) on the row, so the breadcrumb, the form, and the
+ * publish step all use ONE answer instead of re-resolving independently.
+ * Drafts and review-held items only.
+ */
+export async function mergeItemSpecs(
+  userId: string,
+  itemId: string,
+  patch: Record<string, string>
+): Promise<boolean> {
+  const item = await getItemDetail(userId, itemId);
+  if (!item || (item.status !== "draft" && item.status !== "review")) {
+    return false;
+  }
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({
+      specs: { ...(item.specs ?? {}), ...patch },
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .in("status", ["draft", "review"])
+    .select("id");
+  if (error) throw new Error(`specs merge failed: ${error.message}`);
+  return (data?.length ?? 0) > 0;
+}
+
 /** Human rejected a held item — archive it, never publish. */
 export async function rejectItemFromReview(
   userId: string,
