@@ -48,9 +48,18 @@ const CHANNEL_META: Record<
   ChannelStatus["platform"],
   { name: string; blurb: string }
 > = {
-  ebay: { name: "eBay", blurb: "Live listings via the Sell Inventory API" },
-  etsy: { name: "Etsy", blurb: "Live listings via Open API v3" },
-  shopify: { name: "Shopify", blurb: "Your own storefront — no marketplace fees" },
+  ebay: {
+    name: "eBay",
+    blurb: "BETA — live listings via the official Sell Inventory API (OAuth)",
+  },
+  etsy: {
+    name: "Etsy",
+    blurb: "EARLY — official API integration built, not yet verified end-to-end",
+  },
+  shopify: {
+    name: "Shopify",
+    blurb: "EARLY — official API integration built, not yet verified end-to-end",
+  },
 };
 
 export default function ChannelsPage() {
@@ -152,7 +161,7 @@ export default function ChannelsPage() {
         <div className="text-center">
           <h1 className="text-2xl font-bold text-gray-900">Channels</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Connect once — publish and sync everywhere from one workspace.
+            Connect your channels once. eBay publishing is in beta; other channels are labeled by what they can do today.
           </p>
         </div>
 

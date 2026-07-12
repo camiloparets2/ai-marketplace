@@ -192,7 +192,7 @@ export default function InventoryPage() {
         <div className="text-center">
           <h1 className="text-2xl font-bold text-gray-900">Inventory</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Every item, every channel — marking one sold ends it everywhere.
+            Every item and channel in one place. Marking one sold triggers delisting elsewhere — monitored, not instant; simultaneous sales can still happen.
           </p>
           <button
             onClick={() => void syncSales()}

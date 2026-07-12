@@ -6,7 +6,7 @@ import Link from "next/link";
 import { BrandWordmark } from "@/app/brand";
 
 export const metadata = {
-  title: "Photograph it. It's listed everywhere.",
+  title: "Photograph it. AI drafts your eBay listing.",
 };
 
 const STEPS = [
@@ -16,18 +16,18 @@ const STEPS = [
   },
   {
     title: "Review",
-    text: "A ready-to-publish draft in seconds. Low-confidence fields are flagged so you stay in control.",
+    text: "A ready-to-review draft with the break-even floor and low-confidence fields flagged. Nothing publishes until you approve it.",
   },
   {
-    title: "Publish everywhere",
-    text: "eBay, Etsy, and Shopify live via their official APIs. Facebook Marketplace and OfferUp with a one-tap assisted post. Plus your own no-fee checkout link.",
+    title: "Publish to eBay",
+    text: "eBay live via the official Sell API you authorize with OAuth (beta). Facebook Marketplace and OfferUp get an assisted copy-paste post; Etsy, Shopify, and a direct checkout link are early and clearly labeled in Channels.",
   },
 ];
 
 const PILLARS = [
   {
-    title: "Never oversell",
-    text: "Sell an item anywhere — including your direct link — and it's automatically delisted from every other channel. eBay, Etsy, and Shopify sales are detected for you.",
+    title: "Monitored inventory sync",
+    text: "Sales are detected by verified eBay notifications plus a daily sweep, and other channels are then delisted for you. Sync is monitored, not instantaneous — a simultaneous sale can still require you to cancel or refund one order.",
   },
   {
     title: "Know what made money",
@@ -52,13 +52,14 @@ export default function WelcomePage() {
             Photograph it.
             <br />
             <span className="text-brand-gradient">
-              It&apos;s listed everywhere.
+              AI drafts your eBay listing.
             </span>
           </h1>
           <p className="text-gray-500 max-w-md mx-auto">
-            Snap to List turns one photo into live listings on eBay, Etsy,
-            Shopify, and more — then keeps every channel in sync so you never
-            sell the same item twice.
+            Snap to List turns one photo into an eBay-ready draft you review
+            and publish through eBay&apos;s official API — with monitored
+            inventory sync across your channels. Currently in beta, US
+            sellers, eBay first.
           </p>
           <div className="flex gap-3 justify-center">
             <Link

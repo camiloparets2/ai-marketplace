@@ -494,7 +494,7 @@ export default function Page() {
             <BrandWordmark />
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            Photograph an item. List it everywhere in seconds.
+            Photograph an item. AI drafts the listing — you review, then publish to eBay.
           </p>
           {accountEmail && (
             <p className="text-xs text-gray-400 mt-2">

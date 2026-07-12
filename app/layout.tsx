@@ -21,11 +21,11 @@ export const metadata: Metadata = {
     process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"
   ),
   title: {
-    default: "Snap to List — photograph it, it's listed everywhere",
+    default: "Snap to List — photograph it, AI drafts your eBay listing",
     template: "%s — Snap to List",
   },
   description:
-    "Take one photo. AI drafts the listing. Publish to eBay, Etsy, Shopify, and more in one tap — and never oversell: selling anywhere delists everywhere else.",
+    "Take one photo. AI drafts the listing, you review it, and publish to eBay through the official API — with monitored inventory sync across your channels. eBay beta.",
   openGraph: {
     title: "Snap to List",
     description:

@@ -210,7 +210,7 @@ export default function LoginPage() {
             <BrandWordmark />
           </h1>
           <p className="text-sm text-gray-500">
-            Sign in to list everywhere from one photo.
+            Sign in to turn photos into eBay listings you approve.
           </p>
         </div>
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
