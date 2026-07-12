@@ -12,14 +12,21 @@ import { Button } from "@/app/ui/button";
 import { Card } from "@/app/ui/card";
 import { StatusBadge } from "@/app/ui/status-badge";
 import { PricingPanel } from "@/app/ui/pricing-panel";
+import { ItemSpecificsCard } from "@/app/ui/item-specifics";
+import type { ItemSpecificsStatus } from "@/app/ui/item-specifics";
 import { useToast } from "@/app/ui/toast";
 import { getAllFlatRates } from "@/lib/shipping";
+import { missingRequiredAspectValues } from "@/lib/ebay-aspects";
+import type { AspectField } from "@/lib/ebay-aspects";
 
 interface ItemDetail {
   id: string;
   title: string;
+  brand: string | null;
+  model: string | null;
   condition: string;
   category: string | null;
+  specs: Record<string, string> | null;
   photo_url: string | null;
   price: number | null;
   cost_of_goods: number | null;
@@ -50,6 +57,12 @@ export default function ItemDetailPage() {
   const [price, setPrice] = useState("");
   const [shipCost, setShipCost] = useState("");
   const [costBasis, setCostBasis] = useState("");
+  // eBay item specifics + the reserved __ebayCategoryId key — saved with the
+  // draft so republish/retry reuses them (no re-analyze, no credit).
+  const [specs, setSpecs] = useState<Record<string, string>>({});
+  // Required-aspect metadata from /aspects; null → unknown (don't gate here,
+  // the publish-time guard is the backstop).
+  const [aspectFields, setAspectFields] = useState<AspectField[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [outcome, setOutcome] = useState<PublishOutcome | null>(null);
@@ -61,6 +74,11 @@ export default function ItemDetailPage() {
     setPrice(it.price !== null ? String(it.price) : "");
     setShipCost(it.shipping_cost !== null ? String(it.shipping_cost) : "");
     setCostBasis(it.cost_of_goods !== null ? String(it.cost_of_goods) : "");
+    setSpecs(it.specs ?? {});
+  }, []);
+
+  const onAspectStatus = useCallback((status: ItemSpecificsStatus) => {
+    setAspectFields(status.aspects);
   }, []);
 
   useEffect(() => {
@@ -90,6 +108,17 @@ export default function ItemDetailPage() {
   const shipValid = shipNum === null || (isFinite(shipNum) && shipNum >= 0);
   const costValid = costNum === null || (isFinite(costNum) && costNum >= 0);
   const priceValid = isFinite(priceNum) && priceNum > 0;
+  // eBay-required item specifics still empty (Brand/Model count via their
+  // own columns). Unknown requirements ([] when aspectFields is null) never
+  // block here — the server-side publish guard is the backstop.
+  const missingAspects =
+    aspectFields !== null && item?.status === "draft"
+      ? missingRequiredAspectValues(aspectFields, {
+          Brand: item?.brand ?? "",
+          Model: item?.model ?? "",
+          ...specs,
+        })
+      : [];
 
   async function save(): Promise<boolean> {
     if (!item) return false;
@@ -112,6 +141,7 @@ export default function ItemDetailPage() {
           price: priceNum,
           shippingCost: shipNum,
           costOfGoods: costNum,
+          specs,
         }),
       });
       const data = (await res.json()) as { item?: ItemDetail; error?: string };
@@ -321,6 +351,20 @@ export default function ItemDetailPage() {
               />
             </Card>
 
+            {/* eBay category + required/recommended item specifics — resolved
+                at DRAFT time so the seller never dead-ends at publish. */}
+            <Card className="flex flex-col gap-3">
+              <ItemSpecificsCard
+                itemId={item.id}
+                brand={item.brand}
+                model={item.model}
+                specs={specs}
+                onSpecsChange={setSpecs}
+                onStatus={onAspectStatus}
+                editable={editable}
+              />
+            </Card>
+
             {/* Why it's held (review items) */}
             {item.status === "review" && (
               <Card className="flex flex-col gap-2">
@@ -390,7 +434,12 @@ export default function ItemDetailPage() {
                   <Button
                     className="flex-1"
                     loading={publishing}
-                    disabled={!priceValid || shipNum === null || !shipValid}
+                    disabled={
+                      !priceValid ||
+                      shipNum === null ||
+                      !shipValid ||
+                      missingAspects.length > 0
+                    }
                     onClick={() => void publish()}
                   >
                     List it

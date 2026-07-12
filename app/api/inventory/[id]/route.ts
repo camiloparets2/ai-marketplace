@@ -48,6 +48,39 @@ interface PatchBody {
   condition?: unknown;
   shippingCost?: unknown;
   costOfGoods?: unknown;
+  specs?: unknown;
+}
+
+// Item specifics from the draft-edit form: full replacement of the specs
+// jsonb. Bounded (eBay caps aspects; a runaway payload is a bug), string→
+// string, empty values dropped (an unanswered optional field is not a spec).
+function specsField(
+  value: unknown
+): { ok: true; value?: Record<string, string> } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true };
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: "specs must be an object of string values" };
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 60) {
+    return { ok: false, error: "specs cannot exceed 60 entries" };
+  }
+  const out: Record<string, string> = {};
+  for (const [key, raw] of entries) {
+    if (typeof raw !== "string") {
+      return { ok: false, error: "specs values must be strings" };
+    }
+    const k = key.trim();
+    if (!k || k.length > 80) {
+      return { ok: false, error: "specs keys must be 1-80 characters" };
+    }
+    if (raw.length > 500) {
+      return { ok: false, error: "specs values must be at most 500 characters" };
+    }
+    const v = raw.trim();
+    if (v !== "") out[k] = v;
+  }
+  return { ok: true, value: out };
 }
 
 // Validate one optional money field: absent → skip, null → clear, number ≥ 0.
@@ -118,6 +151,9 @@ export async function PATCH(
   const cost = moneyField(body.costOfGoods, "costOfGoods");
   if (!cost.ok) return NextResponse.json({ error: cost.error }, { status: 400 });
   if ("value" in cost) patch.costOfGoods = cost.value;
+  const specs = specsField(body.specs);
+  if (!specs.ok) return NextResponse.json({ error: specs.error }, { status: 400 });
+  if (specs.value !== undefined) patch.specs = specs.value;
 
   if (Object.keys(patch).length === 0) {
     return NextResponse.json({ error: "Nothing to update" }, { status: 400 });

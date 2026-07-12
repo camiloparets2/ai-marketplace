@@ -43,6 +43,9 @@ import {
   domesticShippingCandidates,
   DEFAULT_EBAY_MARKETPLACE,
 } from "@/lib/platforms/ebay-marketplaces";
+import { EBAY_CATEGORY_SPEC_KEY, isReservedSpecKey } from "@/lib/ebay-aspects";
+import type { AspectField, CategoryOption } from "@/lib/ebay-aspects";
+import { LRUCache } from "lru-cache";
 import type { EbayMarketplace } from "@/lib/platforms/ebay-marketplaces";
 
 // ─── Environment ──────────────────────────────────────────────────────────────
@@ -224,7 +227,7 @@ export async function ebayExchangeCode(code: string): Promise<UnownedConnection>
   };
 }
 
-async function freshConnection(conn: PlatformConnection): Promise<PlatformConnection> {
+export async function freshConnection(conn: PlatformConnection): Promise<PlatformConnection> {
   if (!isExpired(conn)) return conn;
   if (!conn.refreshToken) {
     throw new Error("eBay session expired — reconnect your eBay account.");
@@ -527,65 +530,158 @@ export interface ResolvedCategory {
   requiredAspects: string[];
   // Recommended / required-soon aspects — optimization prompts, not blockers.
   recommendedAspects: string[];
+  // Full aspect metadata (mode, closed-enum values, data type) — what the
+  // draft-time item-specifics form renders.
+  aspects: AspectField[];
 }
 
-// Resolve the title to a CURRENT LEAF category and its aspect requirements.
-// getItemAspectsForCategory doubles as the leaf check (eBay rejects non-leaf
-// ids), so a non-leaf suggestion falls through to the next candidate. There
-// is deliberately NO hardcoded fallback category — an unmappable item is the
-// seller's call, never a silent mislisting.
-async function resolveLeafCategory(
+// ── Aspect metadata (getItemAspectsForCategory) ──────────────────────────────
+
+interface RawAspect {
+  localizedAspectName?: string;
+  aspectConstraint?: {
+    aspectRequired?: boolean;
+    aspectUsage?: string;
+    aspectMode?: string;
+    aspectDataType?: string;
+  };
+  aspectValues?: Array<{ localizedValue?: string }>;
+}
+
+function parseAspectFields(raw: { aspects?: RawAspect[] }): AspectField[] {
+  const fields: AspectField[] = [];
+  for (const aspect of raw.aspects ?? []) {
+    const name = aspect.localizedAspectName;
+    if (!name) continue;
+    fields.push({
+      name,
+      required: aspect.aspectConstraint?.aspectRequired === true,
+      recommended: aspect.aspectConstraint?.aspectUsage === "RECOMMENDED",
+      mode:
+        aspect.aspectConstraint?.aspectMode === "SELECTION_ONLY"
+          ? "SELECTION_ONLY"
+          : "FREE_TEXT",
+      dataType: aspect.aspectConstraint?.aspectDataType ?? "STRING",
+      values: (aspect.aspectValues ?? [])
+        .map((v) => v.localizedValue)
+        .filter((v): v is string => Boolean(v))
+        // Closed enums can be huge (hundreds of brands); the form caps the
+        // select at a sane size and falls back to free text beyond it.
+        .slice(0, 200),
+    });
+  }
+  return fields;
+}
+
+// Taxonomy metadata is stable for months — cache it so the draft-edit view
+// (which refetches on category change) doesn't hammer eBay.
+const aspectCache = new LRUCache<string, { fields: AspectField[] | null }>({
+  max: 300,
+  ttl: 6 * 60 * 60 * 1000,
+});
+
+export function clearAspectCacheForTests(): void {
+  aspectCache.clear();
+}
+
+/**
+ * Aspect metadata for one category — doubles as the LEAF check: eBay 400s
+ * get_item_aspects_for_category for non-leaf/retired ids, which comes back
+ * as null (callers pick another candidate), never a throw.
+ */
+export async function getCategoryAspects(
+  accessToken: string,
+  categoryTreeId: string,
+  categoryId: string
+): Promise<AspectField[] | null> {
+  const key = `${categoryTreeId}|${categoryId}`;
+  const cached = aspectCache.get(key);
+  if (cached !== undefined) return cached.fields;
+  const res = await ebayFetch(
+    accessToken,
+    `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_item_aspects_for_category?category_id=${categoryId}`
+  );
+  if (!res.ok) {
+    // Non-leaf or retired id. Cache only clear 4xx verdicts — a 5xx/network
+    // blip must not stick a category as "invalid" for six hours.
+    if (res.status >= 400 && res.status < 500) {
+      aspectCache.set(key, { fields: null });
+    }
+    return null;
+  }
+  const fields = parseAspectFields(
+    (await res.json()) as { aspects?: RawAspect[] }
+  );
+  aspectCache.set(key, { fields });
+  return fields;
+}
+
+/** Category candidates for the seller-facing picker — id + display name. */
+export async function suggestEbayCategories(
   accessToken: string,
   title: string,
   categoryTreeId: string
-): Promise<ResolvedCategory> {
+): Promise<CategoryOption[]> {
   const res = await ebayFetch(
     accessToken,
     `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_category_suggestions?q=${encodeURIComponent(title)}`
   );
   if (!res.ok) throw await ebayError(res, "category lookup");
   const data = (await res.json()) as {
-    categorySuggestions?: Array<{ category: { categoryId: string } }>;
+    categorySuggestions?: Array<{
+      category: { categoryId?: string; categoryName?: string };
+    }>;
   };
-  const candidates = (data.categorySuggestions ?? [])
-    .map((sugg) => sugg.category.categoryId)
-    .filter(Boolean)
-    .slice(0, 3);
+  return (data.categorySuggestions ?? [])
+    .map((sugg) => ({
+      categoryId: sugg.category.categoryId ?? "",
+      categoryName: sugg.category.categoryName ?? "",
+    }))
+    .filter((c) => c.categoryId !== "")
+    .slice(0, 5);
+}
+
+function resolvedFromFields(
+  categoryId: string,
+  fields: AspectField[]
+): ResolvedCategory {
+  return {
+    categoryId,
+    requiredAspects: fields.filter((f) => f.required).map((f) => f.name),
+    recommendedAspects: fields
+      .filter((f) => !f.required && f.recommended)
+      .map((f) => f.name),
+    aspects: fields,
+  };
+}
+
+// Resolve the title to a CURRENT LEAF category and its aspect requirements.
+// getCategoryAspects doubles as the leaf check (eBay rejects non-leaf ids),
+// so a non-leaf suggestion falls through to the next candidate. There is
+// deliberately NO hardcoded fallback category — an unmappable item is the
+// seller's call, never a silent mislisting.
+async function resolveLeafCategory(
+  accessToken: string,
+  title: string,
+  categoryTreeId: string
+): Promise<ResolvedCategory> {
+  const candidates = (
+    await suggestEbayCategories(accessToken, title, categoryTreeId)
+  ).slice(0, 3);
   if (candidates.length === 0) {
     throw new Error(
       "eBay could not suggest a category for this title. Edit the title and retry."
     );
   }
 
-  for (const categoryId of candidates) {
-    const aspectsRes = await ebayFetch(
+  for (const candidate of candidates) {
+    const fields = await getCategoryAspects(
       accessToken,
-      `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_item_aspects_for_category?category_id=${categoryId}`
+      categoryTreeId,
+      candidate.categoryId
     );
-    if (!aspectsRes.ok) {
-      // Non-leaf (or retired) category id — try the next suggestion.
-      continue;
-    }
-    const aspectData = (await aspectsRes.json()) as {
-      aspects?: Array<{
-        localizedAspectName?: string;
-        aspectConstraint?: {
-          aspectRequired?: boolean;
-          aspectUsage?: string;
-        };
-      }>;
-    };
-    const requiredAspects: string[] = [];
-    const recommendedAspects: string[] = [];
-    for (const aspect of aspectData.aspects ?? []) {
-      const name = aspect.localizedAspectName;
-      if (!name) continue;
-      if (aspect.aspectConstraint?.aspectRequired) requiredAspects.push(name);
-      else if (aspect.aspectConstraint?.aspectUsage === "RECOMMENDED") {
-        recommendedAspects.push(name);
-      }
-    }
-    return { categoryId, requiredAspects, recommendedAspects };
+    if (fields === null) continue; // non-leaf/retired — next suggestion
+    return resolvedFromFields(candidate.categoryId, fields);
   }
 
   throw new Error(
@@ -1308,11 +1404,14 @@ export function buildEbayInventoryItemPayload(
 ): EbayInventoryItemPayload {
   const composed = composeListing("ebay", input);
 
-  // Item specifics (aspects) from brand/model/specs. eBay expects string arrays.
+  // Item specifics (aspects) from brand/model/specs. eBay expects string
+  // arrays. Reserved __keys are app metadata (chosen category id) and empty
+  // values are unanswered form fields — neither is an aspect.
   const aspects: Record<string, string[]> = {};
   if (input.brand) aspects["Brand"] = [input.brand];
   if (input.model) aspects["Model"] = [input.model];
   for (const [key, value] of Object.entries(input.specs)) {
+    if (isReservedSpecKey(key) || value.trim() === "") continue;
     aspects[key] = [value];
   }
 
@@ -1473,8 +1572,32 @@ export async function publishToEbay(
   // tree, currency, policies, and Content-Language) for everything below.
   const { merchantLocationKey, marketplace } = await ensureEbayLocation(conn);
 
+  // The seller's explicit category choice (draft-edit view) beats the title
+  // suggestion — a bad auto-picked leaf is what drags in irrelevant required
+  // aspects. An invalid/stale choice fails LOUDLY (re-pick in the app),
+  // never silently re-routes to a different category than the seller chose.
+  const chosenCategoryId =
+    input.specs[EBAY_CATEGORY_SPEC_KEY]?.trim() || null;
+
   const [resolvedCategory, policies] = await Promise.all([
-    resolveLeafCategory(conn.accessToken, composed.title, marketplace.categoryTreeId),
+    chosenCategoryId
+      ? getCategoryAspects(
+          conn.accessToken,
+          marketplace.categoryTreeId,
+          chosenCategoryId
+        ).then((fields) => {
+          if (fields === null) {
+            throw new Error(
+              "The eBay category picked for this item is no longer a valid leaf category. Open the item and pick a category again."
+            );
+          }
+          return resolvedFromFields(chosenCategoryId, fields);
+        })
+      : resolveLeafCategory(
+          conn.accessToken,
+          composed.title,
+          marketplace.categoryTreeId
+        ),
     // Seller-readiness ensure chain: cached ids, else detect / opt-in /
     // create defaults. Throws the typed onboarding error when the seller
     // hasn't finished eBay registration.

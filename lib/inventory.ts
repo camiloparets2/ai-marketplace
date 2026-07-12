@@ -210,6 +210,10 @@ export interface ItemUpdateInput {
   condition?: string;
   shippingCost?: number | null;
   costOfGoods?: number | null;
+  // Full replacement of the specs jsonb: eBay item specifics entered in the
+  // draft-edit form, plus reserved __keys (chosen eBay category). Persisted
+  // so republish/retry reuses them without re-running AI.
+  specs?: Record<string, string>;
 }
 
 export async function updateItemDetails(
@@ -225,6 +229,7 @@ export async function updateItemDetails(
   if (patch.condition !== undefined) update.condition = patch.condition;
   if (patch.shippingCost !== undefined) update.shipping_cost = patch.shippingCost;
   if (patch.costOfGoods !== undefined) update.cost_of_goods = patch.costOfGoods;
+  if (patch.specs !== undefined) update.specs = patch.specs;
 
   const { data, error } = await getSupabaseAdmin()
     .from("inventory_items")
