@@ -25,7 +25,7 @@ import { decidePrice, recordPriceDecision } from "@/lib/pricing";
 import type { PriceDecision, PriceRequest } from "@/lib/pricing";
 import { fetchEbayComps } from "@/lib/comps";
 import type { CompsSummary } from "@/lib/comps";
-import { publishToEbay, buildEbayInventoryItemPayload } from "@/lib/platforms/ebay";
+import { publishToEbay, buildEbayInventoryItemPayload, ebaySkuForItem } from "@/lib/platforms/ebay";
 import type { EbayPublishResult, EbayInventoryItemPayload } from "@/lib/platforms/ebay";
 import { publishToEtsy } from "@/lib/platforms/etsy";
 import type { EtsyPublishResult } from "@/lib/platforms/etsy";
@@ -133,7 +133,10 @@ export interface PipelineDeps {
   publishEbay(
     conn: PlatformConnection,
     listing: ListingInput,
-    imageUrls: string[]
+    imageUrls: string[],
+    // Deterministic item-derived SKU — retries reuse the same eBay
+    // inventory item/offer instead of duplicating the listing.
+    sku: string
   ): Promise<EbayPublishResult>;
   getEtsyConnection(userId: string): Promise<PlatformConnection | null>;
   publishEtsy(
@@ -568,7 +571,7 @@ async function publishStep(
 
   let published: EbayPublishResult;
   try {
-    published = await deps.publishEbay(conn, listing, [photoUrl]);
+    published = await deps.publishEbay(conn, listing, [photoUrl], ebaySkuForItem(itemId));
   } catch (err) {
     const message = err instanceof Error ? err.message : "publish failed";
     await deps.completeAttempt(attemptId, { status: "error", error: message });

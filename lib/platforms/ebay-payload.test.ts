@@ -72,6 +72,8 @@ describe("buildEbayOfferPayload", () => {
       sku: "snap-1",
       marketplaceId: "EBAY_US",
       format: "FIXED_PRICE",
+      // eBay's Inventory API accepts only GTC for fixed price — explicit.
+      listingDuration: "GTC",
       availableQuantity: 1,
       categoryId: "112233",
       merchantLocationKey: "loc-1",

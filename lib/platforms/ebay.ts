@@ -1151,6 +1151,9 @@ export interface EbayOfferPayload {
   // their account/country at connect time, never a global constant.
   marketplaceId: string;
   format: "FIXED_PRICE";
+  // Good 'Til Cancelled — the only duration the Inventory API accepts for
+  // fixed-price listings; explicit per eBay's publishing requirements.
+  listingDuration: "GTC";
   availableQuantity: number;
   categoryId: string;
   listingDescription: string;
@@ -1195,6 +1198,7 @@ export function buildEbayOfferPayload(
     sku,
     marketplaceId: marketplace.id,
     format: "FIXED_PRICE",
+    listingDuration: "GTC",
     availableQuantity: 1,
     categoryId,
     listingDescription: ebayHtmlDescription(input),
@@ -1222,10 +1226,52 @@ export function buildEbayOfferPayload(
   };
 }
 
+// Deterministic SKU per inventory item: retries of the same item reuse the
+// same eBay inventory item + offer instead of minting a timestamped SKU per
+// try (which duplicated listings on retry). ≤50 chars per eBay's SKU limit.
+export function ebaySkuForItem(inventoryItemId: string): string {
+  return `snap-${inventoryItemId}`;
+}
+
+// The seller's existing offer for this SKU on this marketplace, if any.
+async function findOfferBySku(
+  accessToken: string,
+  sku: string,
+  marketplaceId: string
+): Promise<{ offerId: string; status: string; listingId: string | null } | null> {
+  const res = await ebayFetch(
+    accessToken,
+    `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}`
+  );
+  // eBay 404s when the SKU has no offers at all.
+  if (res.status === 404) return null;
+  if (!res.ok) throw await ebayError(res, "offer lookup");
+  const data = (await res.json()) as {
+    offers?: Array<{
+      offerId?: string;
+      marketplaceId?: string;
+      status?: string;
+      listing?: { listingId?: string } | null;
+    }>;
+  };
+  const offer = (data.offers ?? []).find(
+    (o) => o.marketplaceId === marketplaceId && o.offerId
+  );
+  if (!offer?.offerId) return null;
+  return {
+    offerId: offer.offerId,
+    status: offer.status ?? "UNPUBLISHED",
+    listingId: offer.listing?.listingId ?? null,
+  };
+}
+
 export async function publishToEbay(
   connection: PlatformConnection,
   input: ListingInput,
-  imageUrls: string[]
+  imageUrls: string[],
+  // Deterministic, item-derived SKU (ebaySkuForItem). Passing the same SKU
+  // on retry is what makes the publish idempotent.
+  sku: string
 ): Promise<EbayPublishResult> {
   // Preflight BEFORE any eBay write: a photo URL that isn't publicly
   // fetchable (private storage bucket → 400/403/503) must fail the publish
@@ -1234,9 +1280,6 @@ export async function publishToEbay(
 
   const conn = await freshConnection(connection);
   const composed = composeListing("ebay", input);
-
-  // Unique SKU per publish keeps retries simple — no stale-offer reconciliation.
-  const sku = `snap-${Date.now()}`;
 
   // Location first: it decides the marketplace (and with it the category
   // tree, currency, policies, and Content-Language) for everything below.
@@ -1254,6 +1297,7 @@ export async function publishToEbay(
     conn.accessToken,
     `/sell/inventory/v1/inventory_item/${sku}`,
     {
+      // PUT by SKU is an idempotent upsert — a retry updates in place.
       method: "PUT",
       contentLanguage: marketplace.contentLanguage,
       body: buildEbayInventoryItemPayload(input, imageUrls),
@@ -1261,26 +1305,63 @@ export async function publishToEbay(
   );
   if (!itemRes.ok) throw await ebayError(itemRes, "inventory item creation");
 
-  const offerRes = await ebayFetch(conn.accessToken, "/sell/inventory/v1/offer", {
-    method: "POST",
-    contentLanguage: marketplace.contentLanguage,
-    body: buildEbayOfferPayload(
-      input,
-      sku,
-      categoryId,
-      merchantLocationKey,
-      policies,
-      marketplace,
-      // Meta was just refreshed by ensureEbayPolicies above.
-      fulfillmentPolicyIsAppDefault(conn)
-    ),
-  });
-  if (!offerRes.ok) throw await ebayError(offerRes, "offer creation");
-  const offer = (await offerRes.json()) as { offerId: string };
+  const offerPayload = buildEbayOfferPayload(
+    input,
+    sku,
+    categoryId,
+    merchantLocationKey,
+    policies,
+    marketplace,
+    // Meta was just refreshed by ensureEbayPolicies above.
+    fulfillmentPolicyIsAppDefault(conn)
+  );
+
+  // Retry safety: reuse this item's existing offer instead of creating a
+  // duplicate. Already published → return the live listing as-is.
+  let offerId: string;
+  const existing = await findOfferBySku(conn.accessToken, sku, marketplace.id);
+  if (existing) {
+    if (existing.status === "PUBLISHED" && existing.listingId) {
+      return {
+        url: listingUrl(existing.listingId),
+        listingId: existing.listingId,
+        offerId: existing.offerId,
+        sku,
+      };
+    }
+    const updateRes = await ebayFetch(
+      conn.accessToken,
+      `/sell/inventory/v1/offer/${existing.offerId}`,
+      {
+        method: "PUT",
+        contentLanguage: marketplace.contentLanguage,
+        body: offerPayload,
+      }
+    );
+    if (!updateRes.ok) throw await ebayError(updateRes, "offer update");
+    offerId = existing.offerId;
+  } else {
+    const offerRes = await ebayFetch(conn.accessToken, "/sell/inventory/v1/offer", {
+      method: "POST",
+      contentLanguage: marketplace.contentLanguage,
+      body: offerPayload,
+    });
+    if (offerRes.ok) {
+      offerId = ((await offerRes.json()) as { offerId: string }).offerId;
+    } else {
+      // Concurrent-create race: the offer now exists — adopt it.
+      const err = await ebayError(offerRes, "offer creation");
+      const raced = await findOfferBySku(conn.accessToken, sku, marketplace.id).catch(
+        () => null
+      );
+      if (!raced) throw err;
+      offerId = raced.offerId;
+    }
+  }
 
   const publishRes = await ebayFetch(
     conn.accessToken,
-    `/sell/inventory/v1/offer/${offer.offerId}/publish`,
+    `/sell/inventory/v1/offer/${offerId}/publish`,
     { method: "POST", contentLanguage: marketplace.contentLanguage, body: {} }
   );
   if (!publishRes.ok) {
@@ -1301,11 +1382,18 @@ export async function publishToEbay(
     throw err;
   }
   const published = (await publishRes.json()) as { listingId: string };
+  return {
+    url: listingUrl(published.listingId),
+    listingId: published.listingId,
+    offerId,
+    sku,
+  };
+}
 
-  const url = isProduction()
-    ? `https://www.ebay.com/itm/${published.listingId}`
-    : `https://sandbox.ebay.com/itm/${published.listingId}`;
-  return { url, listingId: published.listingId, offerId: offer.offerId, sku };
+function listingUrl(listingId: string): string {
+  return isProduction()
+    ? `https://www.ebay.com/itm/${listingId}`
+    : `https://sandbox.ebay.com/itm/${listingId}`;
 }
 
 // ─── Sale detection (order polling) ───────────────────────────────────────────

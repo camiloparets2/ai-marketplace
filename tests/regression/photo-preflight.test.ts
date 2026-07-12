@@ -112,9 +112,12 @@ describe("publishToEbay photo preflight (regression)", () => {
     });
 
     await expect(
-      publishToEbay(conn, listing, [
-        "https://xyz.supabase.co/storage/v1/object/public/listing-photos/x.jpg",
-      ])
+      publishToEbay(
+        conn,
+        listing,
+        ["https://xyz.supabase.co/storage/v1/object/public/listing-photos/x.jpg"],
+        "snap-item-1"
+      )
     ).rejects.toThrow(/publicly reachable/i);
 
     // Only the preflight touched the network — no eBay write happened.
