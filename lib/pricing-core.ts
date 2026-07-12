@@ -4,18 +4,24 @@
 // in lib/pricing.ts.
 //
 // Every price the pipeline sets is derived from a FLOOR the seller can't
-// lose money at:
+// lose money at. EXACT MODEL — the buyer pays shipping separately (the
+// offer's shippingCostOverrides charges them the same `ship` the seller
+// pays for the label, so those cancel), but eBay's final value fee applies
+// to the TOTAL the buyer pays (item price + shipping):
 //
-//   floor = smallest price where
-//           price - fees(price) - shipping - cost_basis >= min_margin(price)
+//   net(price) = price - feeRate*(price + ship) - feeFlat - cost_basis
+//   floor      = smallest price where net(price) >= min_margin(price)
 //
-// with fees(price) = feeRate * price + feeFlat and
-// min_margin(price) = max(minMarginFlat, minMarginPct * price).
+// with min_margin(price) = max(minMarginFlat, minMarginPct * price).
 //
 // Solving both margin branches:
-//   flat branch: price >= (cost + ship + feeFlat + minMarginFlat) / (1 - feeRate)
-//   pct  branch: price >= (cost + ship + feeFlat) / (1 - feeRate - minMarginPct)
+//   flat branch: price >= (cost + feeRate*ship + feeFlat + minMarginFlat) / (1 - feeRate)
+//   pct  branch: price >= (cost + feeRate*ship + feeFlat) / (1 - feeRate - minMarginPct)
 // floor = max of the two, rounded up to the cent.
+//
+// (The previous model folded 100% of `ship` into the floor — never a loss,
+// but it priced heavy-cheap items roughly a full shipping cost above market
+// while the buyer ALSO paid shipping at checkout.)
 //
 // ⚑ Defaults below are launch assumptions awaiting Camilo's confirmation —
 // see the flag table in docs/design/launch.md.
@@ -126,7 +132,13 @@ export function styleTo99(n: number): number {
  * $6.50 with free shipping). A null floor means "this item is not safe to
  * price or auto-publish until a shipping cost exists" — mirror of the
  * explicit assumedCost ⚑ pattern used for a missing cost basis: loud,
- * never silent.
+ * never silent. (Even in the exact model the fee-on-shipping term is
+ * unknowable without a shipping cost, and the offer builder refuses to
+ * publish without one anyway.)
+ *
+ * Shipping enters the floor only as feeRate * shippingCost: the buyer pays
+ * shipping at checkout (offer shippingCostOverrides), the label cancels it,
+ * and what remains is eBay's fee on that shipping revenue.
  */
 export function computeFloor(
   costBasis: number | null,
@@ -135,10 +147,11 @@ export function computeFloor(
 ): number | null {
   if (shippingCost === null) return null;
   const cost = costBasis ?? 0;
+  const feeOnShipping = d.feeRate * shippingCost;
   const flatBranch =
-    (cost + shippingCost + d.feeFlat + d.minMarginFlat) / (1 - d.feeRate);
+    (cost + feeOnShipping + d.feeFlat + d.minMarginFlat) / (1 - d.feeRate);
   const pctBranch =
-    (cost + shippingCost + d.feeFlat) / (1 - d.feeRate - d.minMarginPct);
+    (cost + feeOnShipping + d.feeFlat) / (1 - d.feeRate - d.minMarginPct);
   return roundUpCent(Math.max(flatBranch, pctBranch));
 }
 
@@ -207,7 +220,7 @@ export function decidePrice(
         (floor === null
           ? " noted." + noFloorNote
           : raised
-            ? `, raised to the $${floor.toFixed(2)} floor (cost + fees + shipping + minimum margin).`
+            ? `, raised to the $${floor.toFixed(2)} floor (cost + fees incl. on shipping + minimum margin).`
             : ` accepted — at or above the $${floor.toFixed(2)} floor.`) +
         costNote,
       inputs,

@@ -136,13 +136,15 @@ export function PricingPanel({
             <>
               Break-even floor unknown — without your item cost it&apos;s at least{" "}
               <span className="font-semibold text-gray-700">${floor.toFixed(2)}</span>{" "}
-              (fees {Math.round(PRICING_DEFAULTS.feeRate * 100)}% + shipping +
-              minimum margin). Add your cost for the real floor.
+              (fees {Math.round(PRICING_DEFAULTS.feeRate * 100)}% incl. on shipping +
+              minimum margin; the buyer pays shipping at checkout). Add your
+              cost for the real floor.
             </>
           ) : (
             <>
               Break-even floor <span className="font-semibold text-gray-700">${floor.toFixed(2)}</span>{" "}
-              — cost + fees ({Math.round(PRICING_DEFAULTS.feeRate * 100)}%) + shipping + minimum margin.
+              — cost + fees ({Math.round(PRICING_DEFAULTS.feeRate * 100)}%, incl. on shipping) +
+              minimum margin. The buyer pays shipping at checkout.
             </>
           )}
         </p>

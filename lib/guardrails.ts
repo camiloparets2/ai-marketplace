@@ -152,7 +152,7 @@ export function priceFloorGate(
     pass,
     reason: pass
       ? `price $${price.toFixed(2)} covers the $${floor.toFixed(2)} floor`
-      : `price $${price.toFixed(2)} is below the $${floor.toFixed(2)} floor (cost + fees + shipping + margin)`,
+      : `price $${price.toFixed(2)} is below the $${floor.toFixed(2)} floor (cost + fees incl. on shipping + margin)`,
   };
 }
 
