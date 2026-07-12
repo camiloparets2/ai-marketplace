@@ -59,10 +59,20 @@ export default function InventoryPage() {
   // Item id whose cost editor is open, and its in-progress value
   const [costEditor, setCostEditor] = useState<string>("");
   const [costValue, setCostValue] = useState<string>("");
-  // Lifecycle filter chip
+  // Lifecycle filter chip. Deep-linkable (?filter=draft) so the dashboard's
+  // "Finish N drafts" CTA lands directly on the drafts.
   const [filter, setFilter] = useState<
     "all" | "draft" | "review" | "listed" | "sold"
-  >("all");
+  >(() => {
+    if (typeof window === "undefined") return "all";
+    const fromUrl = new URLSearchParams(window.location.search).get("filter");
+    return fromUrl === "draft" ||
+      fromUrl === "review" ||
+      fromUrl === "listed" ||
+      fromUrl === "sold"
+      ? fromUrl
+      : "all";
+  });
 
   const load = useCallback(async () => {
     try {
