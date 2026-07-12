@@ -242,6 +242,73 @@ function stubPublishChain(): string[] {
   return paths;
 }
 
+describe("ebay API language headers (Sandbox 400: Invalid value for header Accept-Language)", () => {
+  it("sends BOTH Content-Language and Accept-Language, tracking the marketplace", async () => {
+    const headerLog: Array<{
+      url: string;
+      path: string;
+      headers: Record<string, string>;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const raw = String(url);
+        const path = raw.replace(/^https?:\/\/[^/]+/, "");
+        headerLog.push({
+          url: raw,
+          path,
+          headers: (init?.headers ?? {}) as Record<string, string>,
+        });
+        if (raw.includes("cdn.example")) return new Response(null, { status: 200 });
+        if (path.includes("get_item_aspects_for_category")) return jsonRes(aspectsBody);
+        if ((init?.method ?? "GET") === "PUT" && path.includes("/inventory_item/")) {
+          return new Response(null, { status: 204 });
+        }
+        if (path.includes("/offer?sku=")) return jsonRes({ offers: [] });
+        if ((init?.method ?? "GET") === "POST" && path.endsWith("/offer")) {
+          return jsonRes({ offerId: "off-1" }, 201);
+        }
+        if ((init?.method ?? "GET") === "POST" && path.includes("/publish")) {
+          return jsonRes({ listingId: "listing-1" });
+        }
+        return jsonRes({}, 500);
+      })
+    );
+
+    // A GERMAN seller: both headers must be de-DE, proving the language
+    // tracks the marketplace and is never a hardcoded en-US (and never left
+    // to an ambient runtime default, which eBay 400s with errorId 25709).
+    const deConn: PlatformConnection = {
+      ...conn,
+      meta: { ...conn.meta, marketplaceId: "EBAY_DE", currency: "EUR" },
+    };
+    await publishToEbay(
+      deConn,
+      {
+        ...baseListing,
+        specs: {
+          Type: "Over-Ear",
+          "Item Height": "8 in",
+          [EBAY_CATEGORY_SPEC_KEY]: "555",
+        },
+      },
+      ["https://cdn.example/p.jpg"],
+      ebaySkuForItem("item-1")
+    );
+
+    const itemPut = headerLog.find((c) => c.path.includes("/inventory_item/"));
+    expect(itemPut).toBeDefined();
+    expect(itemPut?.headers["Content-Language"]).toBe("de-DE");
+    expect(itemPut?.headers["Accept-Language"]).toBe("de-DE");
+
+    // Every eBay API call carries an EXPLICIT Accept-Language — nothing
+    // ambient (the photo-preflight HEAD to the CDN is not an eBay call).
+    for (const call of headerLog.filter((c) => !c.url.includes("cdn.example"))) {
+      expect(call.headers["Accept-Language"]).toBeTruthy();
+    }
+  });
+});
+
 describe("publishToEbay category override + aspect backstop", () => {
   const complete: ListingInput = {
     ...baseListing,

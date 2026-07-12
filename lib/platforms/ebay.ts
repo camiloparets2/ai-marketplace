@@ -255,14 +255,21 @@ async function ebayFetch(
   path: string,
   init: { method?: string; body?: unknown; contentLanguage?: string } = {}
 ): Promise<Response> {
+  const language = init.contentLanguage ?? "en-US";
   return fetch(`${apiBase()}${path}`, {
     method: init.method ?? "GET",
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
-      // Required by Inventory API write calls; must match the seller's
-      // marketplace (de-DE for EBAY_DE, en-GB for EBAY_GB, …).
-      "Content-Language": init.contentLanguage ?? "en-US",
+      // Content-Language is required by Inventory API write calls and must
+      // match the seller's marketplace (de-DE for EBAY_DE, en-GB for
+      // EBAY_GB, …). Accept-Language is pinned to the SAME value: when it's
+      // absent, whatever ambient default the runtime/proxy injects reaches
+      // eBay and gets rejected with 400 errorId 25709 "Invalid value for
+      // header Accept-Language" (hit live in Sandbox at
+      // createOrReplaceInventoryItem). Never leave it implicit.
+      "Content-Language": language,
+      "Accept-Language": language,
       Accept: "application/json",
     },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
