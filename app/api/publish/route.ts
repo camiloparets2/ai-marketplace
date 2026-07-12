@@ -32,8 +32,13 @@ import {
 import { publishToEtsy } from "@/lib/platforms/etsy";
 import { publishToShopify } from "@/lib/platforms/shopify";
 import { createPaymentLink } from "@/lib/stripe-link";
-import { authenticateRequest } from "@/lib/auth/guard";
-import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
+import { requireUser } from "@/lib/auth/guard";
+import {
+  checkRateLimit,
+  requestIdentity,
+  RATE_RULES,
+  RATE_LIMIT_UNAVAILABLE_MESSAGE,
+} from "@/lib/rate-limit";
 import { trackEvent } from "@/lib/telemetry";
 import {
   createInventoryItem,
@@ -114,22 +119,29 @@ function parseBody(raw: unknown): PublishBody | string {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // Session preferred; legacy beta key still allows the stateless targets
-  // (assist platforms + direct Stripe link). eBay/Etsy require a user because
-  // their connections are per-account.
-  const { authorized, user } = await authenticateRequest(req);
-  if (!authorized) {
+  // A signed-in user, always: every publish must be attributable to the
+  // account whose marketplace tokens and inventory it touches. (The legacy
+  // beta-key path that allowed anonymous assist/direct publishes is gone.)
+  const user = await requireUser();
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  const userId = user.id;
 
-  const allowed = await checkRateLimit(
+  const rate = await checkRateLimit(
     RATE_RULES.publish,
-    requestIdentity(req, user?.id ?? null)
+    requestIdentity(req, user.id)
   );
-  if (!allowed) {
+  if (rate === "limited") {
     return NextResponse.json(
       { error: "Too many publishes too fast — please wait a bit and try again." },
       { status: 429 }
+    );
+  }
+  if (rate === "unavailable") {
+    return NextResponse.json(
+      { error: RATE_LIMIT_UNAVAILABLE_MESSAGE },
+      { status: 503 }
     );
   }
 
@@ -188,16 +200,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         case "ebay":
         case "etsy":
         case "shopify": {
-          // Marketplace publishing is user-scoped; a beta key alone can't
-          // reach anyone's tokens.
-          if (!user) {
-            return {
-              platform: target,
-              status: "not_connected",
-              connectUrl: "/login",
-            };
-          }
-          const conn = await getConnection(user.id, target);
+          const conn = await getConnection(userId, target);
           if (!conn) {
             return {
               platform: target,
@@ -311,41 +314,39 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // everywhere later. Best-effort: an inventory write failure must never
   // undo a publish that already succeeded on the marketplaces.
   let inventoryItemId: string | null = null;
-  if (user) {
-    try {
-      const photoUrl = await hostedUrl().catch(() => null);
-      inventoryItemId = await createInventoryItem(user.id, listing, photoUrl);
+  try {
+    const photoUrl = await hostedUrl().catch(() => null);
+    inventoryItemId = await createInventoryItem(user.id, listing, photoUrl);
 
-      for (const record of liveRecords) {
-        await recordLiveListing(user.id, inventoryItemId, record, listing.price);
-      }
-      if (liveRecords.length > 0) await markItemListed(inventoryItemId);
-
-      for (const result of results) {
-        await recordPublishAttempt(
-          user.id,
-          inventoryItemId,
-          result.platform,
-          result.status,
-          result.status === "error" ? result.message : undefined
-        );
-      }
-    } catch (err) {
-      console.error("[publish] inventory recording failed:", err);
+    for (const record of liveRecords) {
+      await recordLiveListing(user.id, inventoryItemId, record, listing.price);
     }
+    if (liveRecords.length > 0) await markItemListed(inventoryItemId);
+
+    for (const result of results) {
+      await recordPublishAttempt(
+        user.id,
+        inventoryItemId,
+        result.platform,
+        result.status,
+        result.status === "error" ? result.message : undefined
+      );
+    }
+  } catch (err) {
+    console.error("[publish] inventory recording failed:", err);
   }
 
   // Funnel: one event per publish run, plus one per failed target so
   // channel-level breakage is queryable.
   const liveCount = results.filter((r) => r.status === "live").length;
-  await trackEvent(user?.id ?? null, "published", {
+  await trackEvent(user.id, "published", {
     targets,
     liveCount,
     inventoryItemId,
   });
   for (const result of results) {
     if (result.status === "error") {
-      await trackEvent(user?.id ?? null, "publish_error", {
+      await trackEvent(user.id, "publish_error", {
         platform: result.platform,
         message: result.message,
       });

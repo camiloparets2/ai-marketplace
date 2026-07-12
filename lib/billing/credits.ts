@@ -7,9 +7,10 @@
 //   - every spend writes a usage_ledger row keyed by a unique request id
 //   - refunds are idempotent: the ledger row flips consumed → refunded once
 //
-// Fail-open transition rule: if the billing tables don't exist yet (migration
-// not applied), gating is skipped with a logged warning rather than bricking
-// the product. Verify the migration before charging anyone (TODOS.md).
+// FAIL-CLOSED: when the billing backend is unavailable, spendCredits returns
+// { ok: false, reason: "unavailable" } and the caller must respond with a
+// retriable 503 WITHOUT performing the paid work. An unmetered path to
+// Claude is worse than a brief outage.
 
 import { getSupabaseAdmin } from "@/lib/connections";
 import {
@@ -29,7 +30,8 @@ export interface CreditStatus {
 export type SpendResult =
   | { ok: true; remaining: number }
   | { ok: false; reason: "no_credits"; status: CreditStatus }
-  | { ok: false; reason: "unavailable" }; // billing infra not ready → fail open
+  // Billing backend unreachable — callers fail closed (retriable 503).
+  | { ok: false; reason: "unavailable" };
 
 interface GrantRow {
   credits_granted: number;
@@ -150,7 +152,7 @@ export async function spendCredits(
     const row = rows[0];
     return { ok: true, remaining: row.credits_granted - row.credits_used };
   } catch (err) {
-    console.warn("[credits] spend unavailable — failing open:", err);
+    console.error("[credits] spend unavailable — blocking the paid call:", err);
     return { ok: false, reason: "unavailable" };
   }
 }

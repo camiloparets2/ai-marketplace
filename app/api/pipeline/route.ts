@@ -12,7 +12,12 @@ import type { AcceptedMimeType } from "@/lib/image-validation";
 import { VisionError } from "@/lib/ai/vision";
 import { runPipeline } from "@/lib/pipeline";
 import { requireUser } from "@/lib/auth/guard";
-import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
+import {
+  checkRateLimit,
+  requestIdentity,
+  RATE_RULES,
+  RATE_LIMIT_UNAVAILABLE_MESSAGE,
+} from "@/lib/rate-limit";
 import { spendCredits, refundCredits } from "@/lib/billing/credits";
 import { CREDIT_COST_AI_EXTRACTION } from "@/lib/billing/plans";
 
@@ -57,14 +62,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const allowed = await checkRateLimit(
+  const rate = await checkRateLimit(
     RATE_RULES.publish,
     requestIdentity(req, user.id)
   );
-  if (!allowed) {
+  if (rate === "limited") {
     return NextResponse.json(
       { error: "Too many listings too fast — please wait a bit and try again." },
       { status: 429 }
+    );
+  }
+  if (rate === "unavailable") {
+    return NextResponse.json(
+      { error: RATE_LIMIT_UNAVAILABLE_MESSAGE },
+      { status: 503 }
     );
   }
 

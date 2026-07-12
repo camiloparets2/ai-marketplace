@@ -266,11 +266,7 @@ export default function Page() {
       })
       .catch(() => undefined);
 
-    void fetch("/api/connections", {
-      headers: {
-        "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
-      },
-    })
+    void fetch("/api/connections")
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { connections?: Record<ApiPlatform, boolean> } | null) => {
         if (!data?.connections) return;
@@ -340,10 +336,7 @@ export default function Page() {
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: base64, mimeType }),
       });
 
@@ -435,10 +428,7 @@ export default function Page() {
     try {
       const res = await fetch("/api/publish", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.NEXT_PUBLIC_APP_INTERNAL_BETA_KEY ?? "",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           listing: {
             title,

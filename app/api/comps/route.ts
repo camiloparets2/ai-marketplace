@@ -9,7 +9,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
 import { getConnection } from "@/lib/connections";
 import { fetchEbayComps } from "@/lib/comps";
-import { checkRateLimit, requestIdentity, RATE_RULES } from "@/lib/rate-limit";
+import {
+  checkRateLimit,
+  requestIdentity,
+  RATE_RULES,
+  RATE_LIMIT_UNAVAILABLE_MESSAGE,
+} from "@/lib/rate-limit";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const user = await requireUser();
@@ -17,12 +22,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const allowed = await checkRateLimit(
+  const rate = await checkRateLimit(
     RATE_RULES.analyze,
     requestIdentity(req, user.id)
   );
-  if (!allowed) {
+  if (rate === "limited") {
     return NextResponse.json({ error: "Too many lookups" }, { status: 429 });
+  }
+  if (rate === "unavailable") {
+    return NextResponse.json(
+      { error: RATE_LIMIT_UNAVAILABLE_MESSAGE },
+      { status: 503 }
+    );
   }
 
   const q = req.nextUrl.searchParams.get("q")?.trim();
