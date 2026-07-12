@@ -67,6 +67,13 @@ function authBase(): string {
     : "https://auth.sandbox.ebay.com";
 }
 
+// The Identity API lives on the apiz host, not api.
+function identityApiBase(): string {
+  return isProduction()
+    ? "https://apiz.ebay.com"
+    : "https://apiz.sandbox.ebay.com";
+}
+
 function credentials(): { clientId: string; clientSecret: string; ruName: string } {
   const clientId = process.env.EBAY_CLIENT_ID;
   const clientSecret = process.env.EBAY_CLIENT_SECRET;
@@ -88,6 +95,10 @@ const OAUTH_SCOPES = [
   // Order polling (sale detection). Accounts connected before this scope was
   // added must reconnect for sales sync to work.
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
+  // Immutable seller identity (userId) — required so account-deletion
+  // notifications can match and erase the right connection. Accounts
+  // connected before this scope must reconnect (needsReconnect surfaces it).
+  "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
 ].join(" ");
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────
@@ -159,7 +170,11 @@ export async function mintEbayAppToken(
 }
 
 // Returns an unowned token bundle — the OAuth callback stamps the signed-in
-// user's id before saving.
+// user's id before saving. The connection is refused outright when eBay's
+// Identity API can't supply the immutable userId: without it, an
+// account-deletion notification could never be matched to this connection
+// (an eBay compliance requirement), so an unidentifiable connection is
+// worse than no connection.
 export async function ebayExchangeCode(code: string): Promise<UnownedConnection> {
   const { ruName } = credentials();
   const token = await tokenRequest(
@@ -169,12 +184,42 @@ export async function ebayExchangeCode(code: string): Promise<UnownedConnection>
       redirect_uri: ruName,
     })
   );
+
+  const identityRes = await fetch(
+    `${identityApiBase()}/commerce/identity/v1/user/`,
+    {
+      headers: {
+        Authorization: `Bearer ${token.access_token}`,
+        Accept: "application/json",
+      },
+    }
+  );
+  if (!identityRes.ok) {
+    throw new Error(
+      `eBay identity lookup failed (${identityRes.status}): ${await identityRes.text()}`
+    );
+  }
+  const identity = (await identityRes.json()) as {
+    userId?: string;
+    username?: string;
+    registrationMarketplaceId?: string;
+  };
+  if (!identity.userId) {
+    throw new Error("eBay identity lookup did not return an immutable user id.");
+  }
+
   return {
     platform: "ebay",
     accessToken: token.access_token,
     refreshToken: token.refresh_token ?? null,
     expiresAt: Date.now() + token.expires_in * 1000,
-    meta: {},
+    meta: {
+      ebayUserId: identity.userId,
+      ...(identity.username ? { ebayUsername: identity.username } : {}),
+      ...(identity.registrationMarketplaceId
+        ? { ebayRegistrationMarketplaceId: identity.registrationMarketplaceId }
+        : {}),
+    },
   };
 }
 

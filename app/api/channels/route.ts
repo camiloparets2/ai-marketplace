@@ -4,7 +4,7 @@
 
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
-import { getConnection, getSupabaseAdmin, isExpired } from "@/lib/connections";
+import { getConnection, getSupabaseAdmin, needsReconnect } from "@/lib/connections";
 import { API_PLATFORMS } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
 import { detectEbayReadiness } from "@/lib/platforms/ebay";
@@ -34,17 +34,17 @@ export async function GET(): Promise<NextResponse> {
   for (const platform of API_PLATFORMS) {
     let connected = false;
     let accountLabel: string | null = null;
-    let needsReconnect = false;
+    let reconnectNeeded = false;
     let ebayReadiness: EbayReadiness | undefined;
     try {
       const conn = await getConnection(user.id, platform);
       connected = conn !== null;
       accountLabel =
         conn?.meta.shop ?? (conn?.meta.shopId ? `shop ${conn.meta.shopId}` : null);
-      // Expired with no refresh token → the seller must reconnect.
-      const canRefresh = conn?.refreshToken != null && conn.refreshToken !== "";
-      needsReconnect = conn !== null && isExpired(conn) && !canRefresh;
-      if (platform === "ebay" && conn && !needsReconnect) {
+      // Dead token, or an eBay connection predating identity capture
+      // (deletion compliance) → the seller must reconnect.
+      reconnectNeeded = conn !== null && needsReconnect(conn);
+      if (platform === "ebay" && conn && !reconnectNeeded) {
         ebayReadiness = await detectEbayReadiness(conn).catch(() => undefined);
       }
     } catch {
@@ -69,7 +69,7 @@ export async function GET(): Promise<NextResponse> {
       connected,
       accountLabel,
       lastSyncedAt,
-      needsReconnect,
+      needsReconnect: reconnectNeeded,
       ...(ebayReadiness ? { ebayReadiness } : {}),
     });
   }
