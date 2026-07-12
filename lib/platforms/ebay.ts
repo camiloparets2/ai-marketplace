@@ -1541,12 +1541,27 @@ export async function fetchEbaySales(
 ): Promise<EbaySale[]> {
   const conn = await freshConnection(connection);
   const filter = encodeURIComponent(`creationdate:[${sinceIso}..]`);
-  const res = await ebayFetch(
-    conn.accessToken,
-    `/sell/fulfillment/v1/order?filter=${filter}&limit=50`
-  );
-  if (!res.ok) throw await ebayError(res, "order lookup");
-  return extractEbaySales(await res.json());
+
+  // PAGINATE: a busy seller (or a long catch-up window) can exceed one page,
+  // and a truncated first page means silently missed sales → oversell. eBay
+  // caps limit at 200; `total` bounds the walk, with a hard page ceiling as
+  // a runaway guard.
+  const limit = 200;
+  const sales: EbaySale[] = [];
+  let offset = 0;
+  for (let page = 0; page < 25; page++) {
+    const res = await ebayFetch(
+      conn.accessToken,
+      `/sell/fulfillment/v1/order?filter=${filter}&limit=${limit}&offset=${offset}`
+    );
+    if (!res.ok) throw await ebayError(res, "order lookup");
+    const payload = (await res.json()) as OrdersPayload & { total?: number };
+    sales.push(...extractEbaySales(payload));
+    const total = payload.total ?? 0;
+    offset += limit;
+    if (offset >= total) break;
+  }
+  return sales;
 }
 
 // Ends a live eBay listing (sold elsewhere / manual delist) by withdrawing

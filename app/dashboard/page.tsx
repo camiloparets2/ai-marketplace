@@ -19,6 +19,7 @@ interface DashboardData {
   soldWithCostCount: number;
   soldCount: number;
   endFailedCount: number;
+  oversoldCount: number;
 }
 
 function Tile({
@@ -53,6 +54,14 @@ function Tile({
 
 // The single most valuable thing to do right now, given current state.
 function nextBestAction(d: DashboardData): { text: string; href: string } {
+  if (d.oversoldCount > 0) {
+    // A buyer paid for an item that sold elsewhere first. The app never
+    // auto-cancels orders — this needs the seller, urgently.
+    return {
+      text: `URGENT: ${d.oversoldCount} order${d.oversoldCount === 1 ? "" : "s"} sold after the item ran out — cancel/refund on the marketplace now`,
+      href: "/inventory?filter=sold",
+    };
+  }
   if (d.endFailedCount > 0) {
     return {
       text: `Fix ${d.endFailedCount} listing${d.endFailedCount === 1 ? "" : "s"} that failed to delist — oversell risk`,
@@ -125,6 +134,15 @@ export default function DashboardPage() {
             </Link>
 
             {/* Attention */}
+            {data.oversoldCount > 0 && (
+              <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 font-medium">
+                🚨 {data.oversoldCount} simultaneous sale
+                {data.oversoldCount === 1 ? "" : "s"} need manual resolution: a
+                buyer paid on one marketplace after the item sold on another.
+                Cancel or refund the extra order on the marketplace — we never
+                cancel orders automatically.
+              </p>
+            )}
             {data.endFailedCount > 0 && (
               <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
                 ⚠ {data.endFailedCount} listing
