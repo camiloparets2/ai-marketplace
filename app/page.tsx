@@ -584,6 +584,13 @@ export default function Page() {
               <span className="text-xs">JPEG · PNG · WebP · HEIC up to 5 MB</span>
             </button>
 
+            {/* Capture nudge — a readable brand tag is what lets the AI
+                assert a brand instead of downgrading to "Unbranded". */}
+            <p className="text-xs text-gray-500 text-center -mt-2">
+              Best shot: front · back · <span className="font-medium">brand tag or label close-up</span>.
+              A readable tag means better identification and stronger price comps.
+            </p>
+
             {/* Marketplace connections — connect once, publish forever */}
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex flex-col gap-2">
               <p className="text-sm font-medium text-gray-700">
