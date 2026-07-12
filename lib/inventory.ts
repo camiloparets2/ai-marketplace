@@ -76,6 +76,10 @@ export interface DraftItemInput {
   // 0-1 from lib/ai/vision.ts
   idConfidence: number;
   costOfGoods: number | null;
+  // Estimated shipping cost from extraction; null = MANUAL_ESTIMATE_NEEDED.
+  // Persisted so republishing a draft never re-runs AI — and never silently
+  // downgrades a known shipping cost to "unknown".
+  shippingCost: number | null;
 }
 
 export async function createDraftItem(
@@ -97,6 +101,7 @@ export async function createDraftItem(
       defects: input.defects,
       id_confidence: input.idConfidence,
       cost_of_goods: input.costOfGoods,
+      shipping_cost: input.shippingCost,
       photo_url: photoUrl,
     })
     .select("id")
@@ -128,7 +133,8 @@ export async function setItemReview(
   if (error) throw new Error(`set review failed: ${error.message}`);
 }
 
-/** Full item detail — what the review queue and approval publish need. */
+/** Full item detail — what the review queue, approval publish, draft
+ *  publish/retry, and the item edit view need. */
 export interface ItemDetailRow {
   id: string;
   title: string;
@@ -140,6 +146,8 @@ export interface ItemDetailRow {
   specs: Record<string, string>;
   photo_url: string | null;
   price: number | null;
+  cost_of_goods: number | null;
+  shipping_cost: number | null;
   status: "draft" | "review" | "listed" | "sold" | "archived";
   review_reasons: Array<{ gate: string; reason: string }>;
 }
@@ -151,7 +159,7 @@ export async function getItemDetail(
   const { data, error } = await getSupabaseAdmin()
     .from("inventory_items")
     .select(
-      "id, title, brand, model, upc, condition, category, specs, photo_url, price, status, review_reasons"
+      "id, title, brand, model, upc, condition, category, specs, photo_url, price, cost_of_goods, shipping_cost, status, review_reasons"
     )
     .eq("id", itemId)
     .eq("user_id", userId)
@@ -226,6 +234,7 @@ export async function createInventoryItem(
       specs: listing.specs,
       photo_url: photoUrl,
       price: listing.price,
+      shipping_cost: listing.shippingCost,
     })
     .select("id")
     .single<{ id: string }>();

@@ -105,6 +105,8 @@ function fakeDeps(over: Partial<PipelineDeps> = {}): PipelineDeps {
       specs: { Color: "Black" },
       photo_url: "https://cdn.example/p.jpg",
       price: 94.99,
+      cost_of_goods: 40,
+      shipping_cost: 16.1,
       status: "review",
       review_reasons: [{ gate: "confidence", reason: "low" }],
     }),
@@ -127,6 +129,9 @@ describe("runPipeline — happy path (sandbox)", () => {
         defects: ["light scuff on right earcup"],
         idConfidence: 0.85,
         costOfGoods: 40,
+        // Persisted so a later republish never re-runs AI or loses the
+        // shipping estimate.
+        shippingCost: 16.1,
       }),
       "https://cdn.example/p.jpg"
     );
@@ -412,6 +417,18 @@ describe("approveAndPublish — the review queue's human override", () => {
     );
     expect(deps.publishEbay).toHaveBeenCalled();
     if (result.ok) expect(result.publish.status).toBe("live");
+  });
+
+  it("publishes with the item's STORED shipping estimate — never a silent null", async () => {
+    // The old code hardcoded shippingCost: null on approval, which the money
+    // rule (unknown shipping ≠ $0) now refuses at the eBay payload builder.
+    const deps = fakeDeps();
+    await approveAndPublish("user-1", "item-1", null, deps);
+    expect(deps.publishEbay).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ shippingCost: 16.1 }),
+      expect.anything()
+    );
   });
 
   it("records a manual price override in price_history", async () => {

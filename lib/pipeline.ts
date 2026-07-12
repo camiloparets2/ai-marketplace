@@ -220,6 +220,7 @@ export async function runPipeline(
       defects: identified.defects,
       idConfidence: identified.confidence,
       costOfGoods: input.costBasis,
+      shippingCost: extraction.estimatedShippingCost,
     },
     photoUrl
   );
@@ -348,7 +349,21 @@ export async function approveAndPublish(
   if (!released) return { ok: false, error: "Item is not awaiting review" };
   await deps.audit(userId, itemId, "review_approve", null, { price });
 
-  const listing: ListingInput = {
+  const publish = await publishStep(
+    userId,
+    itemId,
+    listingFromItem(item, price),
+    item.photo_url,
+    item.photo_url === null ? "no stored photo for this item" : null,
+    deps
+  );
+  return { ok: true, publish };
+}
+
+// Rebuild the publishable listing from what the draft already stored — the
+// republish path must never need a fresh AI extraction (or a credit).
+function listingFromItem(item: ItemDetailRow, price: number): ListingInput {
+  return {
     title: item.title,
     brand: item.brand,
     model: item.model,
@@ -359,18 +374,10 @@ export async function approveAndPublish(
     category: item.category ?? "",
     specs: item.specs ?? {},
     price,
-    shippingCost: null,
+    // The stored estimate — null only when extraction said
+    // MANUAL_ESTIMATE_NEEDED and the seller hasn't entered one yet.
+    shippingCost: item.shipping_cost,
   };
-
-  const publish = await publishStep(
-    userId,
-    itemId,
-    listing,
-    item.photo_url,
-    item.photo_url === null ? "no stored photo for this item" : null,
-    deps
-  );
-  return { ok: true, publish };
 }
 
 // The optional Etsy leg. Etsy has no sandbox environment, so a real Etsy
