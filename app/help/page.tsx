@@ -82,17 +82,24 @@ export default function HelpPage() {
           </p>
         </Section>
 
-        <Section title="Never oversell — how sync works">
+        <Section title="Inventory sync — what it does and doesn't guarantee">
           <p>
             Every published item lives in your{" "}
             <Link href="/inventory" className="text-blue-600 hover:underline">
               Inventory
             </Link>
-            . When it sells anywhere, every other listing is ended
-            automatically: eBay, Etsy, and Shopify sales are detected by
-            polling; direct-link sales sync instantly via Stripe. Sales on
-            Facebook/OfferUp: tap <strong>Mark sold</strong> and everything
-            else is delisted for you.
+            . When a sale is detected, other listings for that item are ended
+            for you: eBay sales arrive via signed eBay notifications plus a
+            daily polling sweep; direct-link sales sync via Stripe webhooks.
+            Sales on Facebook/OfferUp: tap <strong>Mark sold</strong> and the
+            rest is delisted for you.
+          </p>
+          <p>
+            <strong>Honest limitation:</strong> sync is monitored, not
+            instantaneous. If two buyers purchase the same item on different
+            channels within the detection window, one order will need a
+            cancellation or refund — the dashboard flags this urgently, and
+            Snap to List never cancels an order on your behalf.
           </p>
           <p>
             A red <strong>⚠</strong> chip on a listing means a delist failed
