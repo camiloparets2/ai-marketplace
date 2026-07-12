@@ -49,6 +49,11 @@ export interface IdentifiedItem {
 // existing imports keep working.
 export { overallConfidence } from "@/lib/ai/confidence";
 import { overallConfidence } from "@/lib/ai/confidence";
+import {
+  applyBrandGuard,
+  foldAspectsIntoSpecs,
+  BRAND_DOWNGRADE_CONFIDENCE_CAP,
+} from "@/lib/ai/brand-guard";
 
 // ─── The Vision call ──────────────────────────────────────────────────────────
 
@@ -58,6 +63,13 @@ export const VISION_PROMPT = [
   "For dimensions and weight, use visual cues and reference objects if visible.",
   "Be precise about model numbers, UPCs, and technical specifications —",
   "accuracy prevents buyer returns on high-ticket items.",
+  "BRAND: only report a brand you can actually READ in the photo — on a sewn",
+  "tag, sticker, product label, or printed logo — and record where you read",
+  "it in brandSource. NEVER infer a brand from styling, silhouette, or",
+  "quality; if no brand text is readable, set brand to null and brandSource",
+  "to 'none'. Listing an invented brand risks counterfeit takedowns.",
+  "Also extract material, colors, size (and its US/UK/EU size system),",
+  "style, and pattern when visible — buyers filter on these item specifics.",
   "List every visible defect honestly — scratches, dents, stains, missing",
   "parts — an empty defect list must mean the item truly looks flawless.",
   "Always recommend an asking price from the item's typical resale value in",
@@ -160,14 +172,32 @@ export async function identifyItem(
     );
   }
 
-  const extraction = toolBlock.input as ExtractionResult;
-  // Normalise the price fields a degraded response might omit: downstream
-  // code (and the review UI's editable price) relies on null, not undefined.
-  extraction.suggestedPrice ??= null;
-  extraction.priceRationale ??= null;
+  const raw = toolBlock.input as ExtractionResult;
+  // Normalise fields a degraded response might omit: downstream code (and
+  // the review UI's editable price) relies on null, not undefined. An
+  // unsourced brand claim counts as "inferred" — the guard downgrades it.
+  raw.suggestedPrice ??= null;
+  raw.priceRationale ??= null;
+  raw.brandSource ??= raw.brand ? "inferred" : "none";
+  raw.material ??= null;
+  raw.colorPrimary ??= null;
+  raw.colorSecondary ??= null;
+  raw.size ??= null;
+  raw.sizeSystem ??= null;
+  raw.style ??= null;
+  raw.pattern ??= null;
+  raw.specs ??= {};
+
+  // Brand guard: never assert a brand that wasn't readable in the photo.
+  // A downgrade caps overall confidence below the auto-post bar → review.
+  const { extraction: guarded, downgraded } = applyBrandGuard(raw);
+  const extraction = foldAspectsIntoSpecs(guarded);
+  const confidence = downgraded
+    ? Math.min(overallConfidence(extraction), BRAND_DOWNGRADE_CONFIDENCE_CAP)
+    : overallConfidence(extraction);
   return {
     extraction,
-    confidence: overallConfidence(extraction),
+    confidence,
     defects: extraction.defects ?? [],
   };
 }
