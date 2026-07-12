@@ -40,6 +40,7 @@ import {
   marketplaceForCountry,
   marketplaceById,
   sellerRegistrationUrl,
+  domesticShippingCandidates,
   DEFAULT_EBAY_MARKETPLACE,
 } from "@/lib/platforms/ebay-marketplaces";
 import type { EbayMarketplace } from "@/lib/platforms/ebay-marketplaces";
@@ -764,9 +765,18 @@ export interface EbayFulfillmentPolicyPayload {
       shippingCarrierCode: string;
       shippingServiceCode: string;
       freeShipping: boolean;
+      // REQUIRED by eBay for a buyer-paid (freeShipping:false) flat-rate
+      // service — omitting it triggers "Please select a valid shipping
+      // service" (20403). A positive placeholder; the offer's
+      // shippingCostOverrides sets the real per-listing amount.
+      shippingCost?: { value: string; currency: string };
     }>;
   }>;
 }
+
+// Never-silently-free placeholder when a marketplace defines a service but no
+// explicit baseline (money rule: a buyer-paid flat-rate service is never $0).
+const DEFAULT_SHIPPING_COST_BASELINE = 9.99;
 
 // Name doubles as the marker that a detected policy is OUR default — the
 // per-offer shipping-cost override only ever applies to this policy, never
@@ -774,8 +784,19 @@ export interface EbayFulfillmentPolicyPayload {
 export const DEFAULT_FULFILLMENT_POLICY_NAME = "Snap to List default shipping";
 
 export function buildDefaultFulfillmentPolicy(
-  marketplace: EbayMarketplace
+  marketplace: EbayMarketplace,
+  // Which domestic shipping service to write:
+  //   undefined → the marketplace's PRIMARY service (back-compat default),
+  //   a service → use exactly that candidate (fallback retries pass this),
+  //   null      → handling-time-only, NO shipping service (final degradation;
+  //               the seller picks a service on eBay).
+  service:
+    | { carrierCode: string; serviceCode: string }
+    | null
+    | undefined = undefined
 ): EbayFulfillmentPolicyPayload {
+  const chosen =
+    service === undefined ? marketplace.defaultShippingService ?? null : service;
   return {
     name: DEFAULT_FULFILLMENT_POLICY_NAME,
     marketplaceId: marketplace.id,
@@ -783,13 +804,14 @@ export function buildDefaultFulfillmentPolicy(
     handlingTime: { value: 3, unit: "DAY" },
     // Buyer-paid shipping, NEVER free by default: a silent free-shipping
     // policy written to a real seller's account makes the seller absorb an
-    // uncosted bill (the $6.50 concrete-bag bug). The per-listing amount the
-    // buyer pays comes from the offer's shippingCostOverrides (priority 1
-    // matches this service's sortOrder). Free shipping stays a deliberate
-    // opt-in on eBay's policy manager. Marketplaces without a vetted service
-    // code get a policy with handling time only — the seller picks a service
-    // on eBay.
-    ...(marketplace.defaultShippingService
+    // uncosted bill (the $6.50 concrete-bag bug). freeShipping stays false and
+    // a POSITIVE baseline shippingCost is required (eBay rejects a buyer-paid
+    // flat-rate service with no cost). The real per-listing amount the buyer
+    // pays comes from the offer's shippingCostOverrides (priority 1 matches
+    // this service's sortOrder). Free shipping stays a deliberate opt-in on
+    // eBay's policy manager. `chosen === null` → handling time only, and the
+    // seller picks a service on eBay.
+    ...(chosen
       ? {
           shippingOptions: [
             {
@@ -798,11 +820,16 @@ export function buildDefaultFulfillmentPolicy(
               shippingServices: [
                 {
                   sortOrder: 1,
-                  shippingCarrierCode:
-                    marketplace.defaultShippingService.carrierCode,
-                  shippingServiceCode:
-                    marketplace.defaultShippingService.serviceCode,
+                  shippingCarrierCode: chosen.carrierCode,
+                  shippingServiceCode: chosen.serviceCode,
                   freeShipping: false,
+                  shippingCost: {
+                    value: (
+                      marketplace.shippingCostBaseline ??
+                      DEFAULT_SHIPPING_COST_BASELINE
+                    ).toFixed(2),
+                    currency: marketplace.currency,
+                  },
                 },
               ],
             },
@@ -924,6 +951,93 @@ async function createPolicy(
   throw err;
 }
 
+// eBay returns 400 "Please select a valid shipping service." (errorId 20403)
+// for BOTH a service code the marketplace/sandbox doesn't accept AND a
+// buyer-paid FLAT_RATE service missing its shippingCost — the text is
+// misleading, so match the service/cost signal broadly and retry the next
+// candidate code rather than trusting the wording.
+function isShippingServiceRejection(status: number, detail: string): boolean {
+  return (
+    status === 400 &&
+    /shipping\s+service|shipping\s+cost|20403/i.test(detail)
+  );
+}
+
+const FULFILLMENT_SPEC = POLICY_KINDS[0];
+
+/**
+ * Create the default fulfillment policy WITHOUT hardcoding a single shipping
+ * service. Tries the marketplace's vetted domestic services in order; on a
+ * shipping-service rejection it falls to the next code, and if none is
+ * accepted it degrades to a handling-time-only policy (valid — the seller
+ * then picks a service on eBay) rather than hard-failing the whole setup.
+ * `appDefault` is always true (it is our named default, service or not).
+ */
+export async function createFulfillmentPolicy(
+  accessToken: string,
+  marketplace: EbayMarketplace
+): Promise<{ id: string; appDefault: boolean }> {
+  const candidates = domesticShippingCandidates(marketplace);
+  // Each vetted service in order, then `null` = the handling-time-only
+  // degradation as the last resort.
+  const attempts: Array<{ carrierCode: string; serviceCode: string } | null> =
+    candidates.length > 0 ? [...candidates, null] : [null];
+
+  let lastErr: Error | null = null;
+  for (const service of attempts) {
+    const res = await ebayFetch(
+      accessToken,
+      "/sell/account/v1/fulfillment_policy",
+      {
+        method: "POST",
+        contentLanguage: marketplace.contentLanguage,
+        body: buildDefaultFulfillmentPolicy(marketplace, service),
+      }
+    );
+    if (res.ok) {
+      const data = (await res.json()) as Record<string, string | undefined>;
+      const id = data.fulfillmentPolicyId;
+      if (!id) {
+        throw new Error("eBay fulfillment_policy creation returned no policy id");
+      }
+      if (service === null && candidates.length > 0) {
+        console.warn(
+          `[ebay] no vetted domestic shipping service was accepted for ${marketplace.id}; created a handling-time-only default fulfillment policy — the seller must add a shipping service in eBay's Business Policies manager before the listing can go live.`
+        );
+      }
+      return { id, appDefault: true };
+    }
+
+    const detail = parseEbayErrorDetail(await res.text());
+    if (isNotEligibleDetail(res.status, detail)) {
+      throw new EbaySellerSetupError("not_registered");
+    }
+    lastErr = new Error(
+      `eBay fulfillment_policy creation failed (${res.status}): ${detail}`
+    );
+    // Only a shipping-service rejection is worth retrying with the next code;
+    // for the final (handling-time-only) attempt there is no next code.
+    if (isShippingServiceRejection(res.status, detail) && service !== null) {
+      continue;
+    }
+    // Not retryable (or the degraded attempt failed): a concurrent create may
+    // have won the race — adopt the existing policy before giving up.
+    const existing = await listFirstPolicy(
+      accessToken,
+      FULFILLMENT_SPEC,
+      marketplace.id
+    ).catch(() => null);
+    if (existing) {
+      return {
+        id: existing.id,
+        appDefault: existing.name === DEFAULT_FULFILLMENT_POLICY_NAME,
+      };
+    }
+    throw lastErr;
+  }
+  throw lastErr ?? new Error("eBay fulfillment_policy creation failed");
+}
+
 /**
  * Resolve the three business-policy ids for the seller's marketplace:
  * env overrides → connection meta → detect on eBay → remediate (opt into
@@ -988,12 +1102,21 @@ export async function ensureEbayPolicies(
           sellerRegistrationUrl(marketplace)
         );
       }
-      const id = existing?.id ?? (await createPolicy(token, spec, marketplace));
-      resolved[spec.idKey] = id;
-      if (spec.kind === "fulfillment_policy") {
-        fulfillmentIsAppDefault = existing
-          ? existing.name === DEFAULT_FULFILLMENT_POLICY_NAME
-          : true;
+      if (existing) {
+        resolved[spec.idKey] = existing.id;
+        if (spec.kind === "fulfillment_policy") {
+          fulfillmentIsAppDefault =
+            existing.name === DEFAULT_FULFILLMENT_POLICY_NAME;
+        }
+      } else if (spec.kind === "fulfillment_policy") {
+        // Never hardcode one service: try vetted codes in order, degrade to
+        // handling-time-only rather than hard-fail (fixes the 20403
+        // "valid shipping service" rejection).
+        const created = await createFulfillmentPolicy(token, marketplace);
+        resolved[spec.idKey] = created.id;
+        fulfillmentIsAppDefault = created.appDefault;
+      } else {
+        resolved[spec.idKey] = await createPolicy(token, spec, marketplace);
       }
     }
   } catch (err) {
