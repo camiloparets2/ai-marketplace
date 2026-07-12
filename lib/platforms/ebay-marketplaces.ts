@@ -16,17 +16,37 @@ export interface EbayMarketplace {
   currency: string; // ISO 4217 of the marketplace, e.g. "GBP"
   categoryTreeId: string; // Taxonomy API category_tree id
   contentLanguage: string; // value eBay accepts in Content-Language
+  // Vetted domestic shipping service for auto-created default fulfillment
+  // policies (docs/design/ebay-seller-readiness.md). Absent → the default
+  // policy is created with handling time only and the seller picks a
+  // service on eBay; add the marketplace's code here to close that gap.
+  defaultShippingService?: { carrierCode: string; serviceCode: string };
 }
 
 const MARKETPLACE_BY_COUNTRY: Record<string, EbayMarketplace> = {
-  US: { id: "EBAY_US", currency: "USD", categoryTreeId: "0", contentLanguage: "en-US" },
-  CA: { id: "EBAY_CA", currency: "CAD", categoryTreeId: "2", contentLanguage: "en-CA" },
-  GB: { id: "EBAY_GB", currency: "GBP", categoryTreeId: "3", contentLanguage: "en-GB" },
-  AU: { id: "EBAY_AU", currency: "AUD", categoryTreeId: "15", contentLanguage: "en-AU" },
+  US: {
+    id: "EBAY_US", currency: "USD", categoryTreeId: "0", contentLanguage: "en-US",
+    defaultShippingService: { carrierCode: "USPS", serviceCode: "USPSGroundAdvantage" },
+  },
+  CA: {
+    id: "EBAY_CA", currency: "CAD", categoryTreeId: "2", contentLanguage: "en-CA",
+    defaultShippingService: { carrierCode: "CanadaPost", serviceCode: "CA_PostRegularParcel" },
+  },
+  GB: {
+    id: "EBAY_GB", currency: "GBP", categoryTreeId: "3", contentLanguage: "en-GB",
+    defaultShippingService: { carrierCode: "RoyalMail", serviceCode: "UK_RoyalMailSecondClassStandard" },
+  },
+  AU: {
+    id: "EBAY_AU", currency: "AUD", categoryTreeId: "15", contentLanguage: "en-AU",
+    defaultShippingService: { carrierCode: "AustraliaPost", serviceCode: "AU_Regular" },
+  },
   AT: { id: "EBAY_AT", currency: "EUR", categoryTreeId: "16", contentLanguage: "de-DE" },
   BE: { id: "EBAY_BE", currency: "EUR", categoryTreeId: "123", contentLanguage: "nl-BE" },
   FR: { id: "EBAY_FR", currency: "EUR", categoryTreeId: "71", contentLanguage: "fr-FR" },
-  DE: { id: "EBAY_DE", currency: "EUR", categoryTreeId: "77", contentLanguage: "de-DE" },
+  DE: {
+    id: "EBAY_DE", currency: "EUR", categoryTreeId: "77", contentLanguage: "de-DE",
+    defaultShippingService: { carrierCode: "DHL", serviceCode: "DE_DHLPaket" },
+  },
   IT: { id: "EBAY_IT", currency: "EUR", categoryTreeId: "101", contentLanguage: "it-IT" },
   NL: { id: "EBAY_NL", currency: "EUR", categoryTreeId: "146", contentLanguage: "nl-NL" },
   ES: { id: "EBAY_ES", currency: "EUR", categoryTreeId: "186", contentLanguage: "es-ES" },
