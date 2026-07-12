@@ -57,11 +57,19 @@ eBay's own Business Policies manager (we link there — we do not build a
 policy editor):
 
 - **Fulfillment**: 3-business-day handling; one DOMESTIC FLAT_RATE service
-  with **free shipping** for marketplaces with a vetted default carrier
-  (US/CA/GB/AU/DE — codes live in `ebay-marketplaces.ts`). ⚑ Free shipping is
-  the flag to confirm: our pricing floor already folds the shipping estimate
-  into the price, which matches free-shipping economics, but it is a seller
-  cost decision. For marketplaces without a vetted service code the policy is
+  with **buyer-paid shipping** for marketplaces with a vetted default carrier
+  (US/CA/GB/AU/DE — codes live in `ebay-marketplaces.ts`). The policy itself
+  carries no amount; each offer supplies the item's shipping estimate via
+  `shippingCostOverrides` (priority 1 = the service's sortOrder), and publish
+  REFUSES an item with no shipping estimate rather than charging the buyer
+  $0.00. The override applies ONLY when the policy in use is the app-created
+  default (`fulfillmentPolicyIsAppDefault`, tracked in connection meta) —
+  never over a policy the seller configured or pinned via env. **Free
+  shipping is never a silent default** written to a seller's account: with
+  unknown-shipping items (MANUAL_ESTIMATE_NEEDED) a free-shipping default
+  made the seller absorb an uncosted bill (the $6.50/50-lb-concrete money
+  bug). Free shipping stays an explicit seller opt-in in eBay's policy
+  manager. For marketplaces without a vetted service code the policy is
   created with handling time only and the checklist tells the seller to pick
   a shipping service on eBay (known limitation, one map entry to fix each).
   Note: the ship-from ADDRESS lives on the inventory location (PR #21), not

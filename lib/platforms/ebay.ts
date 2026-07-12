@@ -593,13 +593,14 @@ async function optIntoPolicies(accessToken: string): Promise<void> {
   if (!res.ok) throw await policyApiError(res, "business-policy opt-in");
 }
 
-// First policy id of a kind for the marketplace; null when the seller has
-// none (remediable) — the typed onboarding error when they can't have any.
-async function listPolicyId(
+// First policy of a kind for the marketplace (id + name, so the caller can
+// recognise an app-created default); null when the seller has none
+// (remediable) — the typed onboarding error when they can't have any.
+async function listFirstPolicy(
   accessToken: string,
   spec: PolicyKindSpec,
   marketplaceId: string
-): Promise<string | null> {
+): Promise<{ id: string; name: string | null } | null> {
   const res = await ebayFetch(
     accessToken,
     `/sell/account/v1/${spec.kind}?marketplace_id=${marketplaceId}`
@@ -609,7 +610,9 @@ async function listPolicyId(
     string,
     Array<Record<string, string>> | undefined
   >;
-  return data[spec.listKey]?.[0]?.[spec.idKey] ?? null;
+  const first = data[spec.listKey]?.[0];
+  const id = first?.[spec.idKey];
+  return id ? { id, name: first?.name ?? null } : null;
 }
 
 // ── Default policy payloads (pure, exported for tests) ────────────────────────
@@ -637,18 +640,27 @@ export interface EbayFulfillmentPolicyPayload {
   }>;
 }
 
+// Name doubles as the marker that a detected policy is OUR default — the
+// per-offer shipping-cost override only ever applies to this policy, never
+// to something the seller configured themselves.
+export const DEFAULT_FULFILLMENT_POLICY_NAME = "Snap to List default shipping";
+
 export function buildDefaultFulfillmentPolicy(
   marketplace: EbayMarketplace
 ): EbayFulfillmentPolicyPayload {
   return {
-    name: "Snap to List default shipping",
+    name: DEFAULT_FULFILLMENT_POLICY_NAME,
     marketplaceId: marketplace.id,
     categoryTypes: POLICY_CATEGORY_TYPES,
     handlingTime: { value: 3, unit: "DAY" },
-    // Free shipping ⚑ (design note): the app's pricing floor already folds
-    // the shipping estimate into the price, which matches free-shipping
-    // economics. Marketplaces without a vetted service code get a policy
-    // with handling time only — the seller picks a service on eBay.
+    // Buyer-paid shipping, NEVER free by default: a silent free-shipping
+    // policy written to a real seller's account makes the seller absorb an
+    // uncosted bill (the $6.50 concrete-bag bug). The per-listing amount the
+    // buyer pays comes from the offer's shippingCostOverrides (priority 1
+    // matches this service's sortOrder). Free shipping stays a deliberate
+    // opt-in on eBay's policy manager. Marketplaces without a vetted service
+    // code get a policy with handling time only — the seller picks a service
+    // on eBay.
     ...(marketplace.defaultShippingService
       ? {
           shippingOptions: [
@@ -662,7 +674,7 @@ export function buildDefaultFulfillmentPolicy(
                     marketplace.defaultShippingService.carrierCode,
                   shippingServiceCode:
                     marketplace.defaultShippingService.serviceCode,
-                  freeShipping: true,
+                  freeShipping: false,
                 },
               ],
             },
@@ -751,10 +763,12 @@ async function createPolicy(
   // Duplicate-name race (concurrent publish already created it) → adopt the
   // existing policy instead of failing.
   const err = await policyApiError(res, `${spec.kind} creation`);
-  const existing = await listPolicyId(accessToken, spec, marketplace.id).catch(
-    () => null
-  );
-  if (existing) return existing;
+  const existing = await listFirstPolicy(
+    accessToken,
+    spec,
+    marketplace.id
+  ).catch(() => null);
+  if (existing) return existing.id;
   throw err;
 }
 
@@ -791,6 +805,10 @@ export async function ensureEbayPolicies(
   // Detect + remediate. A "not eligible" AFTER a successful opt-in means the
   // program is still activating, not that the seller is unregistered.
   let justOptedIn = false;
+  // Determined only when the fulfillment policy is resolved on eBay this
+  // run: is it OUR default (created now, or name-matched)? null → the id
+  // came from env/meta and any prior determination in meta stands.
+  let fulfillmentIsAppDefault: boolean | null = null;
   try {
     if (!(await isOptedIntoPolicies(token))) {
       await optIntoPolicies(token);
@@ -799,10 +817,14 @@ export async function ensureEbayPolicies(
 
     for (const spec of POLICY_KINDS) {
       if (resolved[spec.idKey]) continue;
-      const id =
-        (await listPolicyId(token, spec, marketplace.id)) ??
-        (await createPolicy(token, spec, marketplace));
+      const existing = await listFirstPolicy(token, spec, marketplace.id);
+      const id = existing?.id ?? (await createPolicy(token, spec, marketplace));
       resolved[spec.idKey] = id;
+      if (spec.kind === "fulfillment_policy") {
+        fulfillmentIsAppDefault = existing
+          ? existing.name === DEFAULT_FULFILLMENT_POLICY_NAME
+          : true;
+      }
     }
   } catch (err) {
     if (
@@ -823,11 +845,26 @@ export async function ensureEbayPolicies(
   for (const spec of POLICY_KINDS) {
     if (!process.env[spec.envVar]) patch[spec.idKey] = ids[spec.idKey];
   }
+  if (fulfillmentIsAppDefault !== null) {
+    patch.fulfillmentPolicyAppDefault = String(fulfillmentIsAppDefault);
+  }
   if (Object.keys(patch).length > 0) {
     await cacheConnectionMeta(conn, patch);
   }
 
   return ids;
+}
+
+// Whether the fulfillment policy the next offer will use is the app-created
+// default. Only then may the offer attach a shippingCostOverrides entry — a
+// policy the seller configured (or pinned via env) is theirs and is never
+// overridden. Meta is written by ensureEbayPolicies; absent → false (assume
+// seller-owned, the safe direction).
+export function fulfillmentPolicyIsAppDefault(
+  conn: PlatformConnection
+): boolean {
+  if (process.env.EBAY_FULFILLMENT_POLICY_ID) return false;
+  return conn.meta.fulfillmentPolicyAppDefault === "true";
 }
 
 // ── Detect-only readiness (channels checklist) ────────────────────────────────
@@ -884,7 +921,7 @@ export async function detectEbayReadiness(
     }
     for (const spec of POLICY_KINDS) {
       if (process.env[spec.envVar] ?? conn.meta[spec.idKey]) continue;
-      if ((await listPolicyId(token, spec, marketplaceId)) === null) {
+      if ((await listFirstPolicy(token, spec, marketplaceId)) === null) {
         return { shipFrom, policies: "missing" };
       }
     }
@@ -962,7 +999,16 @@ export interface EbayOfferPayload {
   listingDescription: string;
   merchantLocationKey: string;
   pricingSummary: { price: { value: string; currency: string } };
-  listingPolicies: PolicyIds;
+  listingPolicies: PolicyIds & {
+    // Per-listing buyer-paid shipping charge, matched by priority to the
+    // sortOrder-1 service in the app-default fulfillment policy. Present
+    // ONLY when that policy is in use — never over a seller's own policy.
+    shippingCostOverrides?: Array<{
+      priority: number;
+      shippingServiceType: "DOMESTIC";
+      shippingCost: { value: string; currency: string };
+    }>;
+  };
 }
 
 export function buildEbayOfferPayload(
@@ -971,8 +1017,23 @@ export function buildEbayOfferPayload(
   categoryId: string,
   merchantLocationKey: string,
   policies: PolicyIds,
-  marketplace: EbayMarketplace
+  marketplace: EbayMarketplace,
+  // True when the fulfillment policy is the app-created default (see
+  // fulfillmentPolicyIsAppDefault) — that policy carries no shipping amount
+  // of its own, so the offer MUST supply the buyer-paid charge.
+  usesAppDefaultFulfillment: boolean
 ): EbayOfferPayload {
+  const needsShippingCharge =
+    usesAppDefaultFulfillment &&
+    marketplace.defaultShippingService !== undefined;
+  if (needsShippingCharge && input.shippingCost === null) {
+    // The money rule, enforced at the last exit: without a shipping cost the
+    // default policy would charge the buyer $0.00 — free shipping through
+    // the back door. Guardrails/UI should have caught this earlier.
+    throw new Error(
+      "This item has no shipping cost estimate — add one before publishing to eBay."
+    );
+  }
   return {
     sku,
     marketplaceId: marketplace.id,
@@ -984,7 +1045,23 @@ export function buildEbayOfferPayload(
     pricingSummary: {
       price: { value: input.price.toFixed(2), currency: marketplace.currency },
     },
-    listingPolicies: policies,
+    listingPolicies: {
+      ...policies,
+      ...(needsShippingCharge && input.shippingCost !== null
+        ? {
+            shippingCostOverrides: [
+              {
+                priority: 1,
+                shippingServiceType: "DOMESTIC" as const,
+                shippingCost: {
+                  value: input.shippingCost.toFixed(2),
+                  currency: marketplace.currency,
+                },
+              },
+            ],
+          }
+        : {}),
+    },
   };
 }
 
@@ -1031,7 +1108,9 @@ export async function publishToEbay(
       categoryId,
       merchantLocationKey,
       policies,
-      marketplace
+      marketplace,
+      // Meta was just refreshed by ensureEbayPolicies above.
+      fulfillmentPolicyIsAppDefault(conn)
     ),
   });
   if (!offerRes.ok) throw await ebayError(offerRes, "offer creation");

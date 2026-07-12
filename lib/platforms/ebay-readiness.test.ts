@@ -18,10 +18,12 @@ import { saveConnection } from "@/lib/connections";
 import {
   ensureEbayPolicies,
   detectEbayReadiness,
+  fulfillmentPolicyIsAppDefault,
   EbaySellerSetupError,
   buildDefaultFulfillmentPolicy,
   buildDefaultPaymentPolicy,
   buildDefaultReturnPolicy,
+  DEFAULT_FULFILLMENT_POLICY_NAME,
 } from "./ebay";
 import { marketplaceForCountry } from "./ebay-marketplaces";
 
@@ -313,6 +315,56 @@ describe("ensureEbayPolicies", () => {
     expect(calls).toHaveLength(0);
     expect(saveConnection).not.toHaveBeenCalled();
   });
+
+  // The app-default marker decides whether an offer may attach a per-item
+  // shippingCostOverrides — never over a policy the seller configured.
+  it("marks a freshly created fulfillment policy as the app default", async () => {
+    stubEbayApi(newSellerHandler);
+    const c = conn();
+    await ensureEbayPolicies(c, marketplaceForCountry("US"));
+    expect(c.meta.fulfillmentPolicyAppDefault).toBe("true");
+    expect(fulfillmentPolicyIsAppDefault(c)).toBe(true);
+  });
+
+  it("marks a seller-owned fulfillment policy as NOT the app default", async () => {
+    stubEbayApi(readySellerHandler);
+    const c = conn();
+    await ensureEbayPolicies(c, marketplaceForCountry("US"));
+    expect(c.meta.fulfillmentPolicyAppDefault).toBe("false");
+    expect(fulfillmentPolicyIsAppDefault(c)).toBe(false);
+  });
+
+  it("recognises a previously created app-default policy by name", async () => {
+    stubEbayApi((path) => {
+      if (path.includes("get_opted_in_programs")) {
+        return jsonResponse(200, {
+          programs: [{ programType: "SELLING_POLICY_MANAGEMENT" }],
+        });
+      }
+      if (path.startsWith("/sell/account/v1/fulfillment_policy")) {
+        return jsonResponse(200, {
+          fulfillmentPolicies: [
+            {
+              fulfillmentPolicyId: "f-ours",
+              name: DEFAULT_FULFILLMENT_POLICY_NAME,
+            },
+          ],
+        });
+      }
+      return readySellerHandler(path);
+    });
+    const c = conn();
+    await ensureEbayPolicies(c, marketplaceForCountry("US"));
+    expect(fulfillmentPolicyIsAppDefault(c)).toBe(true);
+  });
+
+  it("treats an env-pinned fulfillment policy as seller-owned (no override)", () => {
+    process.env.EBAY_FULFILLMENT_POLICY_ID = "f-env";
+    expect(
+      fulfillmentPolicyIsAppDefault(conn({ fulfillmentPolicyAppDefault: "true" }))
+    ).toBe(false);
+  });
+
 });
 
 describe("detectEbayReadiness (detect-only, for the channels checklist)", () => {
@@ -379,7 +431,10 @@ describe("default policy builders", () => {
             {
               shippingCarrierCode: "RoyalMail",
               shippingServiceCode: "UK_RoyalMailSecondClassStandard",
-              freeShipping: true,
+              // NEVER free by default — the seller would silently absorb
+              // every shipping bill. Buyer-paid; the offer supplies the
+              // per-item amount via shippingCostOverrides.
+              freeShipping: false,
             },
           ],
         },
