@@ -317,6 +317,7 @@ export default function ItemDetailPage() {
                 costBasis={costValid ? costNum : null}
                 shippingCost={shipValid ? shipNum : null}
                 compsQuery={title}
+                compsCondition={condition}
               />
             </Card>
 

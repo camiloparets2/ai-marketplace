@@ -18,6 +18,9 @@ export interface PricingPanelProps {
   shippingCost: number | null;
   // query for the comps lookup (usually the listing title)
   compsQuery: string;
+  // Structured comps hints — better comp quality than title-only search.
+  compsBrand?: string | null;
+  compsCondition?: string | null;
   // One-line rationale for the AI-suggested price the field was pre-filled
   // with; null → no suggestion arrived (the field starts empty).
   aiRationale?: string | null;
@@ -29,6 +32,8 @@ export function PricingPanel({
   costBasis,
   shippingCost,
   compsQuery,
+  compsBrand = null,
+  compsCondition = null,
   aiRationale = null,
 }: PricingPanelProps) {
   const [comps, setComps] = useState<CompsSummary | null>(null);
@@ -44,7 +49,10 @@ export function PricingPanel({
     queueMicrotask(() => {
       if (cancelled) return;
       setCompsState("loading");
-      void fetch(`/api/comps?q=${encodeURIComponent(compsQuery)}`)
+      const params = new URLSearchParams({ q: compsQuery });
+      if (compsBrand?.trim()) params.set("brand", compsBrand.trim());
+      if (compsCondition?.trim()) params.set("condition", compsCondition.trim());
+      void fetch(`/api/comps?${params.toString()}`)
         .then((res) => (res.ok ? res.json() : { comps: null }))
         .then((data: { comps?: CompsSummary | null }) => {
           if (cancelled) return;
@@ -60,16 +68,19 @@ export function PricingPanel({
     return () => {
       cancelled = true;
     };
-  }, [compsQuery]);
+  }, [compsQuery, compsBrand, compsCondition]);
 
   // null → no shipping estimate → NO floor exists (never treated as $0 ship).
   const floor = computeFloor(costBasis, shippingCost);
   const priceNum = parseFloat(price);
   const hasPrice = !isNaN(priceNum) && priceNum > 0;
   const belowFloor = hasPrice && floor !== null && priceNum < floor;
-  const median = comps?.medianSoldPrice ?? null;
+  // Anchor reference: sold median when granted, active-asking median otherwise.
+  const median = comps?.medianPrice ?? null;
   // A reference below the floor means the market won't clear a profitable price.
   const marketBelowFloor = median !== null && floor !== null && median < floor;
+  const hasBand =
+    comps !== null && comps.lowPrice !== null && comps.highPrice !== null;
 
   return (
     <div className="flex flex-col gap-3">
@@ -141,23 +152,33 @@ export function PricingPanel({
       {compsState === "loading" && (
         <p className="text-xs text-gray-400">Checking recent sales…</p>
       )}
-      {compsState === "done" && comps && median !== null && (
+      {compsState === "done" && comps && hasBand && (
         <div className="text-xs text-gray-600 bg-gray-50 rounded-lg px-3 py-2 flex flex-col gap-0.5">
           <span>
-            Recent sold median{" "}
-            <span className="font-semibold text-gray-800">${median.toFixed(2)}</span>{" "}
-            <span className="text-gray-400">({comps.soldCount} sold{comps.confidence === "low" ? ", sparse" : ""})</span>
+            Similar items:{" "}
+            <span className="font-semibold text-gray-800">
+              ${comps.lowPrice?.toFixed(2)}–${comps.highPrice?.toFixed(2)}
+            </span>{" "}
+            <span className="text-gray-400">
+              ({comps.sampleSize} {comps.source === "sold" ? "sold" : "active"})
+            </span>{" "}
+            · demand: {comps.demandSignal}
           </span>
-          {comps.activeCount !== null && (
+          {median !== null && (
             <span className="text-gray-500">
-              {comps.activeCount} active listing{comps.activeCount === 1 ? "" : "s"}
-              {comps.medianActivePrice !== null &&
-                ` asking ~$${comps.medianActivePrice.toFixed(2)} median`}
+              {comps.source === "sold" ? "Sold median" : "Asking median"} $
+              {median.toFixed(2)}
+              {comps.confidence === "low" ? " · sparse data — double-check" : ""}
+            </span>
+          )}
+          {comps.source === "active" && (
+            <span className="text-gray-400">
+              Based on current asking prices, not completed sales.
             </span>
           )}
         </div>
       )}
-      {compsState === "done" && !comps && (
+      {compsState === "done" && !hasBand && (
         <p className="text-xs text-gray-400">
           No comparable sales found — priced conservatively; double-check the market.
         </p>

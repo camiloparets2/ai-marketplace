@@ -896,6 +896,8 @@ export default function Page() {
                 costBasis={null}
                 shippingCost={effectiveShippingCost}
                 compsQuery={title}
+                compsBrand={brand}
+                compsCondition={condition}
                 aiRationale={priceRationale}
               />
             </div>
