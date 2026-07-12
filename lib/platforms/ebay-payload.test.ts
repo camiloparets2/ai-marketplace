@@ -43,10 +43,10 @@ describe("buildEbayInventoryItemPayload", () => {
     expect("upc" in p.product).toBe(false);
   });
 
-  it("lists every photo in order, primary first, capped at eBay's 12", () => {
-    const urls = Array.from({ length: 14 }, (_, i) => `https://cdn.example/${i}.jpg`);
+  it("lists every photo in order, seller's originals first, capped at eBay's 24", () => {
+    const urls = Array.from({ length: 26 }, (_, i) => `https://cdn.example/${i}.jpg`);
     const p = buildEbayInventoryItemPayload(listing, urls);
-    expect(p.product.imageUrls).toHaveLength(12);
+    expect(p.product.imageUrls).toHaveLength(24);
     expect(p.product.imageUrls[0]).toBe("https://cdn.example/0.jpg");
   });
 });
@@ -72,6 +72,8 @@ describe("buildEbayOfferPayload", () => {
       sku: "snap-1",
       marketplaceId: "EBAY_US",
       format: "FIXED_PRICE",
+      // eBay's Inventory API accepts only GTC for fixed price — explicit.
+      listingDuration: "GTC",
       availableQuantity: 1,
       categoryId: "112233",
       merchantLocationKey: "loc-1",

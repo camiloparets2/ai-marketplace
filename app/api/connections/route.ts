@@ -2,7 +2,7 @@
 // "Connect eBay" vs a ready-to-publish checkbox.
 
 import { NextResponse } from "next/server";
-import { getConnection, isExpired } from "@/lib/connections";
+import { getConnection, isExpired, needsReconnect } from "@/lib/connections";
 import { API_PLATFORMS } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
 import { requireUser } from "@/lib/auth/guard";
@@ -13,7 +13,8 @@ export interface ConnectionHealth {
   expired: boolean;
   // a refresh token is stored → expiry self-heals on next use
   canRefresh: boolean;
-  // connected but expired with no way to refresh → the seller must reconnect
+  // connected but unusable without OAuth again: dead token, or an eBay
+  // connection predating immutable-identity capture (deletion compliance)
   needsReconnect: boolean;
 }
 
@@ -51,7 +52,7 @@ export async function GET(): Promise<NextResponse> {
       connected,
       expired,
       canRefresh,
-      needsReconnect: connected && expired && !canRefresh,
+      needsReconnect: conn !== null && needsReconnect(conn),
     };
   }
 

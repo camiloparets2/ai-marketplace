@@ -26,6 +26,7 @@ import { getConnection } from "@/lib/connections";
 import { hostListingPhoto } from "@/lib/storage";
 import {
   publishToEbay,
+  ebaySkuForItem,
   EbayShipFromMissingError,
   EbaySellerSetupError,
 } from "@/lib/platforms/ebay";
@@ -304,7 +305,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           }
           if (target === "ebay") {
             return publishExternal("ebay", async () => {
-              const published = await publishToEbay(conn, listing, await hostedUrls());
+              const published = await publishToEbay(
+                conn,
+                listing,
+                await hostedUrls(),
+                ebaySkuForItem(inventoryItemId)
+              );
               return {
                 platform: "ebay",
                 url: published.url,

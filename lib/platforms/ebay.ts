@@ -67,6 +67,13 @@ function authBase(): string {
     : "https://auth.sandbox.ebay.com";
 }
 
+// The Identity API lives on the apiz host, not api.
+function identityApiBase(): string {
+  return isProduction()
+    ? "https://apiz.ebay.com"
+    : "https://apiz.sandbox.ebay.com";
+}
+
 function credentials(): { clientId: string; clientSecret: string; ruName: string } {
   const clientId = process.env.EBAY_CLIENT_ID;
   const clientSecret = process.env.EBAY_CLIENT_SECRET;
@@ -88,6 +95,10 @@ const OAUTH_SCOPES = [
   // Order polling (sale detection). Accounts connected before this scope was
   // added must reconnect for sales sync to work.
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
+  // Immutable seller identity (userId) — required so account-deletion
+  // notifications can match and erase the right connection. Accounts
+  // connected before this scope must reconnect (needsReconnect surfaces it).
+  "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
 ].join(" ");
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────
@@ -159,7 +170,11 @@ export async function mintEbayAppToken(
 }
 
 // Returns an unowned token bundle — the OAuth callback stamps the signed-in
-// user's id before saving.
+// user's id before saving. The connection is refused outright when eBay's
+// Identity API can't supply the immutable userId: without it, an
+// account-deletion notification could never be matched to this connection
+// (an eBay compliance requirement), so an unidentifiable connection is
+// worse than no connection.
 export async function ebayExchangeCode(code: string): Promise<UnownedConnection> {
   const { ruName } = credentials();
   const token = await tokenRequest(
@@ -169,12 +184,42 @@ export async function ebayExchangeCode(code: string): Promise<UnownedConnection>
       redirect_uri: ruName,
     })
   );
+
+  const identityRes = await fetch(
+    `${identityApiBase()}/commerce/identity/v1/user/`,
+    {
+      headers: {
+        Authorization: `Bearer ${token.access_token}`,
+        Accept: "application/json",
+      },
+    }
+  );
+  if (!identityRes.ok) {
+    throw new Error(
+      `eBay identity lookup failed (${identityRes.status}): ${await identityRes.text()}`
+    );
+  }
+  const identity = (await identityRes.json()) as {
+    userId?: string;
+    username?: string;
+    registrationMarketplaceId?: string;
+  };
+  if (!identity.userId) {
+    throw new Error("eBay identity lookup did not return an immutable user id.");
+  }
+
   return {
     platform: "ebay",
     accessToken: token.access_token,
     refreshToken: token.refresh_token ?? null,
     expiresAt: Date.now() + token.expires_in * 1000,
-    meta: {},
+    meta: {
+      ebayUserId: identity.userId,
+      ...(identity.username ? { ebayUsername: identity.username } : {}),
+      ...(identity.registrationMarketplaceId
+        ? { ebayRegistrationMarketplaceId: identity.registrationMarketplaceId }
+        : {}),
+    },
   };
 }
 
@@ -474,11 +519,25 @@ export async function setupEbayOnConnect(
 
 // ─── Publish steps ────────────────────────────────────────────────────────────
 
-async function suggestCategoryId(
+export interface ResolvedCategory {
+  categoryId: string;
+  // Localized aspect names eBay REQUIRES for this category — publish blocks
+  // until the item carries all of them.
+  requiredAspects: string[];
+  // Recommended / required-soon aspects — optimization prompts, not blockers.
+  recommendedAspects: string[];
+}
+
+// Resolve the title to a CURRENT LEAF category and its aspect requirements.
+// getItemAspectsForCategory doubles as the leaf check (eBay rejects non-leaf
+// ids), so a non-leaf suggestion falls through to the next candidate. There
+// is deliberately NO hardcoded fallback category — an unmappable item is the
+// seller's call, never a silent mislisting.
+async function resolveLeafCategory(
   accessToken: string,
   title: string,
   categoryTreeId: string
-): Promise<string> {
+): Promise<ResolvedCategory> {
   const res = await ebayFetch(
     accessToken,
     `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_category_suggestions?q=${encodeURIComponent(title)}`
@@ -487,13 +546,62 @@ async function suggestCategoryId(
   const data = (await res.json()) as {
     categorySuggestions?: Array<{ category: { categoryId: string } }>;
   };
-  const id = data.categorySuggestions?.[0]?.category.categoryId;
-  if (!id) {
+  const candidates = (data.categorySuggestions ?? [])
+    .map((sugg) => sugg.category.categoryId)
+    .filter(Boolean)
+    .slice(0, 3);
+  if (candidates.length === 0) {
     throw new Error(
       "eBay could not suggest a category for this title. Edit the title and retry."
     );
   }
-  return id;
+
+  for (const categoryId of candidates) {
+    const aspectsRes = await ebayFetch(
+      accessToken,
+      `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_item_aspects_for_category?category_id=${categoryId}`
+    );
+    if (!aspectsRes.ok) {
+      // Non-leaf (or retired) category id — try the next suggestion.
+      continue;
+    }
+    const aspectData = (await aspectsRes.json()) as {
+      aspects?: Array<{
+        localizedAspectName?: string;
+        aspectConstraint?: {
+          aspectRequired?: boolean;
+          aspectUsage?: string;
+        };
+      }>;
+    };
+    const requiredAspects: string[] = [];
+    const recommendedAspects: string[] = [];
+    for (const aspect of aspectData.aspects ?? []) {
+      const name = aspect.localizedAspectName;
+      if (!name) continue;
+      if (aspect.aspectConstraint?.aspectRequired) requiredAspects.push(name);
+      else if (aspect.aspectConstraint?.aspectUsage === "RECOMMENDED") {
+        recommendedAspects.push(name);
+      }
+    }
+    return { categoryId, requiredAspects, recommendedAspects };
+  }
+
+  throw new Error(
+    "eBay's suggested categories for this title are not current leaf categories. Edit the title and retry."
+  );
+}
+
+// Publish gate: every REQUIRED aspect must be present on the item. Loud and
+// actionable — never a listing eBay would reject or bury.
+export function missingRequiredAspects(
+  required: string[],
+  aspects: Record<string, string[]>
+): string[] {
+  const present = new Set(
+    Object.keys(aspects).map((name) => name.toLowerCase())
+  );
+  return required.filter((name) => !present.has(name.toLowerCase()));
 }
 
 // ─── Seller readiness: business policies ──────────────────────────────────────
@@ -1090,9 +1198,11 @@ export function buildEbayInventoryItemPayload(
       title: composed.title,
       description: composed.description,
       aspects,
-      // eBay accepts up to 12 picture URLs; our product cap is 8 (first =
-      // hero). Defensive slice in case a caller ever exceeds it.
-      imageUrls: imageUrls.slice(0, 12),
+      // eBay allows up to 24 pictures on a single-SKU listing; our product
+      // cap is 8 (first = the seller's own hero photo — originals always
+      // lead). Defensive slice in case a caller ever exceeds it. There is no
+      // stock-photo fallback anywhere: only the seller's uploads are listed.
+      imageUrls: imageUrls.slice(0, 24),
       ...(input.upc ? { upc: [input.upc] } : {}),
     },
     condition: EBAY_CONDITION_MAP[input.condition],
@@ -1106,6 +1216,9 @@ export interface EbayOfferPayload {
   // their account/country at connect time, never a global constant.
   marketplaceId: string;
   format: "FIXED_PRICE";
+  // Good 'Til Cancelled — the only duration the Inventory API accepts for
+  // fixed-price listings; explicit per eBay's publishing requirements.
+  listingDuration: "GTC";
   availableQuantity: number;
   categoryId: string;
   listingDescription: string;
@@ -1150,6 +1263,7 @@ export function buildEbayOfferPayload(
     sku,
     marketplaceId: marketplace.id,
     format: "FIXED_PRICE",
+    listingDuration: "GTC",
     availableQuantity: 1,
     categoryId,
     listingDescription: ebayHtmlDescription(input),
@@ -1177,10 +1291,52 @@ export function buildEbayOfferPayload(
   };
 }
 
+// Deterministic SKU per inventory item: retries of the same item reuse the
+// same eBay inventory item + offer instead of minting a timestamped SKU per
+// try (which duplicated listings on retry). ≤50 chars per eBay's SKU limit.
+export function ebaySkuForItem(inventoryItemId: string): string {
+  return `snap-${inventoryItemId}`;
+}
+
+// The seller's existing offer for this SKU on this marketplace, if any.
+async function findOfferBySku(
+  accessToken: string,
+  sku: string,
+  marketplaceId: string
+): Promise<{ offerId: string; status: string; listingId: string | null } | null> {
+  const res = await ebayFetch(
+    accessToken,
+    `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}`
+  );
+  // eBay 404s when the SKU has no offers at all.
+  if (res.status === 404) return null;
+  if (!res.ok) throw await ebayError(res, "offer lookup");
+  const data = (await res.json()) as {
+    offers?: Array<{
+      offerId?: string;
+      marketplaceId?: string;
+      status?: string;
+      listing?: { listingId?: string } | null;
+    }>;
+  };
+  const offer = (data.offers ?? []).find(
+    (o) => o.marketplaceId === marketplaceId && o.offerId
+  );
+  if (!offer?.offerId) return null;
+  return {
+    offerId: offer.offerId,
+    status: offer.status ?? "UNPUBLISHED",
+    listingId: offer.listing?.listingId ?? null,
+  };
+}
+
 export async function publishToEbay(
   connection: PlatformConnection,
   input: ListingInput,
-  imageUrls: string[]
+  imageUrls: string[],
+  // Deterministic, item-derived SKU (ebaySkuForItem). Passing the same SKU
+  // on retry is what makes the publish idempotent.
+  sku: string
 ): Promise<EbayPublishResult> {
   // Preflight BEFORE any eBay write: a photo URL that isn't publicly
   // fetchable (private storage bucket → 400/403/503) must fail the publish
@@ -1190,52 +1346,106 @@ export async function publishToEbay(
   const conn = await freshConnection(connection);
   const composed = composeListing("ebay", input);
 
-  // Unique SKU per publish keeps retries simple — no stale-offer reconciliation.
-  const sku = `snap-${Date.now()}`;
-
   // Location first: it decides the marketplace (and with it the category
   // tree, currency, policies, and Content-Language) for everything below.
   const { merchantLocationKey, marketplace } = await ensureEbayLocation(conn);
 
-  const [categoryId, policies] = await Promise.all([
-    suggestCategoryId(conn.accessToken, composed.title, marketplace.categoryTreeId),
+  const [resolvedCategory, policies] = await Promise.all([
+    resolveLeafCategory(conn.accessToken, composed.title, marketplace.categoryTreeId),
     // Seller-readiness ensure chain: cached ids, else detect / opt-in /
     // create defaults. Throws the typed onboarding error when the seller
     // hasn't finished eBay registration.
     ensureEbayPolicies(conn, marketplace),
   ]);
+  const categoryId = resolvedCategory.categoryId;
+
+  const itemPayload = buildEbayInventoryItemPayload(input, imageUrls);
+  const missing = missingRequiredAspects(
+    resolvedCategory.requiredAspects,
+    itemPayload.product.aspects
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `eBay requires these item specifics for this category: ${missing.join(", ")}. Add them to the item details and publish again.`
+    );
+  }
+  if (resolvedCategory.recommendedAspects.length > 0) {
+    // Optimization prompt (not a blocker) — surfaced in logs today; the
+    // draft-edit UI picks these up in a follow-up.
+    console.info(
+      `[ebay] recommended aspects for category ${categoryId}: ${resolvedCategory.recommendedAspects.join(", ")}`
+    );
+  }
 
   const itemRes = await ebayFetch(
     conn.accessToken,
     `/sell/inventory/v1/inventory_item/${sku}`,
     {
+      // PUT by SKU is an idempotent upsert — a retry updates in place.
       method: "PUT",
       contentLanguage: marketplace.contentLanguage,
-      body: buildEbayInventoryItemPayload(input, imageUrls),
+      body: itemPayload,
     }
   );
   if (!itemRes.ok) throw await ebayError(itemRes, "inventory item creation");
 
-  const offerRes = await ebayFetch(conn.accessToken, "/sell/inventory/v1/offer", {
-    method: "POST",
-    contentLanguage: marketplace.contentLanguage,
-    body: buildEbayOfferPayload(
-      input,
-      sku,
-      categoryId,
-      merchantLocationKey,
-      policies,
-      marketplace,
-      // Meta was just refreshed by ensureEbayPolicies above.
-      fulfillmentPolicyIsAppDefault(conn)
-    ),
-  });
-  if (!offerRes.ok) throw await ebayError(offerRes, "offer creation");
-  const offer = (await offerRes.json()) as { offerId: string };
+  const offerPayload = buildEbayOfferPayload(
+    input,
+    sku,
+    categoryId,
+    merchantLocationKey,
+    policies,
+    marketplace,
+    // Meta was just refreshed by ensureEbayPolicies above.
+    fulfillmentPolicyIsAppDefault(conn)
+  );
+
+  // Retry safety: reuse this item's existing offer instead of creating a
+  // duplicate. Already published → return the live listing as-is.
+  let offerId: string;
+  const existing = await findOfferBySku(conn.accessToken, sku, marketplace.id);
+  if (existing) {
+    if (existing.status === "PUBLISHED" && existing.listingId) {
+      return {
+        url: listingUrl(existing.listingId),
+        listingId: existing.listingId,
+        offerId: existing.offerId,
+        sku,
+      };
+    }
+    const updateRes = await ebayFetch(
+      conn.accessToken,
+      `/sell/inventory/v1/offer/${existing.offerId}`,
+      {
+        method: "PUT",
+        contentLanguage: marketplace.contentLanguage,
+        body: offerPayload,
+      }
+    );
+    if (!updateRes.ok) throw await ebayError(updateRes, "offer update");
+    offerId = existing.offerId;
+  } else {
+    const offerRes = await ebayFetch(conn.accessToken, "/sell/inventory/v1/offer", {
+      method: "POST",
+      contentLanguage: marketplace.contentLanguage,
+      body: offerPayload,
+    });
+    if (offerRes.ok) {
+      offerId = ((await offerRes.json()) as { offerId: string }).offerId;
+    } else {
+      // Concurrent-create race: the offer now exists — adopt it.
+      const err = await ebayError(offerRes, "offer creation");
+      const raced = await findOfferBySku(conn.accessToken, sku, marketplace.id).catch(
+        () => null
+      );
+      if (!raced) throw err;
+      offerId = raced.offerId;
+    }
+  }
 
   const publishRes = await ebayFetch(
     conn.accessToken,
-    `/sell/inventory/v1/offer/${offer.offerId}/publish`,
+    `/sell/inventory/v1/offer/${offerId}/publish`,
     { method: "POST", contentLanguage: marketplace.contentLanguage, body: {} }
   );
   if (!publishRes.ok) {
@@ -1256,11 +1466,18 @@ export async function publishToEbay(
     throw err;
   }
   const published = (await publishRes.json()) as { listingId: string };
+  return {
+    url: listingUrl(published.listingId),
+    listingId: published.listingId,
+    offerId,
+    sku,
+  };
+}
 
-  const url = isProduction()
-    ? `https://www.ebay.com/itm/${published.listingId}`
-    : `https://sandbox.ebay.com/itm/${published.listingId}`;
-  return { url, listingId: published.listingId, offerId: offer.offerId, sku };
+function listingUrl(listingId: string): string {
+  return isProduction()
+    ? `https://www.ebay.com/itm/${listingId}`
+    : `https://sandbox.ebay.com/itm/${listingId}`;
 }
 
 // ─── Sale detection (order polling) ───────────────────────────────────────────
@@ -1324,12 +1541,27 @@ export async function fetchEbaySales(
 ): Promise<EbaySale[]> {
   const conn = await freshConnection(connection);
   const filter = encodeURIComponent(`creationdate:[${sinceIso}..]`);
-  const res = await ebayFetch(
-    conn.accessToken,
-    `/sell/fulfillment/v1/order?filter=${filter}&limit=50`
-  );
-  if (!res.ok) throw await ebayError(res, "order lookup");
-  return extractEbaySales(await res.json());
+
+  // PAGINATE: a busy seller (or a long catch-up window) can exceed one page,
+  // and a truncated first page means silently missed sales → oversell. eBay
+  // caps limit at 200; `total` bounds the walk, with a hard page ceiling as
+  // a runaway guard.
+  const limit = 200;
+  const sales: EbaySale[] = [];
+  let offset = 0;
+  for (let page = 0; page < 25; page++) {
+    const res = await ebayFetch(
+      conn.accessToken,
+      `/sell/fulfillment/v1/order?filter=${filter}&limit=${limit}&offset=${offset}`
+    );
+    if (!res.ok) throw await ebayError(res, "order lookup");
+    const payload = (await res.json()) as OrdersPayload & { total?: number };
+    sales.push(...extractEbaySales(payload));
+    const total = payload.total ?? 0;
+    offset += limit;
+    if (offset >= total) break;
+  }
+  return sales;
 }
 
 // Ends a live eBay listing (sold elsewhere / manual delist) by withdrawing

@@ -155,7 +155,8 @@ describe("runPipeline — happy path (sandbox)", () => {
     expect(deps.publishEbay).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ price: result.price.price }),
-      ["https://cdn.example/p.jpg"]
+      ["https://cdn.example/p.jpg"],
+      "snap-item-1" // deterministic item-derived SKU, never a timestamp
     );
     expect(deps.recordListing).toHaveBeenCalledWith(
       "user-1",
@@ -431,7 +432,8 @@ describe("approveAndPublish — the review queue's human override", () => {
     expect(deps.publishEbay).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ shippingCost: 16.1 }),
-      expect.anything()
+      expect.anything(),
+      "snap-item-1"
     );
   });
 
@@ -496,7 +498,8 @@ describe("publishDraft — publish/retry a stored draft, zero AI, zero credits",
         price: 94.99,
         shippingCost: 16.1,
       }),
-      ["https://cdn.example/p.jpg"]
+      ["https://cdn.example/p.jpg"],
+      "snap-item-1"
     );
     expect(deps.markListed).toHaveBeenCalledWith("item-1");
     expect(deps.audit).toHaveBeenCalledWith(

@@ -10,7 +10,7 @@ import { API_PLATFORMS } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
 
 interface ItemRow {
-  status: "draft" | "listed" | "sold" | "archived";
+  status: "draft" | "review" | "listed" | "sold" | "archived";
   price: number | null;
   sold_price: number | null;
   cost_of_goods: number | null;
@@ -39,6 +39,7 @@ export async function GET(): Promise<NextResponse> {
   // Inventory aggregates — tolerate the migration not being applied yet.
   let items: ItemRow[] = [];
   let endFailedCount = 0;
+  let oversoldCount = 0;
   try {
     const supabase = getSupabaseAdmin();
     const { data } = await supabase
@@ -53,11 +54,21 @@ export async function GET(): Promise<NextResponse> {
       .eq("user_id", user.id)
       .eq("status", "end_failed");
     endFailedCount = count ?? 0;
+
+    // Simultaneous-sale races that lost the stock claim: the platform order
+    // exists but the item was already sold elsewhere. URGENT and manual —
+    // the app never auto-cancels an order.
+    const { count: oversold } = await supabase
+      .from("sold_events")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .eq("status", "oversold");
+    oversoldCount = oversold ?? 0;
   } catch {
     // inventory tables absent → zeros below
   }
 
-  const byStatus = { draft: 0, listed: 0, sold: 0, archived: 0 };
+  const byStatus = { draft: 0, review: 0, listed: 0, sold: 0, archived: 0 };
   let listedValue = 0;
   let soldValue = 0;
   let knownCost = 0;
@@ -89,5 +100,6 @@ export async function GET(): Promise<NextResponse> {
     soldWithCostCount: soldWithCost,
     soldCount: byStatus.sold,
     endFailedCount,
+    oversoldCount,
   });
 }

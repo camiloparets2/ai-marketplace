@@ -84,3 +84,16 @@ const EXPIRY_SKEW_MS = 5 * 60 * 1000;
 export function isExpired(conn: PlatformConnection): boolean {
   return conn.expiresAt !== null && Date.now() > conn.expiresAt - EXPIRY_SKEW_MS;
 }
+
+/**
+ * True when the seller must go through OAuth again: the token can't refresh,
+ * or (eBay) the connection predates immutable-identity capture — without
+ * meta.ebayUserId an account-deletion notification could never match it, so
+ * the connection must be re-established with the identity scope.
+ */
+export function needsReconnect(conn: PlatformConnection): boolean {
+  const tokenDead = isExpired(conn) && !conn.refreshToken;
+  const missingEbayIdentity =
+    conn.platform === "ebay" && !conn.meta.ebayUserId;
+  return tokenDead || missingEbayIdentity;
+}
