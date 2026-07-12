@@ -174,16 +174,41 @@ dashboard CTA lands on `?filter=draft`. Remaining delta: none known.
 - [x] ⚠ ISOLATION: `docs/design/supabase-isolation.md` — blast radius table
       + dedicated-project migration sequence; OSHA/legacy tables untouched.
 
-### Phase 6 — Test & release gates — ☐ not started
-Contract tests (GTC, deterministic retry, aspects, condition policies, image
-rules, policy confirmation, identity storage, signature rejection, deletion,
-pagination, reconciliation), authenticated E2E list, supervised SANDBOX
-scenario script, eBay portal test notifications, Stripe test-mode checklist.
+### Phase 6 — Test & release gates — ◐ contract tests done in-phase; live gates are runbooks
+- [x] Local gate green on every phase branch: tsc, eslint, **311 tests**,
+      production build; `npm audit --omit=dev` = 0 (Phase 5).
+- [x] Contract tests exist for: GTC, deterministic retry (no dup listings),
+      leaf category + required aspects, image count/order rules, policy
+      confirmation (no writes without mayCreate), identity storage +
+      refusal, signature rejection (412/400/5xx + cache), deletion
+      (erase/400/500), reconciliation (no-row-no-publish + stamp),
+      fail-closed auth/billing/rate-limit, republish-zero-credits, photo
+      preflight, floor money rules, proxy matcher + fail-closed redirects.
+- [ ] Missing contract tests: Metadata-API condition policies; order-poll
+      pagination unit test; image pixel-dimension rules (blocked on the P1
+      feature itself).
+- [ ] Authenticated browser E2E (signup, Google login, password recovery,
+      eBay connect, readiness, draft review, publish, inventory, billing
+      checkout/portal, logout) — NOT built; needs a Playwright harness with
+      a seeded Supabase user. (playwright-core is already a devDependency.)
+- [ ] SUPERVISED SANDBOX RUN (with Camilo, EBAY_ENV=sandbox): fresh seller
+      connect → identity/location captured → policy confirmation UI →
+      publish → retry (assert NO duplicate: same SKU/offer) → paid-order
+      fixture → sold claim → cross-channel delist. Then eBay portal test
+      notifications (deletion + order): expect 412 unsigned, 400 wrong
+      topic, 200 signed + DB effects (receipt row, erasure/sold event).
+- [ ] Stripe test-mode cycle: subscription checkout, webhook, credit
+      grant/spend/refund, portal cancellation, renewal.
 
-### Phase 7 — Analytics + advertising readiness — ☐ not started (gated on P0s)
-Funnel instrumentation, UTM persistence + opt-out, support email, spend
-alerts, backups, error notifications. **No advertising until ≥30 successful
-listings and ≥1 verified sale→sync→delist.**
+### Phase 7 — Analytics + advertising readiness — ☐ not started (correctly gated)
+Deliberately untouched until the P0 gates pass. Runbook lives in
+`docs/launch-readiness-report-2026-07-12.md`: funnel instrumentation
+(app_events already covers sign_in/draft/publish/sold — add landing,
+connect, billing conversion, cancellation), UTM persistence + opt-out,
+support email + incident owner, Anthropic/Vercel/Supabase spend alerts, DB
+backups, error notifications. **No advertising until ≥30 successful
+listings and ≥1 verified sale→sync→delist — plus Vercel Pro and the
+dedicated Supabase project.**
 
 ## Needs Camilo (cannot be done from code)
 - Flip `listing-photos` bucket to public (Supabase dashboard) — `GET
