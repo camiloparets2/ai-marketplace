@@ -164,7 +164,10 @@ describe("runPipeline — happy path (sandbox)", () => {
       status: "live",
       listingId: "123",
     });
-    expect(result.price.price).toBeGreaterThanOrEqual(result.price.floor);
+    expect(result.price.floor).not.toBeNull();
+    expect(result.price.price).toBeGreaterThanOrEqual(
+      result.price.floor as number
+    );
 
     // P0-8: the automated publish left an audit row
     expect(deps.audit).toHaveBeenCalledWith(
@@ -279,6 +282,34 @@ describe("runPipeline — guardrail routing", () => {
       null,
       expect.objectContaining({ failures: expect.any(Array) })
     );
+  });
+
+  it("NEVER auto-publishes an item with unknown shipping (the money bug)", async () => {
+    // MANUAL_ESTIMATE_NEEDED → estimatedShippingCost null → no floor exists.
+    // Live proof this guards: 50 lb concrete mix priced $6.50 with free
+    // shipping = $30-60 loss per unit.
+    const deps = fakeDeps({
+      identify: vi.fn().mockResolvedValue({
+        ...identified,
+        extraction: {
+          ...extraction,
+          suggestedShippingService: "MANUAL_ESTIMATE_NEEDED",
+          estimatedShippingCost: null,
+        },
+      }),
+    });
+    const result = await runPipeline(input, deps);
+
+    expect(result.publish.status).toBe("review");
+    if (result.publish.status === "review") {
+      const gates = result.publish.failures.map((f) => f.gate);
+      expect(gates).toContain("shipping_unknown");
+      expect(gates).toContain("price_floor");
+    }
+    expect(deps.publishEbay).not.toHaveBeenCalled();
+    expect(deps.recordListing).not.toHaveBeenCalled();
+    // the priced decision records an honest null floor
+    expect(result.price.floor).toBeNull();
   });
 
   it("holds VeRO-listed brands for a human authenticity check", async () => {

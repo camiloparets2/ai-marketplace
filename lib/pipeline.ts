@@ -254,6 +254,8 @@ export async function runPipeline(
     confidence: identified.confidence,
     price: decision.price,
     floor: decision.floor,
+    // null (MANUAL_ESTIMATE_NEEDED) fails the shipping_unknown gate → review.
+    shippingCost: extraction.estimatedShippingCost,
     title: extraction.title,
     brand: extraction.brand,
     category: extraction.category,

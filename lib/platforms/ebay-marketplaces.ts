@@ -16,29 +16,50 @@ export interface EbayMarketplace {
   currency: string; // ISO 4217 of the marketplace, e.g. "GBP"
   categoryTreeId: string; // Taxonomy API category_tree id
   contentLanguage: string; // value eBay accepts in Content-Language
+  domain: string; // consumer site host (without www.), e.g. "ebay.co.uk"
+  // Vetted domestic shipping service for auto-created default fulfillment
+  // policies (docs/design/ebay-seller-readiness.md). Absent → the default
+  // policy is created with handling time only and the seller picks a
+  // service on eBay; add the marketplace's code here to close that gap.
+  defaultShippingService?: { carrierCode: string; serviceCode: string };
 }
 
 const MARKETPLACE_BY_COUNTRY: Record<string, EbayMarketplace> = {
-  US: { id: "EBAY_US", currency: "USD", categoryTreeId: "0", contentLanguage: "en-US" },
-  CA: { id: "EBAY_CA", currency: "CAD", categoryTreeId: "2", contentLanguage: "en-CA" },
-  GB: { id: "EBAY_GB", currency: "GBP", categoryTreeId: "3", contentLanguage: "en-GB" },
-  AU: { id: "EBAY_AU", currency: "AUD", categoryTreeId: "15", contentLanguage: "en-AU" },
-  AT: { id: "EBAY_AT", currency: "EUR", categoryTreeId: "16", contentLanguage: "de-DE" },
-  BE: { id: "EBAY_BE", currency: "EUR", categoryTreeId: "123", contentLanguage: "nl-BE" },
-  FR: { id: "EBAY_FR", currency: "EUR", categoryTreeId: "71", contentLanguage: "fr-FR" },
-  DE: { id: "EBAY_DE", currency: "EUR", categoryTreeId: "77", contentLanguage: "de-DE" },
-  IT: { id: "EBAY_IT", currency: "EUR", categoryTreeId: "101", contentLanguage: "it-IT" },
-  NL: { id: "EBAY_NL", currency: "EUR", categoryTreeId: "146", contentLanguage: "nl-NL" },
-  ES: { id: "EBAY_ES", currency: "EUR", categoryTreeId: "186", contentLanguage: "es-ES" },
+  US: {
+    id: "EBAY_US", currency: "USD", categoryTreeId: "0", contentLanguage: "en-US", domain: "ebay.com",
+    defaultShippingService: { carrierCode: "USPS", serviceCode: "USPSGroundAdvantage" },
+  },
+  CA: {
+    id: "EBAY_CA", currency: "CAD", categoryTreeId: "2", contentLanguage: "en-CA", domain: "ebay.ca",
+    defaultShippingService: { carrierCode: "CanadaPost", serviceCode: "CA_PostRegularParcel" },
+  },
+  GB: {
+    id: "EBAY_GB", currency: "GBP", categoryTreeId: "3", contentLanguage: "en-GB", domain: "ebay.co.uk",
+    defaultShippingService: { carrierCode: "RoyalMail", serviceCode: "UK_RoyalMailSecondClassStandard" },
+  },
+  AU: {
+    id: "EBAY_AU", currency: "AUD", categoryTreeId: "15", contentLanguage: "en-AU", domain: "ebay.com.au",
+    defaultShippingService: { carrierCode: "AustraliaPost", serviceCode: "AU_Regular" },
+  },
+  AT: { id: "EBAY_AT", currency: "EUR", categoryTreeId: "16", contentLanguage: "de-DE", domain: "ebay.at" },
+  BE: { id: "EBAY_BE", currency: "EUR", categoryTreeId: "123", contentLanguage: "nl-BE", domain: "ebay.be" },
+  FR: { id: "EBAY_FR", currency: "EUR", categoryTreeId: "71", contentLanguage: "fr-FR", domain: "ebay.fr" },
+  DE: {
+    id: "EBAY_DE", currency: "EUR", categoryTreeId: "77", contentLanguage: "de-DE", domain: "ebay.de",
+    defaultShippingService: { carrierCode: "DHL", serviceCode: "DE_DHLPaket" },
+  },
+  IT: { id: "EBAY_IT", currency: "EUR", categoryTreeId: "101", contentLanguage: "it-IT", domain: "ebay.it" },
+  NL: { id: "EBAY_NL", currency: "EUR", categoryTreeId: "146", contentLanguage: "nl-NL", domain: "ebay.nl" },
+  ES: { id: "EBAY_ES", currency: "EUR", categoryTreeId: "186", contentLanguage: "es-ES", domain: "ebay.es" },
   // eBay.ch is German-primary; de-DE is the supported Content-Language value.
-  CH: { id: "EBAY_CH", currency: "CHF", categoryTreeId: "193", contentLanguage: "de-DE" },
+  CH: { id: "EBAY_CH", currency: "CHF", categoryTreeId: "193", contentLanguage: "de-DE", domain: "ebay.ch" },
   // en-IE is not in eBay's accepted Content-Language set; en-GB is.
-  IE: { id: "EBAY_IE", currency: "EUR", categoryTreeId: "205", contentLanguage: "en-GB" },
-  PL: { id: "EBAY_PL", currency: "PLN", categoryTreeId: "212", contentLanguage: "pl-PL" },
-  SG: { id: "EBAY_SG", currency: "SGD", categoryTreeId: "216", contentLanguage: "en-US" },
-  HK: { id: "EBAY_HK", currency: "HKD", categoryTreeId: "201", contentLanguage: "zh-HK" },
-  MY: { id: "EBAY_MY", currency: "MYR", categoryTreeId: "207", contentLanguage: "en-US" },
-  PH: { id: "EBAY_PH", currency: "PHP", categoryTreeId: "211", contentLanguage: "en-US" },
+  IE: { id: "EBAY_IE", currency: "EUR", categoryTreeId: "205", contentLanguage: "en-GB", domain: "ebay.ie" },
+  PL: { id: "EBAY_PL", currency: "PLN", categoryTreeId: "212", contentLanguage: "pl-PL", domain: "ebay.pl" },
+  SG: { id: "EBAY_SG", currency: "SGD", categoryTreeId: "216", contentLanguage: "en-US", domain: "ebay.com.sg" },
+  HK: { id: "EBAY_HK", currency: "HKD", categoryTreeId: "201", contentLanguage: "zh-HK", domain: "ebay.com.hk" },
+  MY: { id: "EBAY_MY", currency: "MYR", categoryTreeId: "207", contentLanguage: "en-US", domain: "ebay.com.my" },
+  PH: { id: "EBAY_PH", currency: "PHP", categoryTreeId: "211", contentLanguage: "en-US", domain: "ebay.ph" },
 };
 
 export const DEFAULT_EBAY_MARKETPLACE: EbayMarketplace =
@@ -51,6 +72,13 @@ export function marketplaceForCountry(
   return (
     MARKETPLACE_BY_COUNTRY[country.toUpperCase()] ?? DEFAULT_EBAY_MARKETPLACE
   );
+}
+
+// Where "Finish your eBay seller setup →" sends the user — eBay's seller
+// onboarding entry on the seller's OWN marketplace (ebay.co.uk, ebay.de, …),
+// never hardcoded ebay.com.
+export function sellerRegistrationUrl(marketplace: EbayMarketplace): string {
+  return `https://www.${marketplace.domain}/sl/sell`;
 }
 
 // Resolve a stored marketplace id (from connection meta) back to its full

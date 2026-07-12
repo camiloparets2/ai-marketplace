@@ -24,7 +24,11 @@ import { ASSIST_POST_URLS } from "@/lib/platforms/types";
 import { assistCopyText, composeListing } from "@/lib/platforms/compose";
 import { getConnection } from "@/lib/connections";
 import { hostListingPhoto } from "@/lib/storage";
-import { publishToEbay, EbayShipFromMissingError } from "@/lib/platforms/ebay";
+import {
+  publishToEbay,
+  EbayShipFromMissingError,
+  EbaySellerSetupError,
+} from "@/lib/platforms/ebay";
 import { publishToEtsy } from "@/lib/platforms/etsy";
 import { publishToShopify } from "@/lib/platforms/shopify";
 import { createPaymentLink } from "@/lib/stripe-link";
@@ -272,6 +276,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           message: err.message,
           actionUrl: "/settings/ship-from",
           actionLabel: "Add ship-from location →",
+        };
+      }
+      // Seller onboarding, not an error we can fix: incomplete eBay seller
+      // registration gets the registration CTA; a just-activating policy
+      // program gets the plain retry message. Never the raw eBay 400.
+      if (err instanceof EbaySellerSetupError) {
+        return {
+          platform: target,
+          status: "error",
+          message: err.message,
+          ...(err.kind === "not_registered"
+            ? {
+                // The seller's own marketplace (ebay.co.uk, ebay.de, …).
+                actionUrl: err.registrationUrl,
+                actionLabel: "Finish your eBay seller setup →",
+              }
+            : {}),
         };
       }
       return {

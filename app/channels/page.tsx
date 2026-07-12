@@ -16,7 +16,26 @@ interface ChannelStatus {
   accountLabel: string | null;
   lastSyncedAt: string | null;
   needsReconnect?: boolean;
+  // eBay only — publish-readiness checklist from the API (detect-only).
+  ebayReadiness?: {
+    shipFrom: boolean;
+    policies: "ready" | "missing" | "not_registered" | "unknown";
+    // Seller-registration CTA on the seller's own marketplace
+    // (ebay.co.uk, ebay.de, …), derived server-side.
+    registrationUrl?: string;
+  };
 }
+
+interface ReadinessFixResponse {
+  shipFrom?: boolean;
+  policies?: "ready" | "not_registered" | "pending";
+  message?: string;
+  actionUrl?: string;
+  error?: string;
+}
+
+const EBAY_POLICY_HELP =
+  "Business policies are eBay's shipping, payment, and return terms — every listing needs them. We create sensible defaults you can edit on eBay anytime (free shipping, 3-day handling, 30-day returns, buyer pays return shipping).";
 
 const CHANNEL_META: Record<
   ChannelStatus["platform"],
@@ -32,6 +51,49 @@ export default function ChannelsPage() {
   const [loading, setLoading] = useState(true);
   const [shopDomain, setShopDomain] = useState("");
   const [error, setError] = useState("");
+  // "Set up automatically" button state + outcome message for the eBay card.
+  const [fixing, setFixing] = useState(false);
+  const [fixNotice, setFixNotice] = useState<{
+    kind: "success" | "warn";
+    text: string;
+    actionUrl?: string;
+  } | null>(null);
+
+  async function fixEbayReadiness() {
+    setFixing(true);
+    setFixNotice(null);
+    try {
+      const res = await fetch("/api/channels/ebay-readiness", { method: "POST" });
+      const data = (await res.json()) as ReadinessFixResponse;
+      if (!res.ok) {
+        setFixNotice({
+          kind: "warn",
+          text: data.error ?? "eBay setup failed — try again.",
+        });
+        return;
+      }
+      if (data.policies === "ready" && data.shipFrom) {
+        setFixNotice({ kind: "success", text: "eBay is ready to publish." });
+        setChannels((prev) =>
+          prev.map((ch) =>
+            ch.platform === "ebay"
+              ? { ...ch, ebayReadiness: { shipFrom: true, policies: "ready" } }
+              : ch
+          )
+        );
+      } else {
+        setFixNotice({
+          kind: "warn",
+          text: data.message ?? "eBay setup needs one more step.",
+          actionUrl: data.actionUrl,
+        });
+      }
+    } catch {
+      setFixNotice({ kind: "warn", text: "Connection failed — try again." });
+    } finally {
+      setFixing(false);
+    }
+  }
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -134,7 +196,125 @@ export default function ChannelsPage() {
                   </p>
                 )}
 
-                {ch.platform === "ebay" && (
+                {/* eBay publish-readiness checklist — what's missing BEFORE
+                    the user burns an AI credit on a listing that can't post. */}
+                {ch.platform === "ebay" && ch.connected && (
+                  <ul className="flex flex-col gap-1.5 text-sm border-t border-gray-100 pt-2 mt-1">
+                    <li className="flex items-center gap-2 text-gray-700">
+                      <span aria-hidden className="text-green-600">✓</span>
+                      Connected
+                    </li>
+                    <li className="flex items-center gap-2">
+                      {ch.ebayReadiness?.shipFrom ? (
+                        <>
+                          <span aria-hidden className="text-green-600">✓</span>
+                          <span className="text-gray-700">Ship-from location</span>
+                          <Link
+                            href="/settings/ship-from"
+                            className="text-xs text-blue-600 hover:underline"
+                          >
+                            edit
+                          </Link>
+                        </>
+                      ) : (
+                        <>
+                          <span aria-hidden className="text-gray-300">○</span>
+                          <Link
+                            href="/settings/ship-from"
+                            className="text-blue-600 hover:underline"
+                          >
+                            Add your ship-from location →
+                          </Link>
+                        </>
+                      )}
+                    </li>
+                    <li className="flex flex-col gap-1">
+                      <span className="flex items-center gap-2">
+                        {ch.ebayReadiness?.policies === "ready" ? (
+                          <>
+                            <span aria-hidden className="text-green-600">✓</span>
+                            <span className="text-gray-700">Business policies</span>
+                          </>
+                        ) : (
+                          <>
+                            <span aria-hidden className="text-gray-300">○</span>
+                            <span className="text-gray-700">Business policies</span>
+                          </>
+                        )}
+                      </span>
+                      {ch.ebayReadiness?.policies === "missing" && (
+                        <span className="pl-6 flex flex-col gap-1">
+                          <span className="text-xs text-gray-500">{EBAY_POLICY_HELP}</span>
+                          <button
+                            onClick={() => void fixEbayReadiness()}
+                            disabled={fixing}
+                            className="self-start px-3 py-1.5 rounded-lg btn-primary font-medium text-xs disabled:opacity-50 transition-colors"
+                          >
+                            {fixing ? "Setting up…" : "Set up automatically"}
+                          </button>
+                        </span>
+                      )}
+                      {ch.ebayReadiness?.policies === "not_registered" && (
+                        <span className="pl-6 flex flex-col gap-1">
+                          <span className="text-xs text-gray-500">
+                            eBay needs you to finish seller registration
+                            (identity and payout details) before it allows
+                            selling policies — we can&apos;t do that part for
+                            you.
+                          </span>
+                          <a
+                            href={
+                              ch.ebayReadiness.registrationUrl ??
+                              "https://www.ebay.com/sl/sell"
+                            }
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="self-start text-blue-600 hover:underline text-sm font-medium"
+                          >
+                            Finish your eBay seller setup →
+                          </a>
+                        </span>
+                      )}
+                      {ch.ebayReadiness?.policies === "unknown" && (
+                        <span className="pl-6 text-xs text-gray-400">
+                          Couldn&apos;t check right now — publishing will set
+                          this up automatically if possible.
+                        </span>
+                      )}
+                    </li>
+                    {fixNotice && (
+                      <li
+                        role={fixNotice.kind === "success" ? "status" : "alert"}
+                        className={`text-xs rounded-lg px-2.5 py-1.5 ${
+                          fixNotice.kind === "success"
+                            ? "text-green-800 bg-green-50 border border-green-100"
+                            : "text-warn bg-warn-surface border border-amber-200"
+                        }`}
+                      >
+                        {fixNotice.text}
+                        {fixNotice.actionUrl && (
+                          <>
+                            {" "}
+                            <a
+                              href={fixNotice.actionUrl}
+                              target={
+                                fixNotice.actionUrl.startsWith("http")
+                                  ? "_blank"
+                                  : undefined
+                              }
+                              rel="noopener noreferrer"
+                              className="underline font-medium"
+                            >
+                              Fix →
+                            </a>
+                          </>
+                        )}
+                      </li>
+                    )}
+                  </ul>
+                )}
+
+                {ch.platform === "ebay" && !ch.connected && (
                   <Link
                     href="/settings/ship-from"
                     className="text-sm font-medium text-blue-600 hover:underline"

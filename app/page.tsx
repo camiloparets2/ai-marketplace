@@ -211,6 +211,9 @@ export default function Page() {
   const [condition, setCondition] =
     useState<ExtractionResult["condition"]>("Good");
   const [category, setCategory] = useState("");
+  // Manual shipping cost, required when no service estimate exists — unknown
+  // shipping must never publish as if shipping were free (the money rule).
+  const [manualShipCost, setManualShipCost] = useState<string>("");
   const [shippingService, setShippingService] =
     useState<ExtractionResult["suggestedShippingService"]>(
       "MANUAL_ESTIMATE_NEEDED"
@@ -398,9 +401,27 @@ export default function Page() {
     });
   }
 
+  // null exactly when there's no service estimate AND no valid manual cost —
+  // in that state publishing is blocked.
+  const parsedManualShip = parseFloat(manualShipCost);
+  const effectiveShippingCost: number | null =
+    shippingService === "MANUAL_ESTIMATE_NEEDED"
+      ? manualShipCost.trim() !== "" &&
+        isFinite(parsedManualShip) &&
+        parsedManualShip >= 0
+        ? parsedManualShip
+        : null
+      : getShippingRate(shippingService).cost;
+
   async function handlePublish() {
     if (!price || isNaN(parseFloat(price)) || parseFloat(price) <= 0) {
       setError("Please enter a valid price before publishing.");
+      return;
+    }
+    if (effectiveShippingCost === null) {
+      setError(
+        "We couldn't estimate shipping for this item — enter a shipping cost or pick a service before publishing."
+      );
       return;
     }
     if (targets.size === 0) {
@@ -427,7 +448,7 @@ export default function Page() {
             category,
             specs: extraction?.specs ?? {},
             price: parseFloat(price),
-            shippingCost: getShippingRate(shippingService).cost,
+            shippingCost: effectiveShippingCost,
           },
           image: imageBase64,
           mimeType: imageMime,
@@ -851,10 +872,29 @@ export default function Page() {
                   </option>
                 </select>
                 {shippingService === "MANUAL_ESTIMATE_NEEDED" && (
-                  <p className="text-xs text-orange-600 mt-1">
-                    Shipping estimate unavailable — factor this into your price
-                    or check USPS.com for rates.
-                  </p>
+                  <div className="mt-1 flex flex-col gap-1.5">
+                    <p className="text-xs text-orange-600">
+                      We couldn&apos;t estimate shipping for this item — enter a
+                      shipping cost or pick a service. Publishing is blocked
+                      until then (check USPS.com for rates).
+                    </p>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">
+                        $
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        inputMode="decimal"
+                        aria-label="Shipping cost (USD)"
+                        placeholder="Your shipping cost"
+                        className={`${inputClass} pl-7`}
+                        value={manualShipCost}
+                        onChange={(e) => setManualShipCost(e.target.value)}
+                      />
+                    </div>
+                  </div>
                 )}
               </Field>
 
@@ -863,7 +903,7 @@ export default function Page() {
                 price={price}
                 onPriceChange={setPrice}
                 costBasis={null}
-                shippingCost={getShippingRate(shippingService).cost}
+                shippingCost={effectiveShippingCost}
                 compsQuery={title}
                 aiRationale={priceRationale}
               />
@@ -939,7 +979,12 @@ export default function Page() {
 
             <button
               onClick={() => void handlePublish()}
-              disabled={stage === "publishing" || !price || targets.size === 0}
+              disabled={
+                stage === "publishing" ||
+                !price ||
+                targets.size === 0 ||
+                effectiveShippingCost === null
+              }
               className="w-full py-3 rounded-xl btn-primary font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {stage === "publishing"

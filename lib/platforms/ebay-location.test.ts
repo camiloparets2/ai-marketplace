@@ -17,7 +17,7 @@ import { saveConnection } from "@/lib/connections";
 import { getShipFromLocation } from "@/lib/locations";
 import {
   ensureEbayLocation,
-  setupEbayLocationOnConnect,
+  setupEbayOnConnect,
   EbayShipFromMissingError,
 } from "./ebay";
 
@@ -75,6 +75,10 @@ beforeEach(() => {
   vi.mocked(getShipFromLocation).mockReset();
   vi.mocked(getShipFromLocation).mockResolvedValue(null);
   delete process.env.EBAY_POSTAL_CODE;
+  // Connect-time onboarding also resolves policies — keep env overrides out.
+  delete process.env.EBAY_FULFILLMENT_POLICY_ID;
+  delete process.env.EBAY_PAYMENT_POLICY_ID;
+  delete process.env.EBAY_RETURN_POLICY_ID;
 });
 
 afterEach(() => {
@@ -239,30 +243,80 @@ describe("ensureEbayLocation", () => {
   });
 });
 
-describe("setupEbayLocationOnConnect", () => {
-  it("returns ready when a location was detected", async () => {
-    stubEbayApi(() =>
-      jsonResponse(200, {
-        locations: [
-          {
-            merchantLocationKey: "loc-1",
-            merchantLocationStatus: "ENABLED",
-            location: { address: { country: "US" } },
-          },
-        ],
-      })
-    );
-    expect(await setupEbayLocationOnConnect(conn())).toBe("ready");
+describe("setupEbayOnConnect", () => {
+  it("returns ready and resolves policies when a location was detected", async () => {
+    stubEbayApi((path) => {
+      if (path.startsWith("/sell/inventory/v1/location?")) {
+        return jsonResponse(200, {
+          locations: [
+            {
+              merchantLocationKey: "loc-1",
+              merchantLocationStatus: "ENABLED",
+              location: { address: { country: "US" } },
+            },
+          ],
+        });
+      }
+      if (path.includes("get_opted_in_programs")) {
+        return jsonResponse(200, {
+          programs: [{ programType: "SELLING_POLICY_MANAGEMENT" }],
+        });
+      }
+      if (path.startsWith("/sell/account/v1/fulfillment_policy")) {
+        return jsonResponse(200, {
+          fulfillmentPolicies: [{ fulfillmentPolicyId: "f1" }],
+        });
+      }
+      if (path.startsWith("/sell/account/v1/payment_policy")) {
+        return jsonResponse(200, { paymentPolicies: [{ paymentPolicyId: "p1" }] });
+      }
+      if (path.startsWith("/sell/account/v1/return_policy")) {
+        return jsonResponse(200, { returnPolicies: [{ returnPolicyId: "r1" }] });
+      }
+      return jsonResponse(500, {});
+    });
+
+    const c = conn();
+    expect(await setupEbayOnConnect(c)).toBe("ready");
+    // Connect-time onboarding cached both the location AND the policy ids.
+    expect(c.meta).toMatchObject({
+      merchantLocationKey: "loc-1",
+      fulfillmentPolicyId: "f1",
+      paymentPolicyId: "p1",
+      returnPolicyId: "r1",
+    });
   });
 
   it("returns ship_from_needed when there is no location and no profile", async () => {
     stubEbayApi(() => jsonResponse(200, { locations: [] }));
-    expect(await setupEbayLocationOnConnect(conn())).toBe("ship_from_needed");
+    expect(await setupEbayOnConnect(conn())).toBe("ship_from_needed");
   });
 
   it("swallows infra errors — publish-time ensure retries the chain", async () => {
     vi.mocked(getShipFromLocation).mockRejectedValue(new Error("db down"));
     stubEbayApi(() => jsonResponse(200, { locations: [] }));
-    expect(await setupEbayLocationOnConnect(conn())).toBe("ready");
+    expect(await setupEbayOnConnect(conn())).toBe("ready");
+  });
+
+  it("still reports ready when policy setup is deferred (seller not registered)", async () => {
+    stubEbayApi((path) => {
+      if (path.startsWith("/sell/inventory/v1/location?")) {
+        return jsonResponse(200, {
+          locations: [
+            {
+              merchantLocationKey: "loc-1",
+              merchantLocationStatus: "ENABLED",
+              location: { address: { country: "US" } },
+            },
+          ],
+        });
+      }
+      // Every Sell Account call → the not-a-registered-seller signal.
+      return jsonResponse(400, {
+        errors: [{ message: "User is not eligible for Business Policy." }],
+      });
+    });
+    // Best-effort: the checklist + publish-time chain surface the state.
+    expect(await setupEbayOnConnect(conn())).toBe("ready");
   });
 });

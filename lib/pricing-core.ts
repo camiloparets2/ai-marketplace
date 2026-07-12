@@ -50,7 +50,9 @@ export type PriceStrategy = "user_target" | "floor_markup" | "comps";
 
 export interface PriceDecision {
   price: number;
-  floor: number;
+  // null → floor uncomputable (no shipping estimate). Such an item can never
+  // pass the price_floor guardrail and is held for review.
+  floor: number | null;
   strategy: PriceStrategy;
   rationale: string;
   // The numbers the decision was computed from, persisted for the audit row.
@@ -75,15 +77,29 @@ export function styleTo99(n: number): number {
   return round2(styled >= n ? styled : Math.ceil(n) + 0.99);
 }
 
+/**
+ * The break-even floor, or NULL when it cannot be computed.
+ *
+ * MONEY RULE: unknown shipping is never coerced to $0. `shippingCost` is
+ * null exactly when the extraction says MANUAL_ESTIMATE_NEEDED — which by
+ * its own definition includes "too large for any flat-rate box", i.e. the
+ * items where shipping is MOST expensive (live bug: 50 lb concrete priced
+ * $6.50 with free shipping). A null floor means "this item is not safe to
+ * price or auto-publish until a shipping cost exists" — mirror of the
+ * explicit assumedCost ⚑ pattern used for a missing cost basis: loud,
+ * never silent.
+ */
 export function computeFloor(
   costBasis: number | null,
   shippingCost: number | null,
   d: PricingDefaults = PRICING_DEFAULTS
-): number {
+): number | null {
+  if (shippingCost === null) return null;
   const cost = costBasis ?? 0;
-  const ship = shippingCost ?? 0;
-  const flatBranch = (cost + ship + d.feeFlat + d.minMarginFlat) / (1 - d.feeRate);
-  const pctBranch = (cost + ship + d.feeFlat) / (1 - d.feeRate - d.minMarginPct);
+  const flatBranch =
+    (cost + shippingCost + d.feeFlat + d.minMarginFlat) / (1 - d.feeRate);
+  const pctBranch =
+    (cost + shippingCost + d.feeFlat) / (1 - d.feeRate - d.minMarginPct);
   return roundUpCent(Math.max(flatBranch, pctBranch));
 }
 
@@ -125,26 +141,36 @@ export function decidePrice(
       : assumedCost !== null
         ? ` No cost basis entered — assumed $${assumedCost.toFixed(2)} (${Math.round(d.assumedCostRate * 100)}% of the comp median); enter cost of goods for a real floor.`
         : " No cost basis recorded — floor assumes $0 cost; enter cost of goods for a real floor.";
+  // Loud, never silent: with no shipping estimate there IS no floor and no
+  // profitability claim — the item is held for review (guardrail).
+  const noFloorNote =
+    " No shipping estimate — the break-even floor can't be computed, so this item needs a shipping cost before it can publish.";
 
   if (req.targetPrice !== null) {
-    const price = round2(Math.max(req.targetPrice, floor));
-    const raised = req.targetPrice < floor;
+    const price =
+      floor === null ? round2(req.targetPrice) : round2(Math.max(req.targetPrice, floor));
+    const raised = floor !== null && req.targetPrice < floor;
     return {
       price,
       floor,
       strategy: "user_target",
       rationale:
         `Seller target $${req.targetPrice.toFixed(2)}` +
-        (raised
-          ? `, raised to the $${floor.toFixed(2)} floor (cost + fees + shipping + minimum margin).`
-          : ` accepted — at or above the $${floor.toFixed(2)} floor.`) +
+        (floor === null
+          ? " noted." + noFloorNote
+          : raised
+            ? `, raised to the $${floor.toFixed(2)} floor (cost + fees + shipping + minimum margin).`
+            : ` accepted — at or above the $${floor.toFixed(2)} floor.`) +
         costNote,
       inputs,
     };
   }
 
   if (trustedComps && comps.medianSoldPrice !== null) {
-    const price = styleTo99(Math.max(comps.medianSoldPrice, floor));
+    const price =
+      floor === null
+        ? styleTo99(comps.medianSoldPrice)
+        : styleTo99(Math.max(comps.medianSoldPrice, floor));
     const activeNote =
       comps.activeCount !== null
         ? ` ${comps.activeCount} active competing listing(s)${
@@ -158,7 +184,10 @@ export function decidePrice(
       floor,
       strategy: "comps",
       rationale:
-        `Market-priced from ${comps.soldCount} sold comp(s), median $${comps.medianSoldPrice.toFixed(2)}, clamped to the $${floor.toFixed(2)} floor.` +
+        `Market-priced from ${comps.soldCount} sold comp(s), median $${comps.medianSoldPrice.toFixed(2)}` +
+        (floor === null
+          ? "." + noFloorNote
+          : `, clamped to the $${floor.toFixed(2)} floor.`) +
         activeNote +
         costNote,
       inputs,
@@ -169,6 +198,24 @@ export function decidePrice(
     comps !== null && !trustedComps
       ? ` Comps too sparse to trust (${comps.soldCount} sold < ${MIN_SOLD_COMPS}) — priced conservatively with lower confidence.`
       : "";
+  if (floor === null) {
+    // Seed a price so the draft isn't blank, computed WITHOUT any shipping
+    // term and never presented as a floor — the null floor keeps the item
+    // out of auto-publish regardless.
+    const seedBase = computeFloor(effectiveCost, 0, d);
+    const price = styleTo99((seedBase ?? d.minMarginFlat) * d.markupOverFloor);
+    return {
+      price,
+      floor: null,
+      strategy: "floor_markup",
+      rationale:
+        `Provisional price (excludes shipping entirely).` +
+        noFloorNote +
+        sparseNote +
+        costNote,
+      inputs,
+    };
+  }
   const price = styleTo99(floor * d.markupOverFloor);
   return {
     price,

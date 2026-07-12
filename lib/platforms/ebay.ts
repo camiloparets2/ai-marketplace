@@ -38,6 +38,8 @@ import type { ShipFromLocation } from "@/lib/ship-from";
 import {
   marketplaceForCountry,
   marketplaceById,
+  sellerRegistrationUrl,
+  DEFAULT_EBAY_MARKETPLACE,
 } from "@/lib/platforms/ebay-marketplaces";
 import type { EbayMarketplace } from "@/lib/platforms/ebay-marketplaces";
 
@@ -216,18 +218,20 @@ async function ebayFetch(
   });
 }
 
-async function ebayError(res: Response, step: string): Promise<Error> {
-  const text = await res.text();
-  let detail = text;
+function parseEbayErrorDetail(text: string): string {
   try {
     const parsed = JSON.parse(text) as {
       errors?: Array<{ message?: string; longMessage?: string }>;
     };
     const first = parsed.errors?.[0];
-    detail = first?.longMessage ?? first?.message ?? text;
+    return first?.longMessage ?? first?.message ?? text;
   } catch {
-    // keep raw text
+    return text;
   }
+}
+
+async function ebayError(res: Response, step: string): Promise<Error> {
+  const detail = parseEbayErrorDetail(await res.text());
   return new Error(`eBay ${step} failed (${res.status}): ${detail}`);
 }
 
@@ -336,27 +340,33 @@ export interface EnsuredEbayLocation {
   source: "meta" | "detected" | "created" | "env_fallback";
 }
 
-// Persist the resolved key + marketplace on the connection so subsequent
-// publishes skip every lookup. Best-effort: a meta write failure must not
-// fail a publish that already has everything it needs.
+// Persist resolved values on the connection so subsequent publishes skip
+// every lookup. Mutates conn.meta in place FIRST so later cache writes in
+// the same flow (e.g. location, then policies) never clobber each other.
+// Best-effort: a meta write failure must not fail a publish that already
+// has everything it needs.
+async function cacheConnectionMeta(
+  conn: PlatformConnection,
+  patch: Record<string, string>
+): Promise<void> {
+  Object.assign(conn.meta, patch);
+  try {
+    await saveConnection(conn);
+  } catch (err) {
+    console.warn("[ebay] failed to cache connection meta", err);
+  }
+}
+
 async function cacheLocationOnConnection(
   conn: PlatformConnection,
   merchantLocationKey: string,
   marketplace: EbayMarketplace
 ): Promise<void> {
-  try {
-    await saveConnection({
-      ...conn,
-      meta: {
-        ...conn.meta,
-        merchantLocationKey,
-        marketplaceId: marketplace.id,
-        currency: marketplace.currency,
-      },
-    });
-  } catch (err) {
-    console.warn("[ebay] failed to cache merchant location on connection", err);
-  }
+  await cacheConnectionMeta(conn, {
+    merchantLocationKey,
+    marketplaceId: marketplace.id,
+    currency: marketplace.currency,
+  });
 }
 
 /**
@@ -433,23 +443,31 @@ export async function ensureEbayLocation(
 export type ConnectLocationStatus = "ready" | "ship_from_needed";
 
 /**
- * Connect-time hook for the OAuth callback: detect (or create, when a
- * ship-from profile already exists) the seller's location so publishing
- * works immediately. "ship_from_needed" → the callback routes the user to
- * the ship-from form. Never throws on infra errors — publish-time
- * ensureEbayLocation retries the whole chain anyway.
+ * Connect-time hook for the OAuth callback: resolve the seller's ship-from
+ * location AND business-policy readiness so publishing works immediately.
+ * "ship_from_needed" → the callback routes the user to the ship-from form.
+ * Everything else is best-effort — the /channels checklist surfaces what's
+ * left, and publish-time ensure chains retry anyway.
  */
-export async function setupEbayLocationOnConnect(
+export async function setupEbayOnConnect(
   conn: PlatformConnection
 ): Promise<ConnectLocationStatus> {
+  let marketplace: EbayMarketplace;
   try {
-    await ensureEbayLocation(conn);
-    return "ready";
+    ({ marketplace } = await ensureEbayLocation(conn));
   } catch (err) {
     if (err instanceof EbayShipFromMissingError) return "ship_from_needed";
     console.warn("[ebay] connect-time location setup failed; deferring", err);
     return "ready";
   }
+  try {
+    await ensureEbayPolicies(conn, marketplace);
+  } catch (err) {
+    // Not registered / program still activating / infra hiccup — all
+    // surfaced by the checklist and retried at publish time.
+    console.warn("[ebay] connect-time policy setup deferred", err);
+  }
+  return "ready";
 }
 
 // ─── Publish steps ────────────────────────────────────────────────────────────
@@ -476,64 +494,472 @@ async function suggestCategoryId(
   return id;
 }
 
-interface PolicyIds {
+// ─── Seller readiness: business policies ──────────────────────────────────────
+//
+// Every offer must reference a fulfillment + payment + return policy, which
+// a seller only has when they are (a) a registered seller with payouts set
+// up, (b) opted into the Business Policies program, and (c) own one of each.
+// This is ONBOARDING, not an error (docs/design/ebay-seller-readiness.md):
+// ensureEbayPolicies mirrors the ship-from ensure chain — env overrides →
+// meta cache → detect → remediate (opt-in / create defaults) → cache — so
+// existing connections self-heal on their next publish.
+
+export interface PolicyIds {
   fulfillmentPolicyId: string;
   paymentPolicyId: string;
   returnPolicyId: string;
 }
 
-async function resolvePolicies(
-  accessToken: string,
-  marketplaceId: string
-): Promise<PolicyIds> {
-  async function firstPolicyId(
-    kind: "fulfillment_policy" | "payment_policy" | "return_policy",
-    envOverride: string | undefined,
-    listKey: string,
-    idKey: string
-  ): Promise<string> {
-    if (envOverride) return envOverride;
-    const res = await ebayFetch(
-      accessToken,
-      `/sell/account/v1/${kind}?marketplace_id=${marketplaceId}`
+export type EbaySellerSetupKind = "not_registered" | "policies_pending";
+
+// The states the app cannot silently fix. Messages are end-user safe:
+// never a raw eBay status code, never config language.
+export class EbaySellerSetupError extends Error {
+  constructor(
+    public readonly kind: EbaySellerSetupKind,
+    // Seller-registration CTA on the seller's own marketplace (ebay.co.uk,
+    // ebay.de, …). Callers that know the marketplace pass the derived URL;
+    // the US entry is only the last-resort fallback.
+    public readonly registrationUrl: string = EBAY_SELLER_REGISTRATION_URL
+  ) {
+    super(
+      kind === "not_registered"
+        ? "Your eBay account isn't set up for selling yet. Finish eBay's seller registration (identity + payout details), then publish again."
+        : "eBay is still enabling business policies on your account — this usually takes a few minutes. Try publishing again shortly."
     );
-    if (!res.ok) throw await ebayError(res, `${kind} lookup`);
-    const data = (await res.json()) as Record<
-      string,
-      Array<Record<string, string>>
-    >;
-    const id = data[listKey]?.[0]?.[idKey];
-    if (!id) {
-      throw new Error(
-        `Your eBay account has no ${kind.replace("_", " ")}. Create business policies at ebay.com → Account → Business policies, then retry.`
-      );
-    }
-    return id;
+    this.name = "EbaySellerSetupError";
+  }
+}
+
+// Fallback "Finish your eBay seller setup →" target when no marketplace is
+// known yet; marketplace-aware paths use sellerRegistrationUrl(marketplace).
+export const EBAY_SELLER_REGISTRATION_URL = sellerRegistrationUrl(
+  DEFAULT_EBAY_MARKETPLACE
+);
+
+const POLICY_PROGRAM = "SELLING_POLICY_MANAGEMENT";
+
+// eBay reports a non-registered seller as HTTP 400/403 with a message like
+// "User is not eligible for Business Policy." on any policy/program call.
+function isNotEligibleDetail(status: number, detail: string): boolean {
+  return (status === 400 || status === 403) && /not eligible/i.test(detail);
+}
+
+// Like ebayError, but recognises the not-a-registered-seller signal and
+// converts it to the typed onboarding error instead of a raw 400.
+async function policyApiError(res: Response, step: string): Promise<Error> {
+  const detail = parseEbayErrorDetail(await res.text());
+  if (isNotEligibleDetail(res.status, detail)) {
+    return new EbaySellerSetupError("not_registered");
+  }
+  return new Error(`eBay ${step} failed (${res.status}): ${detail}`);
+}
+
+interface PolicyKindSpec {
+  kind: "fulfillment_policy" | "payment_policy" | "return_policy";
+  listKey: string;
+  idKey: keyof PolicyIds;
+  envVar: string;
+}
+
+const POLICY_KINDS: ReadonlyArray<PolicyKindSpec> = [
+  {
+    kind: "fulfillment_policy",
+    listKey: "fulfillmentPolicies",
+    idKey: "fulfillmentPolicyId",
+    envVar: "EBAY_FULFILLMENT_POLICY_ID",
+  },
+  {
+    kind: "payment_policy",
+    listKey: "paymentPolicies",
+    idKey: "paymentPolicyId",
+    envVar: "EBAY_PAYMENT_POLICY_ID",
+  },
+  {
+    kind: "return_policy",
+    listKey: "returnPolicies",
+    idKey: "returnPolicyId",
+    envVar: "EBAY_RETURN_POLICY_ID",
+  },
+];
+
+async function isOptedIntoPolicies(accessToken: string): Promise<boolean> {
+  const res = await ebayFetch(
+    accessToken,
+    "/sell/account/v1/program/get_opted_in_programs"
+  );
+  if (!res.ok) throw await policyApiError(res, "program lookup");
+  const data = (await res.json()) as {
+    programs?: Array<{ programType?: string }> | null;
+  };
+  return (data.programs ?? []).some((p) => p.programType === POLICY_PROGRAM);
+}
+
+async function optIntoPolicies(accessToken: string): Promise<void> {
+  const res = await ebayFetch(accessToken, "/sell/account/v1/program/opt_in", {
+    method: "POST",
+    body: { programType: POLICY_PROGRAM },
+  });
+  if (!res.ok) throw await policyApiError(res, "business-policy opt-in");
+}
+
+// First policy of a kind for the marketplace (id + name, so the caller can
+// recognise an app-created default); null when the seller has none
+// (remediable) — the typed onboarding error when they can't have any.
+async function listFirstPolicy(
+  accessToken: string,
+  spec: PolicyKindSpec,
+  marketplaceId: string
+): Promise<{ id: string; name: string | null } | null> {
+  const res = await ebayFetch(
+    accessToken,
+    `/sell/account/v1/${spec.kind}?marketplace_id=${marketplaceId}`
+  );
+  if (!res.ok) throw await policyApiError(res, `${spec.kind} lookup`);
+  const data = (await res.json()) as Record<
+    string,
+    Array<Record<string, string>> | undefined
+  >;
+  const first = data[spec.listKey]?.[0];
+  const id = first?.[spec.idKey];
+  return id ? { id, name: first?.name ?? null } : null;
+}
+
+// ── Default policy payloads (pure, exported for tests) ────────────────────────
+//
+// Conservative and later-editable: created only when the seller has none,
+// named so they're recognisable in eBay's Business Policies manager, and
+// never silently replacing anything the seller already set up.
+
+const POLICY_CATEGORY_TYPES = [{ name: "ALL_EXCLUDING_MOTORS_VEHICLES" }];
+
+export interface EbayFulfillmentPolicyPayload {
+  name: string;
+  marketplaceId: string;
+  categoryTypes: Array<{ name: string }>;
+  handlingTime: { value: number; unit: "DAY" };
+  shippingOptions?: Array<{
+    optionType: "DOMESTIC";
+    costType: "FLAT_RATE";
+    shippingServices: Array<{
+      sortOrder: number;
+      shippingCarrierCode: string;
+      shippingServiceCode: string;
+      freeShipping: boolean;
+    }>;
+  }>;
+}
+
+// Name doubles as the marker that a detected policy is OUR default — the
+// per-offer shipping-cost override only ever applies to this policy, never
+// to something the seller configured themselves.
+export const DEFAULT_FULFILLMENT_POLICY_NAME = "Snap to List default shipping";
+
+export function buildDefaultFulfillmentPolicy(
+  marketplace: EbayMarketplace
+): EbayFulfillmentPolicyPayload {
+  return {
+    name: DEFAULT_FULFILLMENT_POLICY_NAME,
+    marketplaceId: marketplace.id,
+    categoryTypes: POLICY_CATEGORY_TYPES,
+    handlingTime: { value: 3, unit: "DAY" },
+    // Buyer-paid shipping, NEVER free by default: a silent free-shipping
+    // policy written to a real seller's account makes the seller absorb an
+    // uncosted bill (the $6.50 concrete-bag bug). The per-listing amount the
+    // buyer pays comes from the offer's shippingCostOverrides (priority 1
+    // matches this service's sortOrder). Free shipping stays a deliberate
+    // opt-in on eBay's policy manager. Marketplaces without a vetted service
+    // code get a policy with handling time only — the seller picks a service
+    // on eBay.
+    ...(marketplace.defaultShippingService
+      ? {
+          shippingOptions: [
+            {
+              optionType: "DOMESTIC" as const,
+              costType: "FLAT_RATE" as const,
+              shippingServices: [
+                {
+                  sortOrder: 1,
+                  shippingCarrierCode:
+                    marketplace.defaultShippingService.carrierCode,
+                  shippingServiceCode:
+                    marketplace.defaultShippingService.serviceCode,
+                  freeShipping: false,
+                },
+              ],
+            },
+          ],
+        }
+      : {}),
+  };
+}
+
+export interface EbayPaymentPolicyPayload {
+  name: string;
+  marketplaceId: string;
+  categoryTypes: Array<{ name: string }>;
+  immediatePay: boolean;
+}
+
+export function buildDefaultPaymentPolicy(
+  marketplace: EbayMarketplace
+): EbayPaymentPolicyPayload {
+  // Managed payments (every active eBay seller today) needs no explicit
+  // payment methods; immediate pay avoids unpaid-item chasing.
+  return {
+    name: "Snap to List default payments",
+    marketplaceId: marketplace.id,
+    categoryTypes: POLICY_CATEGORY_TYPES,
+    immediatePay: true,
+  };
+}
+
+export interface EbayReturnPolicyPayload {
+  name: string;
+  marketplaceId: string;
+  categoryTypes: Array<{ name: string }>;
+  returnsAccepted: boolean;
+  returnPeriod: { value: number; unit: "DAY" };
+  returnShippingCostPayer: "BUYER" | "SELLER";
+  refundMethod: "MONEY_BACK";
+}
+
+export function buildDefaultReturnPolicy(
+  marketplace: EbayMarketplace
+): EbayReturnPolicyPayload {
+  // 30-day returns, buyer pays return shipping — the documented default
+  // (shown in the checklist copy), editable in eBay's policy manager.
+  return {
+    name: "Snap to List default returns",
+    marketplaceId: marketplace.id,
+    categoryTypes: POLICY_CATEGORY_TYPES,
+    returnsAccepted: true,
+    returnPeriod: { value: 30, unit: "DAY" },
+    returnShippingCostPayer: "BUYER",
+    refundMethod: "MONEY_BACK",
+  };
+}
+
+function defaultPolicyPayload(
+  spec: PolicyKindSpec,
+  marketplace: EbayMarketplace
+): unknown {
+  switch (spec.kind) {
+    case "fulfillment_policy":
+      return buildDefaultFulfillmentPolicy(marketplace);
+    case "payment_policy":
+      return buildDefaultPaymentPolicy(marketplace);
+    case "return_policy":
+      return buildDefaultReturnPolicy(marketplace);
+  }
+}
+
+async function createPolicy(
+  accessToken: string,
+  spec: PolicyKindSpec,
+  marketplace: EbayMarketplace
+): Promise<string> {
+  const res = await ebayFetch(accessToken, `/sell/account/v1/${spec.kind}`, {
+    method: "POST",
+    contentLanguage: marketplace.contentLanguage,
+    body: defaultPolicyPayload(spec, marketplace),
+  });
+  if (res.ok) {
+    const data = (await res.json()) as Record<string, string | undefined>;
+    const id = data[spec.idKey];
+    if (id) return id;
+    throw new Error(`eBay ${spec.kind} creation returned no policy id`);
+  }
+  // Duplicate-name race (concurrent publish already created it) → adopt the
+  // existing policy instead of failing.
+  const err = await policyApiError(res, `${spec.kind} creation`);
+  const existing = await listFirstPolicy(
+    accessToken,
+    spec,
+    marketplace.id
+  ).catch(() => null);
+  if (existing) return existing.id;
+  throw err;
+}
+
+/**
+ * Resolve the three business-policy ids for the seller's marketplace:
+ * env overrides → connection meta → detect on eBay → remediate (opt into
+ * the program / create conservative defaults) → cache in meta.
+ *
+ * Throws EbaySellerSetupError("not_registered") when eBay reports the
+ * account ineligible (seller registration incomplete — the one state the
+ * app cannot fix), or ("policies_pending") when eligibility flips mid-flow
+ * right after our opt-in (program still activating).
+ */
+export async function ensureEbayPolicies(
+  conn: PlatformConnection,
+  marketplace: EbayMarketplace
+): Promise<PolicyIds> {
+  const resolved: Partial<PolicyIds> = {};
+  for (const spec of POLICY_KINDS) {
+    const fromEnv = process.env[spec.envVar];
+    const value = fromEnv ?? conn.meta[spec.idKey];
+    if (value) resolved[spec.idKey] = value;
+  }
+  if (
+    resolved.fulfillmentPolicyId &&
+    resolved.paymentPolicyId &&
+    resolved.returnPolicyId
+  ) {
+    return resolved as PolicyIds;
   }
 
-  const [fulfillmentPolicyId, paymentPolicyId, returnPolicyId] =
-    await Promise.all([
-      firstPolicyId(
-        "fulfillment_policy",
-        process.env.EBAY_FULFILLMENT_POLICY_ID,
-        "fulfillmentPolicies",
-        "fulfillmentPolicyId"
-      ),
-      firstPolicyId(
-        "payment_policy",
-        process.env.EBAY_PAYMENT_POLICY_ID,
-        "paymentPolicies",
-        "paymentPolicyId"
-      ),
-      firstPolicyId(
-        "return_policy",
-        process.env.EBAY_RETURN_POLICY_ID,
-        "returnPolicies",
-        "returnPolicyId"
-      ),
-    ]);
+  const token = (await freshConnection(conn)).accessToken;
 
-  return { fulfillmentPolicyId, paymentPolicyId, returnPolicyId };
+  // Detect + remediate. A "not eligible" AFTER a successful opt-in means the
+  // program is still activating, not that the seller is unregistered.
+  let justOptedIn = false;
+  // Determined only when the fulfillment policy is resolved on eBay this
+  // run: is it OUR default (created now, or name-matched)? null → the id
+  // came from env/meta and any prior determination in meta stands.
+  let fulfillmentIsAppDefault: boolean | null = null;
+  try {
+    if (!(await isOptedIntoPolicies(token))) {
+      await optIntoPolicies(token);
+      justOptedIn = true;
+    }
+
+    for (const spec of POLICY_KINDS) {
+      if (resolved[spec.idKey]) continue;
+      const existing = await listFirstPolicy(token, spec, marketplace.id);
+      const id = existing?.id ?? (await createPolicy(token, spec, marketplace));
+      resolved[spec.idKey] = id;
+      if (spec.kind === "fulfillment_policy") {
+        fulfillmentIsAppDefault = existing
+          ? existing.name === DEFAULT_FULFILLMENT_POLICY_NAME
+          : true;
+      }
+    }
+  } catch (err) {
+    if (err instanceof EbaySellerSetupError) {
+      // Re-raise with the seller's own marketplace registration URL (and the
+      // policies_pending reclassification right after a successful opt-in).
+      const kind =
+        justOptedIn && err.kind === "not_registered"
+          ? "policies_pending"
+          : err.kind;
+      throw new EbaySellerSetupError(kind, sellerRegistrationUrl(marketplace));
+    }
+    throw err;
+  }
+
+  const ids = resolved as PolicyIds;
+
+  // Cache only detection/creation results — env overrides stay in env so a
+  // config change keeps winning.
+  const patch: Record<string, string> = {};
+  for (const spec of POLICY_KINDS) {
+    if (!process.env[spec.envVar]) patch[spec.idKey] = ids[spec.idKey];
+  }
+  if (fulfillmentIsAppDefault !== null) {
+    patch.fulfillmentPolicyAppDefault = String(fulfillmentIsAppDefault);
+  }
+  if (Object.keys(patch).length > 0) {
+    await cacheConnectionMeta(conn, patch);
+  }
+
+  return ids;
+}
+
+// Whether the fulfillment policy the next offer will use is the app-created
+// default. Only then may the offer attach a shippingCostOverrides entry — a
+// policy the seller configured (or pinned via env) is theirs and is never
+// overridden. Meta is written by ensureEbayPolicies; absent → false (assume
+// seller-owned, the safe direction).
+export function fulfillmentPolicyIsAppDefault(
+  conn: PlatformConnection
+): boolean {
+  if (process.env.EBAY_FULFILLMENT_POLICY_ID) return false;
+  return conn.meta.fulfillmentPolicyAppDefault === "true";
+}
+
+// ── Detect-only readiness (channels checklist) ────────────────────────────────
+//
+// GET /api/channels must never mutate the seller's eBay account from a page
+// view, so this probes without opting in or creating anything. Remediation
+// runs at connect time, at publish time, and via the explicit
+// "Set up automatically" action (POST /api/channels/ebay-readiness).
+
+export type EbayPoliciesReadiness =
+  | "ready"
+  | "missing" // fixable automatically (not opted in / no policies yet)
+  | "not_registered" // seller must finish eBay registration — CTA
+  | "unknown"; // probe failed; publish-time chain will retry
+
+export interface EbayReadiness {
+  shipFrom: boolean;
+  policies: EbayPoliciesReadiness;
+  // Seller-registration CTA target on the seller's own marketplace
+  // (ebay.co.uk, ebay.de, …) — used when policies === "not_registered".
+  registrationUrl: string;
+}
+
+export async function detectEbayReadiness(
+  conn: PlatformConnection
+): Promise<EbayReadiness> {
+  let marketplace = marketplaceById(conn.meta.marketplaceId);
+  const regUrl = (): string =>
+    sellerRegistrationUrl(marketplace ?? DEFAULT_EBAY_MARKETPLACE);
+
+  let token: string;
+  try {
+    token = (await freshConnection(conn)).accessToken;
+  } catch {
+    return {
+      shipFrom: Boolean(conn.meta.merchantLocationKey),
+      policies: "unknown",
+      registrationUrl: regUrl(),
+    };
+  }
+
+  let shipFrom = Boolean(conn.meta.merchantLocationKey);
+  if (!shipFrom) {
+    try {
+      const detected = await detectEbayLocation(token);
+      if (detected) {
+        shipFrom = true;
+        marketplace ??= marketplaceForCountry(detected.country);
+      }
+    } catch {
+      // leave shipFrom false — the settings page handles it
+    }
+  }
+
+  const envReady = POLICY_KINDS.every(
+    (spec) => process.env[spec.envVar] ?? conn.meta[spec.idKey]
+  );
+  if (envReady) {
+    return { shipFrom, policies: "ready", registrationUrl: regUrl() };
+  }
+
+  const marketplaceId = (marketplace ?? marketplaceForCountry(null)).id;
+  try {
+    if (!(await isOptedIntoPolicies(token))) {
+      return { shipFrom, policies: "missing", registrationUrl: regUrl() };
+    }
+    for (const spec of POLICY_KINDS) {
+      if (process.env[spec.envVar] ?? conn.meta[spec.idKey]) continue;
+      if ((await listFirstPolicy(token, spec, marketplaceId)) === null) {
+        return { shipFrom, policies: "missing", registrationUrl: regUrl() };
+      }
+    }
+    return { shipFrom, policies: "ready", registrationUrl: regUrl() };
+  } catch (err) {
+    if (err instanceof EbaySellerSetupError && err.kind === "not_registered") {
+      return {
+        shipFrom,
+        policies: "not_registered",
+        registrationUrl: regUrl(),
+      };
+    }
+    return { shipFrom, policies: "unknown", registrationUrl: regUrl() };
+  }
 }
 
 // ─── Publish ──────────────────────────────────────────────────────────────────
@@ -601,7 +1027,16 @@ export interface EbayOfferPayload {
   listingDescription: string;
   merchantLocationKey: string;
   pricingSummary: { price: { value: string; currency: string } };
-  listingPolicies: PolicyIds;
+  listingPolicies: PolicyIds & {
+    // Per-listing buyer-paid shipping charge, matched by priority to the
+    // sortOrder-1 service in the app-default fulfillment policy. Present
+    // ONLY when that policy is in use — never over a seller's own policy.
+    shippingCostOverrides?: Array<{
+      priority: number;
+      shippingServiceType: "DOMESTIC";
+      shippingCost: { value: string; currency: string };
+    }>;
+  };
 }
 
 export function buildEbayOfferPayload(
@@ -610,8 +1045,23 @@ export function buildEbayOfferPayload(
   categoryId: string,
   merchantLocationKey: string,
   policies: PolicyIds,
-  marketplace: EbayMarketplace
+  marketplace: EbayMarketplace,
+  // True when the fulfillment policy is the app-created default (see
+  // fulfillmentPolicyIsAppDefault) — that policy carries no shipping amount
+  // of its own, so the offer MUST supply the buyer-paid charge.
+  usesAppDefaultFulfillment: boolean
 ): EbayOfferPayload {
+  const needsShippingCharge =
+    usesAppDefaultFulfillment &&
+    marketplace.defaultShippingService !== undefined;
+  if (needsShippingCharge && input.shippingCost === null) {
+    // The money rule, enforced at the last exit: without a shipping cost the
+    // default policy would charge the buyer $0.00 — free shipping through
+    // the back door. Guardrails/UI should have caught this earlier.
+    throw new Error(
+      "This item has no shipping cost estimate — add one before publishing to eBay."
+    );
+  }
   return {
     sku,
     marketplaceId: marketplace.id,
@@ -623,7 +1073,23 @@ export function buildEbayOfferPayload(
     pricingSummary: {
       price: { value: input.price.toFixed(2), currency: marketplace.currency },
     },
-    listingPolicies: policies,
+    listingPolicies: {
+      ...policies,
+      ...(needsShippingCharge && input.shippingCost !== null
+        ? {
+            shippingCostOverrides: [
+              {
+                priority: 1,
+                shippingServiceType: "DOMESTIC" as const,
+                shippingCost: {
+                  value: input.shippingCost.toFixed(2),
+                  currency: marketplace.currency,
+                },
+              },
+            ],
+          }
+        : {}),
+    },
   };
 }
 
@@ -644,7 +1110,10 @@ export async function publishToEbay(
 
   const [categoryId, policies] = await Promise.all([
     suggestCategoryId(conn.accessToken, composed.title, marketplace.categoryTreeId),
-    resolvePolicies(conn.accessToken, marketplace.id),
+    // Seller-readiness ensure chain: cached ids, else detect / opt-in /
+    // create defaults. Throws the typed onboarding error when the seller
+    // hasn't finished eBay registration.
+    ensureEbayPolicies(conn, marketplace),
   ]);
 
   const itemRes = await ebayFetch(
@@ -667,7 +1136,9 @@ export async function publishToEbay(
       categoryId,
       merchantLocationKey,
       policies,
-      marketplace
+      marketplace,
+      // Meta was just refreshed by ensureEbayPolicies above.
+      fulfillmentPolicyIsAppDefault(conn)
     ),
   });
   if (!offerRes.ok) throw await ebayError(offerRes, "offer creation");
@@ -678,7 +1149,23 @@ export async function publishToEbay(
     `/sell/inventory/v1/offer/${offer.offerId}/publish`,
     { method: "POST", contentLanguage: marketplace.contentLanguage, body: {} }
   );
-  if (!publishRes.ok) throw await ebayError(publishRes, "offer publish");
+  if (!publishRes.ok) {
+    const err = await ebayError(publishRes, "offer publish");
+    // The app-default policy on a marketplace with no vetted service code is
+    // created with handling time only (shippingOptions is optional at policy
+    // creation, but eBay refuses to PUBLISH an offer whose policy has no
+    // shipping service). Give the seller the fix instead of the raw eBay 400.
+    if (
+      fulfillmentPolicyIsAppDefault(conn) &&
+      !marketplace.defaultShippingService &&
+      /shipping service/i.test(err.message)
+    ) {
+      throw new Error(
+        `Your eBay shipping policy has no shipping service yet — open eBay's Business Policies manager, add a service to "${DEFAULT_FULFILLMENT_POLICY_NAME}", then publish again.`
+      );
+    }
+    throw err;
+  }
   const published = (await publishRes.json()) as { listingId: string };
 
   const url = isProduction()
