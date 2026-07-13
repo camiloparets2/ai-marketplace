@@ -50,11 +50,29 @@ create unique index if not exists sold_events_dedupe_env_idx
   nulls not distinct;
 drop index if exists public.sold_events_dedupe_idx;
 
--- ── Known cross-contamination from the 2026-07-13 sandbox run ──────────────
--- Reclassify the sandbox listing that landed in production state so the
--- production order-sync cron stops polling real eBay for it. Scoped to the
--- one known listing id; verify with the SELECTs before/after.
---   select id, external_id, status from public.marketplace_listings
+-- ── Backfill: known cross-contamination from the sandbox test run ──────────
+-- Every column above defaulted existing rows to 'production' — correct for
+-- everything EXCEPT the rows today's sandbox run wrote into the shared DB.
+-- Each block below is scoped to an explicit, known identifier. Review with
+-- the SELECT above each UPDATE before applying; row counts should match.
+
+-- (a) The clobbered eBay connection. The sandbox connect OVERWROTE the
+-- production row, so the surviving row holds the SANDBOX test seller
+-- (testuser_snaptolist) and sandbox tokens. It IS a sandbox connection —
+-- reclassify it so the sandbox keeps using it, and production shows a clean
+-- "Connect eBay" (no more presenting a sandbox refresh token to the
+-- production client → 400 invalid_grant). Reconnect production eBay once
+-- after applying.
+--   select user_id, platform, environment, meta->>'ebayUsername' as ebay_user
+--     from public.platform_connections where platform = 'ebay';
+update public.platform_connections
+  set environment = 'sandbox'
+  where platform = 'ebay'
+    and meta->>'ebayUsername' = 'testuser_snaptolist';
+
+-- (b) The sandbox listing recorded as live in production state — the row the
+-- production order-sync cron would poll REAL eBay for.
+--   select id, external_id, status, environment from public.marketplace_listings
 --     where external_id = '110589875643';
 update public.marketplace_listings
   set environment = 'sandbox'
@@ -62,3 +80,27 @@ update public.marketplace_listings
 update public.publish_attempts
   set environment = 'sandbox'
   where external_id = '110589875643';
+update public.sold_events
+  set environment = 'sandbox'
+  where listing_external_id = '110589875643';
+
+-- (c) Remaining publish attempts from the sandbox run (the failed tries:
+-- fulfillment-policy 400s, missing aspects, condition rejections — they
+-- carry no external_id, so (b) can't catch them). Discriminator: eBay
+-- attempts by the user who owns the sandbox test connection, created since
+-- sandbox testing began. ⚠ REVIEW THE WINDOW: adjust the timestamp if any
+-- REAL production publish happened after it (none should — production
+-- publishes were failing on the clobbered connection).
+--   select id, status, error, created_at from public.publish_attempts
+--    where platform = 'ebay' and created_at >= '2026-07-12T15:00:00Z'
+--    order by created_at;
+update public.publish_attempts
+  set environment = 'sandbox'
+  where platform = 'ebay'
+    and environment = 'production'
+    and created_at >= '2026-07-12T15:00:00Z'
+    and user_id in (
+      select user_id from public.platform_connections
+      where platform = 'ebay'
+        and meta->>'ebayUsername' = 'testuser_snaptolist'
+    );
