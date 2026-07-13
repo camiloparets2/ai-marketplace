@@ -72,11 +72,21 @@ export async function POST(
             { status: 400 }
           );
         }
-        const soldPrice =
-          typeof body.soldPrice === "number" && isFinite(body.soldPrice)
-            ? body.soldPrice
-            : null;
-        const result = await handleManualSale(user.id, id, body.platform, soldPrice);
+        // MONEY RULE: a sale without its price breaks the books — sold_price
+        // is what profit and gross revenue are computed from, and on haggle
+        // channels it usually differs from the asking price. Never silently
+        // null, never silently the asking price. $0 must be typed on purpose.
+        if (
+          typeof body.soldPrice !== "number" ||
+          !isFinite(body.soldPrice) ||
+          body.soldPrice < 0
+        ) {
+          return NextResponse.json(
+            { error: "soldPrice is required — enter what the item actually sold for" },
+            { status: 400 }
+          );
+        }
+        const result = await handleManualSale(user.id, id, body.platform, body.soldPrice);
         if (!result) {
           return NextResponse.json({ error: "Item not found" }, { status: 404 });
         }

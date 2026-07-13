@@ -109,6 +109,17 @@ describe("handleManualSale — one queue, one processor, always audited", () => 
     expect(io.process).toHaveBeenCalledWith("user-1");
   });
 
+  it("persists the HAGGLED price to both tables — never the asking price", async () => {
+    // Asking price was $8.00; the OfferUp buyer paid $6.50. The event
+    // carries 6.50 (→ sold_events.sale_price) and the processor's claim
+    // stamps the SAME event price onto inventory_items.sold_price.
+    const io = fakeIO();
+    await handleManualSale("user-1", "item-1", "offerup", 6.5, io);
+    expect(io.record).toHaveBeenCalledWith(
+      expect.objectContaining({ salePrice: 6.5 })
+    );
+  });
+
   it("re-clicking is idempotent: the dedupe key is deterministic and a duplicate still retries failed ends", async () => {
     // Second click: the dedupe index drops the insert (record → null).
     const io = fakeIO({ record: vi.fn(async () => null) });

@@ -466,7 +466,7 @@ export async function listInventory(userId: string): Promise<InventoryItemRow[]>
   const { data: items, error } = await supabase
     .from("inventory_items")
     .select(
-      "id, title, condition, photo_url, quantity, price, cost_of_goods, status, review_reasons, sold_at, sold_price, sold_platform, created_at"
+      "id, title, condition, photo_url, quantity, price, cost_of_goods, shipping_cost, status, review_reasons, sold_at, sold_price, sold_platform, created_at"
     )
     .eq("user_id", userId)
     .order("created_at", { ascending: false })

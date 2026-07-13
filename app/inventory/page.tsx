@@ -7,6 +7,7 @@
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { StatusBadge } from "@/app/ui/status-badge";
+import { realizedProfit } from "@/lib/pricing-core";
 
 interface ListingRow {
   id: string;
@@ -25,6 +26,7 @@ interface Item {
   // null until the pricing engine (or the seller) prices the draft
   price: number | null;
   cost_of_goods: number | null;
+  shipping_cost: number | null;
   status: "draft" | "review" | "listed" | "sold" | "archived";
   review_reasons: Array<{ gate: string; reason: string }>;
   sold_at: string | null;
@@ -56,6 +58,11 @@ export default function InventoryPage() {
   const [syncing, setSyncing] = useState(false);
   // Item id whose "mark sold" platform picker is open
   const [soldPicker, setSoldPicker] = useState<string>("");
+  // Two-step sale capture: WHERE it sold, then WHAT IT SOLD FOR (pre-filled
+  // with the asking price, editable, REQUIRED — buyers haggle on
+  // Facebook/OfferUp, so the real price usually differs).
+  const [soldPlatform, setSoldPlatform] = useState<string>("");
+  const [soldPriceValue, setSoldPriceValue] = useState<string>("");
   // Item id whose cost editor is open, and its in-progress value
   const [costEditor, setCostEditor] = useState<string>("");
   const [costValue, setCostValue] = useState<string>("");
@@ -97,11 +104,18 @@ export default function InventoryPage() {
 
   async function runAction(
     itemId: string,
-    body: { action: string; platform?: string; costOfGoods?: number }
+    body: {
+      action: string;
+      platform?: string;
+      costOfGoods?: number;
+      soldPrice?: number;
+    }
   ) {
     setBusyItem(itemId);
     setNotice("");
     setSoldPicker("");
+    setSoldPlatform("");
+    setSoldPriceValue("");
     setCostEditor("");
     try {
       const res = await fetch(`/api/inventory/${itemId}/actions`, {
@@ -360,17 +374,26 @@ export default function InventoryPage() {
                               item.sold_price !== null && (
                                 <span
                                   className={
-                                    Number(item.sold_price) -
-                                      Number(item.cost_of_goods) >=
-                                    0
+                                    realizedProfit(
+                                      Number(item.sold_price),
+                                      Number(item.cost_of_goods),
+                                      item.shipping_cost,
+                                      item.sold_platform
+                                    ) >= 0
                                       ? " text-green-700"
                                       : " text-red-600"
                                   }
                                 >
-                                  {" "}· profit $
-                                  {(
-                                    Number(item.sold_price) -
-                                    Number(item.cost_of_goods)
+                                  {/* Realized profit = sold − cost − est.
+                                      marketplace fees (fee-free on local/
+                                      assisted channels; buyer-paid shipping
+                                      cancels the label). */}
+                                  {" "}· est. profit $
+                                  {realizedProfit(
+                                    Number(item.sold_price),
+                                    Number(item.cost_of_goods),
+                                    item.shipping_cost,
+                                    item.sold_platform
                                   ).toFixed(2)}
                                 </span>
                               )}
@@ -487,38 +510,85 @@ export default function InventoryPage() {
                   {item.status !== "sold" && (
                     <>
                       {soldPicker === item.id ? (
-                        <select
-                          className="flex-1 rounded-lg border border-gray-200 px-2 py-1.5 text-sm"
-                          defaultValue=""
-                          disabled={busyItem === item.id}
-                          onChange={(e) => {
-                            if (e.target.value) {
-                              void runAction(item.id, {
-                                action: "sold",
-                                platform: e.target.value,
-                              });
-                            }
-                          }}
-                        >
-                          <option value="" disabled>
-                            Sold where?
-                          </option>
-                          {soldPlatformChoices(item).map((p) => (
-                            <option key={p} value={p}>
-                              {PLATFORM_NAMES[p] ??
-                                (p === "other"
-                                  ? "Somewhere else"
-                                  : p === "facebook"
-                                    ? "Facebook Marketplace"
-                                    : p === "offerup"
-                                      ? "OfferUp"
-                                      : p)}
+                        // Two steps: WHERE it sold, then WHAT IT SOLD FOR.
+                        // The price is pre-filled with the asking price but
+                        // editable and REQUIRED — buyers haggle, and profit/
+                        // revenue books are built on the REAL amount.
+                        <span className="flex-1 flex items-center gap-1.5">
+                          <select
+                            className="min-w-0 flex-1 rounded-lg border border-gray-200 px-2 py-1.5 text-sm"
+                            value={soldPlatform}
+                            disabled={busyItem === item.id}
+                            onChange={(e) => {
+                              setSoldPlatform(e.target.value);
+                              if (e.target.value && soldPriceValue === "") {
+                                setSoldPriceValue(
+                                  item.price !== null
+                                    ? Number(item.price).toFixed(2)
+                                    : ""
+                                );
+                              }
+                            }}
+                          >
+                            <option value="" disabled>
+                              Sold where?
                             </option>
-                          ))}
-                        </select>
+                            {soldPlatformChoices(item).map((p) => (
+                              <option key={p} value={p}>
+                                {PLATFORM_NAMES[p] ??
+                                  (p === "other"
+                                    ? "Somewhere else"
+                                    : p === "facebook"
+                                      ? "Facebook Marketplace"
+                                      : p === "offerup"
+                                        ? "OfferUp"
+                                        : p)}
+                              </option>
+                            ))}
+                          </select>
+                          {soldPlatform !== "" && (
+                            <>
+                              <span className="text-sm text-gray-500">$</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                inputMode="decimal"
+                                autoFocus
+                                aria-label="Sold for (USD)"
+                                placeholder="sold for"
+                                className="w-20 rounded-lg border border-gray-200 px-2 py-1.5 text-sm"
+                                value={soldPriceValue}
+                                onChange={(e) => setSoldPriceValue(e.target.value)}
+                              />
+                              <button
+                                disabled={
+                                  busyItem === item.id ||
+                                  soldPriceValue.trim() === "" ||
+                                  !isFinite(parseFloat(soldPriceValue)) ||
+                                  parseFloat(soldPriceValue) < 0
+                                }
+                                onClick={() =>
+                                  void runAction(item.id, {
+                                    action: "sold",
+                                    platform: soldPlatform,
+                                    soldPrice: parseFloat(soldPriceValue),
+                                  })
+                                }
+                                className="px-2.5 py-1.5 rounded-lg bg-green-600 text-white font-medium text-sm hover:bg-green-700 disabled:opacity-50 transition-colors"
+                              >
+                                ✓
+                              </button>
+                            </>
+                          )}
+                        </span>
                       ) : (
                         <button
-                          onClick={() => setSoldPicker(item.id)}
+                          onClick={() => {
+                            setSoldPicker(item.id);
+                            setSoldPlatform("");
+                            setSoldPriceValue("");
+                          }}
                           disabled={busyItem === item.id}
                           className="flex-1 py-1.5 rounded-lg bg-green-600 text-white font-medium text-sm hover:bg-green-700 disabled:opacity-50 transition-colors"
                         >
