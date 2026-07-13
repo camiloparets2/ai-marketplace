@@ -12,6 +12,7 @@
 // overlap and webhook/poll double-delivery are harmless no-ops.
 
 import { getSupabaseAdmin, getConnection } from "@/lib/connections";
+import { currentEbayEnvironment } from "@/lib/ebay-env";
 import { fetchEbaySales } from "@/lib/platforms/ebay";
 import { fetchEtsySales } from "@/lib/platforms/etsy";
 import { fetchShopifySales } from "@/lib/platforms/shopify";
@@ -128,7 +129,9 @@ export interface SyncSummary {
   error?: string;
 }
 
-async function openListingsFor(
+// Exported for the environment-isolation tests: the query itself must pin
+// the environment — that's the property under test.
+export async function openListingsFor(
   userId: string,
   platform: ApiPlatform
 ): Promise<OpenListing[]> {
@@ -137,6 +140,10 @@ async function openListingsFor(
     .select("inventory_item_id, external_id, meta, status")
     .eq("user_id", userId)
     .eq("platform", platform)
+    // A sandbox listing must be INVISIBLE to production sync (and vice
+    // versa): polling real eBay for a listing that only exists in sandbox
+    // can never match — or worse, could match the wrong thing.
+    .eq("environment", currentEbayEnvironment())
     .neq("status", "ended");
   if (error) throw new Error(`open listings read failed: ${error.message}`);
   return (data ?? []).map((row) => ({
@@ -233,7 +240,9 @@ export async function syncUserSales(userId: string): Promise<SyncSummary[]> {
 export async function syncAllUsers(): Promise<{ users: number; itemsSold: number }> {
   const { data, error } = await getSupabaseAdmin()
     .from("platform_connections")
-    .select("user_id");
+    .select("user_id")
+    // Fleet scan only over THIS environment's connections.
+    .eq("environment", currentEbayEnvironment());
   if (error) throw new Error(`connection scan failed: ${error.message}`);
 
   const userIds = [...new Set((data ?? []).map((r) => r.user_id as string))];

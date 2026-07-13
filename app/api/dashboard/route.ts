@@ -5,6 +5,7 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
 import { getSupabaseAdmin, getConnection } from "@/lib/connections";
+import { currentEbayEnvironment } from "@/lib/ebay-env";
 import { getCreditStatus } from "@/lib/billing/credits";
 import { API_PLATFORMS } from "@/lib/platforms/types";
 import type { ApiPlatform } from "@/lib/platforms/types";
@@ -52,6 +53,7 @@ export async function GET(): Promise<NextResponse> {
       .from("marketplace_listings")
       .select("id", { count: "exact", head: true })
       .eq("user_id", user.id)
+      .eq("environment", currentEbayEnvironment())
       .eq("status", "end_failed");
     endFailedCount = count ?? 0;
 
@@ -62,6 +64,7 @@ export async function GET(): Promise<NextResponse> {
       .from("sold_events")
       .select("id", { count: "exact", head: true })
       .eq("user_id", user.id)
+      .eq("environment", currentEbayEnvironment())
       .eq("status", "oversold");
     oversoldCount = oversold ?? 0;
   } catch {

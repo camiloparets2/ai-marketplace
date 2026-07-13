@@ -1,7 +1,12 @@
 // OAuth token store for marketplace connections (eBay, Etsy).
 //
-// Connections are per-user: (user_id, platform) is the primary key, and every
-// read/write is scoped to the signed-in Supabase user. Tokens live behind the
+// Connections are per-user AND per-environment: (user_id, platform,
+// environment) is the primary key. Sandbox and production share one
+// Supabase project, and a token issued for one eBay environment must NEVER
+// be presented to the other (a sandbox refresh token on the production
+// client is 400 invalid_grant "issued to another client" — hit live).
+// Every read/write here is pinned to the CURRENT EBAY_ENV, so a process
+// can only ever see its own environment's tokens. Tokens live behind the
 // service role only — RLS is enabled with no policies, so browser roles can
 // never read this table.
 //
@@ -9,6 +14,7 @@
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { ApiPlatform, PlatformConnection } from "@/lib/platforms/types";
+import { currentEbayEnvironment } from "@/lib/ebay-env";
 
 let _supabase: SupabaseClient | null = null;
 
@@ -38,15 +44,21 @@ interface ConnectionRow {
 export async function saveConnection(conn: PlatformConnection): Promise<void> {
   const { error } = await getSupabaseAdmin()
     .from("platform_connections")
-    .upsert({
-      user_id: conn.userId,
-      platform: conn.platform,
-      access_token: conn.accessToken,
-      refresh_token: conn.refreshToken,
-      expires_at: conn.expiresAt ? new Date(conn.expiresAt).toISOString() : null,
-      meta: conn.meta,
-      updated_at: new Date().toISOString(),
-    });
+    .upsert(
+      {
+        user_id: conn.userId,
+        platform: conn.platform,
+        // Stamped from the process's own EBAY_ENV: a connection made while
+        // pointed at sandbox can never overwrite the production row.
+        environment: currentEbayEnvironment(),
+        access_token: conn.accessToken,
+        refresh_token: conn.refreshToken,
+        expires_at: conn.expiresAt ? new Date(conn.expiresAt).toISOString() : null,
+        meta: conn.meta,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,platform,environment" }
+    );
   if (error) {
     throw new Error(`Failed to save ${conn.platform} connection: ${error.message}`);
   }
@@ -61,6 +73,9 @@ export async function getConnection(
     .select("user_id, platform, access_token, refresh_token, expires_at, meta")
     .eq("user_id", userId)
     .eq("platform", platform)
+    // Environment pinning: a production process can only load production
+    // tokens (and vice versa) — cross-environment tokens are invisible.
+    .eq("environment", currentEbayEnvironment())
     .maybeSingle<ConnectionRow>();
 
   if (error) {
