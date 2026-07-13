@@ -40,6 +40,10 @@ export function PricingPanel({
   const [compsState, setCompsState] = useState<"idle" | "loading" | "done">(
     "idle"
   );
+  // "sandbox" → eBay's TEST environment, which has no market data by design.
+  // The empty-comps message must say so instead of implying the market is
+  // empty (both sandbox test items showed "No comparable sales found").
+  const [compsEnvironment, setCompsEnvironment] = useState<string | null>(null);
 
   useEffect(() => {
     if (!compsQuery.trim()) return;
@@ -54,9 +58,10 @@ export function PricingPanel({
       if (compsCondition?.trim()) params.set("condition", compsCondition.trim());
       void fetch(`/api/comps?${params.toString()}`)
         .then((res) => (res.ok ? res.json() : { comps: null }))
-        .then((data: { comps?: CompsSummary | null }) => {
+        .then((data: { comps?: CompsSummary | null; environment?: string }) => {
           if (cancelled) return;
           setComps(data.comps ?? null);
+          setCompsEnvironment(data.environment ?? null);
           setCompsState("done");
         })
         .catch(() => {
@@ -182,7 +187,9 @@ export function PricingPanel({
       )}
       {compsState === "done" && !hasBand && (
         <p className="text-xs text-gray-400">
-          No comparable sales found — priced conservatively; double-check the market.
+          {compsEnvironment === "sandbox"
+            ? "Sandbox mode: eBay's test environment has no market data, so comps are always empty here — pricing runs against real sold/active listings in production."
+            : "No comparable sales found — priced conservatively; double-check the market."}
         </p>
       )}
 
