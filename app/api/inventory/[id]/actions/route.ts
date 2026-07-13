@@ -2,7 +2,9 @@
 //
 // POST body:
 //   { action: "sold", platform: string, soldPrice?: number }
-//       → mark sold; end listings on every other channel
+//       → mark sold via the sold_events queue (source='manual') — the SAME
+//         processor as connector-detected sales: atomic claim, cross-channel
+//         delist, audit rows. Every sale leaves a sold_events record.
 //   { action: "delist" }
 //       → end all listings, return the item to draft
 //   { action: "archive" }
@@ -26,12 +28,12 @@ export const maxDuration = 60;
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
 import {
-  markItemSold,
   delistItem,
   archiveItem,
   setItemCost,
   rejectItemFromReview,
 } from "@/lib/inventory";
+import { handleManualSale } from "@/lib/sold-events";
 import { approveAndPublish, publishDraft } from "@/lib/pipeline";
 import { recordAudit } from "@/lib/audit";
 import { trackEvent } from "@/lib/telemetry";
@@ -74,7 +76,7 @@ export async function POST(
           typeof body.soldPrice === "number" && isFinite(body.soldPrice)
             ? body.soldPrice
             : null;
-        const result = await markItemSold(user.id, id, body.platform, soldPrice);
+        const result = await handleManualSale(user.id, id, body.platform, soldPrice);
         if (!result) {
           return NextResponse.json({ error: "Item not found" }, { status: 404 });
         }
