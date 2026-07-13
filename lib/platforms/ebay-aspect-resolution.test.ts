@@ -21,8 +21,10 @@ vi.mock("@/lib/locations", () => ({
 
 import {
   getCategoryAspects,
+  getAllowedConditionIds,
   suggestEbayCategories,
   clearAspectCacheForTests,
+  clearConditionCacheForTests,
   publishToEbay,
   buildEbayInventoryItemPayload,
   ebaySkuForItem,
@@ -70,6 +72,7 @@ function jsonRes(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   clearAspectCacheForTests();
+  clearConditionCacheForTests();
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -204,10 +207,15 @@ const baseListing: ListingInput = {
   shippingCost: 10.4,
 };
 
-// Scripted eBay: records paths; category 555 is the seller's (valid) choice,
-// 999 is stale/non-leaf. Aspects require Type + Item Height.
-function stubPublishChain(): string[] {
+// Scripted eBay: records paths + inventory PUT bodies; category 555 is the
+// seller's (valid) choice, 999 is stale/non-leaf. Aspects require Type +
+// Item Height. `conditionIds` scripts get_item_condition_policies for the
+// category ("fail" → 500, exercising the static-fallback path).
+function stubPublishChain(
+  conditionIds: string[] | "fail" = "fail"
+): { paths: string[]; putBodies: Array<{ condition?: string }> } {
   const paths: string[] = [];
+  const putBodies: Array<{ condition?: string }> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string | URL, init?: RequestInit) => {
@@ -220,6 +228,17 @@ function stubPublishChain(): string[] {
           categorySuggestions: [{ category: { categoryId: "112233", categoryName: "Headphones" } }],
         });
       }
+      if (path.includes("get_item_condition_policies")) {
+        if (conditionIds === "fail") return jsonRes({}, 500);
+        return jsonRes({
+          itemConditionPolicies: [
+            {
+              categoryId: "555",
+              itemConditions: conditionIds.map((id) => ({ conditionId: id })),
+            },
+          ],
+        });
+      }
       if (path.includes("get_item_aspects_for_category")) {
         if (path.includes("category_id=999")) {
           return jsonRes({ errors: [{ message: "not a leaf" }] }, 400);
@@ -227,6 +246,7 @@ function stubPublishChain(): string[] {
         return jsonRes(aspectsBody);
       }
       if ((init?.method ?? "GET") === "PUT" && path.includes("/inventory_item/")) {
+        putBodies.push(JSON.parse(String(init?.body ?? "{}")) as { condition?: string });
         return new Response(null, { status: 204 });
       }
       if (path.includes("/offer?sku=")) return jsonRes({ offers: [] });
@@ -239,7 +259,7 @@ function stubPublishChain(): string[] {
       return jsonRes({}, 500);
     })
   );
-  return paths;
+  return { paths, putBodies };
 }
 
 describe("ebay API language headers (Sandbox 400: Invalid value for header Accept-Language)", () => {
@@ -320,7 +340,7 @@ describe("publishToEbay category override + aspect backstop", () => {
   };
 
   it("uses the seller-chosen leaf category — no title re-suggestion", async () => {
-    const paths = stubPublishChain();
+    const { paths } = stubPublishChain();
     const result = await publishToEbay(
       conn,
       complete,
@@ -359,5 +379,100 @@ describe("publishToEbay category override + aspect backstop", () => {
     await expect(
       publishToEbay(conn, stale, ["https://cdn.example/p.jpg"], ebaySkuForItem("item-1"))
     ).rejects.toThrow(/no longer a valid leaf/i);
+  });
+});
+
+// ── Category condition policy at publish (Sandbox 400: invalid condition id) ─
+
+describe("publishToEbay condition policy", () => {
+  const completeSpecs = {
+    Type: "Over-Ear",
+    "Item Height": "8 in",
+    [EBAY_CATEGORY_SPEC_KEY]: "555",
+  };
+
+  it("maps the grade to the nearest condition the category ACCEPTS — never USED_GOOD in Home & Garden", async () => {
+    // Home & Garden-style policy: only New / New other / generic Used.
+    const { putBodies } = stubPublishChain(["1000", "1500", "3000"]);
+    await publishToEbay(
+      conn,
+      { ...baseListing, condition: "Good", specs: completeSpecs },
+      ["https://cdn.example/p.jpg"],
+      ebaySkuForItem("item-1")
+    );
+    expect(putBodies).toHaveLength(1);
+    // Good → generic Used (3000 → USED_EXCELLENT), NOT the media-only
+    // USED_GOOD the old static map emitted (the live 400).
+    expect(putBodies[0].condition).toBe("USED_EXCELLENT");
+  });
+
+  it("keeps the graded enum where the category allows it (media-style policy)", async () => {
+    const { putBodies } = stubPublishChain([
+      "1000", "1500", "2750", "3000", "4000", "5000", "6000",
+    ]);
+    await publishToEbay(
+      conn,
+      { ...baseListing, condition: "Good", specs: completeSpecs },
+      ["https://cdn.example/p.jpg"],
+      ebaySkuForItem("item-1")
+    );
+    expect(putBodies[0].condition).toBe("USED_GOOD");
+  });
+
+  it("BLOCKS (never a 400) when the category accepts no honest mapping", async () => {
+    // New-only category, used item: we never upgrade the claim to NEW.
+    const { paths } = stubPublishChain(["1000", "1500"]);
+    await expect(
+      publishToEbay(
+        conn,
+        { ...baseListing, condition: "Good", specs: completeSpecs },
+        ["https://cdn.example/p.jpg"],
+        ebaySkuForItem("item-1")
+      )
+    ).rejects.toThrow(/doesn't accept the condition "Good".*New/);
+    // Nothing was written to eBay.
+    expect(paths.some((p) => p.startsWith("PUT"))).toBe(false);
+  });
+
+  it("falls back to the static per-grade enum when the metadata API is down", async () => {
+    const { putBodies } = stubPublishChain("fail");
+    await publishToEbay(
+      conn,
+      { ...baseListing, condition: "Very Good", specs: completeSpecs },
+      ["https://cdn.example/p.jpg"],
+      ebaySkuForItem("item-1")
+    );
+    // Pre-policy behaviour; eBay's verbatim rejection stays the backstop.
+    expect(putBodies[0].condition).toBe("USED_VERY_GOOD");
+  });
+});
+
+describe("getAllowedConditionIds", () => {
+  it("parses the category's condition ids and caches the lookup", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonRes({
+        itemConditionPolicies: [
+          {
+            categoryId: "159907",
+            itemConditions: [
+              { conditionId: "1000" },
+              { conditionId: "1500" },
+              { conditionId: "3000" },
+            ],
+          },
+        ],
+      })
+    );
+    vi.stubGlobal("fetch", fetchImpl);
+    const first = await getAllowedConditionIds("tok", "EBAY_US", "159907");
+    expect(first).toEqual(["1000", "1500", "3000"]);
+    const second = await getAllowedConditionIds("tok", "EBAY_US", "159907");
+    expect(second).toEqual(first);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns null (uncached) on a metadata failure — transient outages never stick", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonRes({}, 500)));
+    expect(await getAllowedConditionIds("tok", "EBAY_US", "159907")).toBeNull();
   });
 });

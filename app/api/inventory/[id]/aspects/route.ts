@@ -21,6 +21,7 @@ import {
   getCategoryAspects,
   suggestEbayCategories,
 } from "@/lib/platforms/ebay";
+import { getCategoryPolicy } from "@/lib/platforms/ebay-category-policies";
 import {
   marketplaceById,
   DEFAULT_EBAY_MARKETPLACE,
@@ -37,6 +38,10 @@ export interface AspectsResponse {
   categoryName: string | null;
   suggestions: CategoryOption[];
   aspects: AspectField[];
+  // Condition ids this category legally accepts (Sell Metadata) — the
+  // condition dropdown constrains itself to grades that map to one of
+  // these. null → policy unknown; the UI must NOT constrain on it.
+  allowedConditionIds: string[] | null;
   // True when the stored/requested category id was no longer a valid leaf
   // and the response fell back to a suggestion — the UI says so.
   staleCategory: boolean;
@@ -66,6 +71,7 @@ export async function GET(
         categoryName: null,
         suggestions: [],
         aspects: [],
+        allowedConditionIds: null,
         staleCategory: false,
       };
       return NextResponse.json(body);
@@ -116,6 +122,16 @@ export async function GET(
       suggestions.find((s) => s.categoryId === categoryId)?.categoryName ??
       null;
 
+    // Full policy for the resolved category through the ONE category-policy
+    // layer (same fetchers/caches the publish step uses), so the dropdown
+    // only offers grades the category legally accepts. The aspects fetch is
+    // a cache hit — the loop above already resolved this category.
+    const allowedConditionIds =
+      categoryId !== null
+        ? (await getCategoryPolicy(conn.accessToken, marketplace, categoryId))
+            .allowedConditionIds
+        : null;
+
     // ONE resolver, ONE answer: pin this resolution on the draft so the
     // breadcrumb, the form, and the publish step (which honors the saved
     // __ebayCategoryId, never re-suggesting from the title) all agree.
@@ -140,6 +156,7 @@ export async function GET(
       categoryName,
       suggestions,
       aspects,
+      allowedConditionIds,
       staleCategory,
     };
     return NextResponse.json(body);

@@ -23,6 +23,7 @@ vi.mock("@/lib/platforms/ebay", async (importOriginal) => {
     ...actual,
     freshConnection: vi.fn(async (c: unknown) => c),
     getCategoryAspects: vi.fn(),
+    getAllowedConditionIds: vi.fn(async () => ["1000", "1500", "3000"]),
     suggestEbayCategories: vi.fn(),
   };
 });
@@ -96,9 +97,13 @@ describe("GET /api/inventory/[id]/aspects — one resolver, one answer", () => {
     const body = (await res.json()) as {
       categoryId: string;
       categoryName: string;
+      allowedConditionIds: string[];
     };
     expect(body.categoryId).toBe("111");
     expect(body.categoryName).toBe("Buckets & Tubs");
+    // The category-policy layer rides along — the condition dropdown
+    // constrains itself to what this category legally accepts.
+    expect(body.allowedConditionIds).toEqual(["1000", "1500", "3000"]);
     expect(mergeItemSpecs).toHaveBeenCalledWith(
       "user-1",
       "item-1",

@@ -45,6 +45,11 @@ import {
 } from "@/lib/platforms/ebay-marketplaces";
 import { EBAY_CATEGORY_SPEC_KEY, isReservedSpecKey } from "@/lib/ebay-aspects";
 import type { AspectField, CategoryOption } from "@/lib/ebay-aspects";
+import {
+  nearestAllowedConditionId,
+  conditionEnumForId,
+  describeAllowedConditions,
+} from "@/lib/ebay-conditions";
 import { LRUCache } from "lru-cache";
 import type { EbayMarketplace } from "@/lib/platforms/ebay-marketplaces";
 
@@ -621,6 +626,69 @@ export async function getCategoryAspects(
   );
   aspectCache.set(key, { fields });
   return fields;
+}
+
+// ── Condition policies (Sell Metadata getItemConditionPolicies) ─────────────
+//
+// Same category-policy pattern as aspects: what a category legally accepts
+// is METADATA, fetched per leaf and cached — never hardcoded (the third
+// category-metadata bug in one sandbox run: aspects, shipping services, and
+// now condition ids).
+
+const conditionCache = new LRUCache<string, { ids: string[] | null }>({
+  max: 300,
+  ttl: 6 * 60 * 60 * 1000,
+});
+
+export function clearConditionCacheForTests(): void {
+  conditionCache.clear();
+}
+
+/**
+ * Condition ids the category accepts, or null when the policy can't be
+ * determined (metadata outage / unexpected shape) — callers then fall back
+ * to the static per-grade default and the publish-time guard keeps eBay's
+ * verbatim rejection as the backstop. Never throws.
+ */
+export async function getAllowedConditionIds(
+  accessToken: string,
+  marketplaceId: string,
+  categoryId: string
+): Promise<string[] | null> {
+  const key = `${marketplaceId}|${categoryId}`;
+  const cached = conditionCache.get(key);
+  if (cached !== undefined) return cached.ids;
+  try {
+    const res = await ebayFetch(
+      accessToken,
+      `/sell/metadata/v1/marketplace/${marketplaceId}/get_item_condition_policies?filter=${encodeURIComponent(`categoryIds:{${categoryId}}`)}`
+    );
+    if (!res.ok) {
+      console.warn(
+        `[ebay] condition-policy lookup failed (${res.status}) for ${key} — falling back to static mapping`
+      );
+      return null; // not cached: a transient failure must not stick
+    }
+    const data = (await res.json()) as {
+      itemConditionPolicies?: Array<{
+        categoryId?: string;
+        itemConditions?: Array<{ conditionId?: string }>;
+      }>;
+    };
+    const policy = (data.itemConditionPolicies ?? []).find(
+      (p) => p.categoryId === categoryId
+    );
+    const ids =
+      policy?.itemConditions
+        ?.map((c) => c.conditionId)
+        .filter((id): id is string => Boolean(id)) ?? null;
+    const result = ids !== null && ids.length > 0 ? ids : null;
+    conditionCache.set(key, { ids: result });
+    return result;
+  } catch (err) {
+    console.warn(`[ebay] condition-policy lookup errored for ${key}:`, err);
+    return null;
+  }
 }
 
 /** Category candidates for the seller-facing picker — id + display name. */
@@ -1407,7 +1475,10 @@ export interface EbayInventoryItemPayload {
 
 export function buildEbayInventoryItemPayload(
   input: ListingInput,
-  imageUrls: string[]
+  imageUrls: string[],
+  // Category-policy-resolved condition enum (lib/ebay-conditions). Omitted →
+  // the static per-grade default (dry-run mode, no category policy known).
+  conditionEnum?: string
 ): EbayInventoryItemPayload {
   const composed = composeListing("ebay", input);
 
@@ -1434,7 +1505,7 @@ export function buildEbayInventoryItemPayload(
       imageUrls: imageUrls.slice(0, 24),
       ...(input.upc ? { upc: [input.upc] } : {}),
     },
-    condition: EBAY_CONDITION_MAP[input.condition],
+    condition: conditionEnum ?? EBAY_CONDITION_MAP[input.condition],
     availability: { shipToLocationAvailability: { quantity: 1 } },
   };
 }
@@ -1612,7 +1683,32 @@ export async function publishToEbay(
   ]);
   const categoryId = resolvedCategory.categoryId;
 
-  const itemPayload = buildEbayInventoryItemPayload(input, imageUrls);
+  // Condition is CATEGORY POLICY, not a global map: Good → USED_GOOD (5000)
+  // is legal in media categories and a 400 everywhere else. Resolve the
+  // nearest condition the category accepts (honesty-ordered fallbacks, never
+  // a better claim); metadata unavailable → static default and eBay's
+  // verbatim rejection stays the backstop.
+  const allowedConditionIds = await getAllowedConditionIds(
+    conn.accessToken,
+    marketplace.id,
+    categoryId
+  );
+  const conditionId = nearestAllowedConditionId(
+    input.condition,
+    allowedConditionIds
+  );
+  if (conditionId === null) {
+    throw new Error(
+      `This eBay category doesn't accept the condition "${input.condition}" — it allows: ${describeAllowedConditions(allowedConditionIds ?? [])}. Change the item's condition (or its category) and publish again.`
+    );
+  }
+  const conditionEnum = conditionEnumForId(conditionId) ?? undefined;
+
+  const itemPayload = buildEbayInventoryItemPayload(
+    input,
+    imageUrls,
+    conditionEnum
+  );
   const missing = missingRequiredAspects(
     resolvedCategory.requiredAspects,
     itemPayload.product.aspects

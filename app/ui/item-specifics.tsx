@@ -26,6 +26,7 @@ interface AspectsPayload {
   categoryName: string | null;
   suggestions: CategoryOption[];
   aspects: AspectField[];
+  allowedConditionIds: string[] | null;
   staleCategory: boolean;
 }
 
@@ -38,6 +39,9 @@ export interface ItemSpecificsStatus {
   // surface shows the same answer.
   categoryId: string | null;
   categoryName: string | null;
+  // Condition ids the category legally accepts — the parent constrains the
+  // condition dropdown with it. null → unknown; never constrain on unknown.
+  allowedConditionIds: string[] | null;
 }
 
 export interface ItemSpecificsCardProps {
@@ -151,11 +155,19 @@ export function ItemSpecificsCard({
           aspects: payload.connected ? payload.aspects : null,
           categoryId: payload.categoryId,
           categoryName: payload.categoryName,
+          allowedConditionIds: payload.connected
+            ? payload.allowedConditionIds
+            : null,
         });
       } catch {
         setData(null);
         setState("error");
-        onStatus({ aspects: null, categoryId: null, categoryName: null });
+        onStatus({
+          aspects: null,
+          categoryId: null,
+          categoryName: null,
+          allowedConditionIds: null,
+        });
       }
     },
     [itemId, onStatus]

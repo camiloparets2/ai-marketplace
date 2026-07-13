@@ -22,6 +22,8 @@ import {
   EBAY_CATEGORY_NAME_SPEC_KEY,
 } from "@/lib/ebay-aspects";
 import type { AspectField } from "@/lib/ebay-aspects";
+import { nearestAllowedConditionId } from "@/lib/ebay-conditions";
+import type { ConditionGrade } from "@/lib/ebay-conditions";
 
 interface ItemDetail {
   id: string;
@@ -67,6 +69,11 @@ export default function ItemDetailPage() {
   // Required-aspect metadata from /aspects; null → unknown (don't gate here,
   // the publish-time guard is the backstop).
   const [aspectFields, setAspectFields] = useState<AspectField[] | null>(null);
+  // Condition ids the resolved category legally accepts; null → unknown
+  // (never constrain the dropdown on missing metadata).
+  const [allowedConditionIds, setAllowedConditionIds] = useState<
+    string[] | null
+  >(null);
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [outcome, setOutcome] = useState<PublishOutcome | null>(null);
@@ -92,6 +99,7 @@ export default function ItemDetailPage() {
 
   const onAspectStatus = useCallback((status: ItemSpecificsStatus) => {
     setAspectFields(status.aspects);
+    setAllowedConditionIds(status.allowedConditionIds);
     // Mirror the ONE resolved category into the client specs (functional
     // update — this fires from the card's fetch) so Save never wipes the
     // server-side pin and the breadcrumb below shows the same answer as the
@@ -150,6 +158,13 @@ export default function ItemDetailPage() {
           ...specs,
         })
       : [];
+  // Category condition policy (same layer as the publish step): the selected
+  // grade must map to a condition the category accepts. Unknown policy
+  // (null) never blocks — the server-side guard is the backstop.
+  const conditionIllegal =
+    allowedConditionIds !== null &&
+    nearestAllowedConditionId(condition as ConditionGrade, allowedConditionIds) ===
+      null;
 
   async function save(): Promise<boolean> {
     if (!item) return false;
@@ -302,12 +317,32 @@ export default function ItemDetailPage() {
                 onChange={(e) => setCondition(e.target.value)}
                 disabled={!editable}
               >
-                {CONDITIONS.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
+                {/* Grades the resolved eBay category can't legally take are
+                    disabled (category condition policy) — the seller can
+                    never pick a condition eBay would 400. */}
+                {CONDITIONS.map((c) => {
+                  const illegal =
+                    allowedConditionIds !== null &&
+                    nearestAllowedConditionId(
+                      c as ConditionGrade,
+                      allowedConditionIds
+                    ) === null;
+                  return (
+                    <option key={c} value={c} disabled={illegal}>
+                      {c}
+                      {illegal ? " — not allowed in this eBay category" : ""}
+                    </option>
+                  );
+                })}
               </select>
+              {conditionIllegal && (
+                <p
+                  role="alert"
+                  className="text-xs text-warn bg-warn-surface border border-amber-200 rounded-lg px-3 py-2"
+                >
+                  {`This eBay category doesn't accept the "${condition}" condition — pick an allowed one (or change the category below). Publishing is blocked until then.`}
+                </p>
+              )}
 
               {/* Shipping — the money rule: no cost, no publish */}
               <label className="text-sm font-medium text-gray-700" htmlFor="ship">
@@ -474,7 +509,8 @@ export default function ItemDetailPage() {
                       !priceValid ||
                       shipNum === null ||
                       !shipValid ||
-                      missingAspects.length > 0
+                      missingAspects.length > 0 ||
+                      conditionIllegal
                     }
                     onClick={() => void publish()}
                   >
