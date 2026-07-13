@@ -7,7 +7,7 @@
 //   - missing → create, with adopt-on-race fallback
 // Exercises the real publishToEbay against a scripted fetch — no network.
 
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 
 vi.mock("@/lib/connections", () => ({
   saveConnection: vi.fn(async () => undefined),
@@ -20,7 +20,7 @@ vi.mock("@/lib/locations", () => ({
   getShipFromLocation: vi.fn(async () => null),
 }));
 
-import { publishToEbay, ebaySkuForItem } from "./ebay";
+import { publishToEbay, ebaySkuForItem, clearAspectCacheForTests } from "./ebay";
 import type { PlatformConnection, ListingInput } from "./types";
 
 const SKU = ebaySkuForItem("item-1");
@@ -147,6 +147,12 @@ function stubEbay(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+// The taxonomy aspect cache is module-level; clear it so each test observes
+// its own category lookups on the network.
+beforeEach(() => {
+  clearAspectCacheForTests();
 });
 
 describe("publishToEbay retry safety (deterministic SKU)", () => {

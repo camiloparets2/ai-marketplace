@@ -22,24 +22,48 @@ export interface EbayMarketplace {
   // policy is created with handling time only and the seller picks a
   // service on eBay; add the marketplace's code here to close that gap.
   defaultShippingService?: { carrierCode: string; serviceCode: string };
+  // Ordered EXTRA service codes tried at policy-creation time if the primary
+  // is rejected by eBay ("Please select a valid shipping service", errorId
+  // 20403). Sandbox and some marketplaces accept a different subset of codes
+  // than production, so we never hardcode a single option — see
+  // domesticShippingCandidates(). Primary is tried first, then these in order.
+  shippingServiceFallbacks?: Array<{ carrierCode: string; serviceCode: string }>;
+  // Placeholder buyer-paid FLAT_RATE amount the policy REQUIRES: eBay rejects
+  // a buyer-paid (freeShipping:false) flat-rate service with no shippingCost
+  // (that is the real cause behind the misleading "valid shipping service"
+  // error). The per-listing charge is overridden by the offer's
+  // shippingCostOverrides, so this is only a never-silently-free positive
+  // default. In the marketplace currency.
+  shippingCostBaseline?: number;
 }
 
 const MARKETPLACE_BY_COUNTRY: Record<string, EbayMarketplace> = {
   US: {
     id: "EBAY_US", currency: "USD", categoryTreeId: "0", contentLanguage: "en-US", domain: "ebay.com",
     defaultShippingService: { carrierCode: "USPS", serviceCode: "USPSGroundAdvantage" },
+    // USPSGroundAdvantage is the current USPS ground service; USPSPriority is
+    // the long-standing, universally-accepted fallback (esp. in Sandbox),
+    // then USPSParcel (Parcel Select). Tried in order if eBay rejects one.
+    shippingServiceFallbacks: [
+      { carrierCode: "USPS", serviceCode: "USPSPriority" },
+      { carrierCode: "USPS", serviceCode: "USPSParcel" },
+    ],
+    shippingCostBaseline: 9.99,
   },
   CA: {
     id: "EBAY_CA", currency: "CAD", categoryTreeId: "2", contentLanguage: "en-CA", domain: "ebay.ca",
     defaultShippingService: { carrierCode: "CanadaPost", serviceCode: "CA_PostRegularParcel" },
+    shippingCostBaseline: 14.99,
   },
   GB: {
     id: "EBAY_GB", currency: "GBP", categoryTreeId: "3", contentLanguage: "en-GB", domain: "ebay.co.uk",
     defaultShippingService: { carrierCode: "RoyalMail", serviceCode: "UK_RoyalMailSecondClassStandard" },
+    shippingCostBaseline: 3.99,
   },
   AU: {
     id: "EBAY_AU", currency: "AUD", categoryTreeId: "15", contentLanguage: "en-AU", domain: "ebay.com.au",
     defaultShippingService: { carrierCode: "AustraliaPost", serviceCode: "AU_Regular" },
+    shippingCostBaseline: 12.99,
   },
   AT: { id: "EBAY_AT", currency: "EUR", categoryTreeId: "16", contentLanguage: "de-DE", domain: "ebay.at" },
   BE: { id: "EBAY_BE", currency: "EUR", categoryTreeId: "123", contentLanguage: "nl-BE", domain: "ebay.be" },
@@ -64,6 +88,24 @@ const MARKETPLACE_BY_COUNTRY: Record<string, EbayMarketplace> = {
 
 export const DEFAULT_EBAY_MARKETPLACE: EbayMarketplace =
   MARKETPLACE_BY_COUNTRY.US;
+
+// Ordered, de-duplicated list of domestic shipping services to try when
+// creating the default fulfillment policy: the primary first, then the
+// fallbacks. Empty when the marketplace has no vetted service — the policy is
+// then created with handling time only. Never hardcodes a single option.
+export function domesticShippingCandidates(
+  m: EbayMarketplace
+): Array<{ carrierCode: string; serviceCode: string }> {
+  const out: Array<{ carrierCode: string; serviceCode: string }> = [];
+  const seen = new Set<string>();
+  for (const s of [m.defaultShippingService, ...(m.shippingServiceFallbacks ?? [])]) {
+    if (s && !seen.has(s.serviceCode)) {
+      seen.add(s.serviceCode);
+      out.push(s);
+    }
+  }
+  return out;
+}
 
 export function marketplaceForCountry(
   country: string | null | undefined

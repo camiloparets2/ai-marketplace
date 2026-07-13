@@ -7,6 +7,7 @@
 // this module executes them against eBay/Etsy/Stripe.
 
 import { getSupabaseAdmin, getConnection } from "@/lib/connections";
+import { currentEbayEnvironment } from "@/lib/ebay-env";
 import { recordAudit } from "@/lib/audit";
 import { endEbayListing } from "@/lib/platforms/ebay";
 import { endEtsyListing } from "@/lib/platforms/etsy";
@@ -210,6 +211,10 @@ export interface ItemUpdateInput {
   condition?: string;
   shippingCost?: number | null;
   costOfGoods?: number | null;
+  // Full replacement of the specs jsonb: eBay item specifics entered in the
+  // draft-edit form, plus reserved __keys (chosen eBay category). Persisted
+  // so republish/retry reuses them without re-running AI.
+  specs?: Record<string, string>;
 }
 
 export async function updateItemDetails(
@@ -225,6 +230,7 @@ export async function updateItemDetails(
   if (patch.condition !== undefined) update.condition = patch.condition;
   if (patch.shippingCost !== undefined) update.shipping_cost = patch.shippingCost;
   if (patch.costOfGoods !== undefined) update.cost_of_goods = patch.costOfGoods;
+  if (patch.specs !== undefined) update.specs = patch.specs;
 
   const { data, error } = await getSupabaseAdmin()
     .from("inventory_items")
@@ -234,6 +240,36 @@ export async function updateItemDetails(
     .in("status", ["draft", "review"])
     .select("id");
   if (error) throw new Error(`item update failed: ${error.message}`);
+  return (data?.length ?? 0) > 0;
+}
+
+/**
+ * Merge keys into a draft's specs jsonb without replacing the rest — used by
+ * the draft-time aspects endpoint to PIN its category resolution
+ * (__ebayCategoryId) on the row, so the breadcrumb, the form, and the
+ * publish step all use ONE answer instead of re-resolving independently.
+ * Drafts and review-held items only.
+ */
+export async function mergeItemSpecs(
+  userId: string,
+  itemId: string,
+  patch: Record<string, string>
+): Promise<boolean> {
+  const item = await getItemDetail(userId, itemId);
+  if (!item || (item.status !== "draft" && item.status !== "review")) {
+    return false;
+  }
+  const { data, error } = await getSupabaseAdmin()
+    .from("inventory_items")
+    .update({
+      specs: { ...(item.specs ?? {}), ...patch },
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .in("status", ["draft", "review"])
+    .select("id");
+  if (error) throw new Error(`specs merge failed: ${error.message}`);
   return (data?.length ?? 0) > 0;
 }
 
@@ -310,6 +346,9 @@ export async function recordLiveListing(
     meta: listing.meta,
     status: "live",
     price,
+    // Which eBay environment produced this listing — a sandbox listing must
+    // be invisible to production order-sync (and vice versa).
+    environment: currentEbayEnvironment(),
   });
   if (error) throw new Error(`listing record failed: ${error.message}`);
 }
@@ -341,6 +380,7 @@ export async function recordPublishAttempt(
     platform,
     status,
     error: errorMessage ?? null,
+    environment: currentEbayEnvironment(),
   });
   if (error) console.error("[inventory] attempt log failed:", error.message);
 }
@@ -363,6 +403,7 @@ export async function beginPublishAttempt(
       inventory_item_id: inventoryItemId,
       platform,
       status: "pending",
+      environment: currentEbayEnvironment(),
     })
     .select("id")
     .single<{ id: number }>();
@@ -436,6 +477,7 @@ export async function listInventory(userId: string): Promise<InventoryItemRow[]>
   const { data: listings, error: listingsError } = await supabase
     .from("marketplace_listings")
     .select("id, inventory_item_id, platform, external_id, url, meta, status, last_error")
+    .eq("environment", currentEbayEnvironment())
     .in(
       "inventory_item_id",
       items.map((i) => i.id)
@@ -458,6 +500,7 @@ export async function listInventory(userId: string): Promise<InventoryItemRow[]>
   const { data: attempts } = await supabase
     .from("publish_attempts")
     .select("inventory_item_id, platform, status, error, created_at")
+    .eq("environment", currentEbayEnvironment())
     .in(
       "inventory_item_id",
       items.map((i) => i.id)
@@ -586,7 +629,9 @@ async function getItemWithListings(
   const { data: listings } = await supabase
     .from("marketplace_listings")
     .select("id, platform, external_id, url, meta, status, last_error")
-    .eq("inventory_item_id", itemId);
+    .eq("inventory_item_id", itemId)
+    // Delisting acts only on listings THIS environment created.
+    .eq("environment", currentEbayEnvironment());
   return { status: item.status, listings: (listings ?? []) as unknown as ListingRow[] };
 }
 

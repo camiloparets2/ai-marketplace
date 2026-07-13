@@ -12,14 +12,27 @@ import { Button } from "@/app/ui/button";
 import { Card } from "@/app/ui/card";
 import { StatusBadge } from "@/app/ui/status-badge";
 import { PricingPanel } from "@/app/ui/pricing-panel";
+import { ItemSpecificsCard } from "@/app/ui/item-specifics";
+import type { ItemSpecificsStatus } from "@/app/ui/item-specifics";
 import { useToast } from "@/app/ui/toast";
 import { getAllFlatRates } from "@/lib/shipping";
+import {
+  missingRequiredAspectValues,
+  EBAY_CATEGORY_SPEC_KEY,
+  EBAY_CATEGORY_NAME_SPEC_KEY,
+} from "@/lib/ebay-aspects";
+import type { AspectField } from "@/lib/ebay-aspects";
+import { nearestAllowedConditionId } from "@/lib/ebay-conditions";
+import type { ConditionGrade } from "@/lib/ebay-conditions";
 
 interface ItemDetail {
   id: string;
   title: string;
+  brand: string | null;
+  model: string | null;
   condition: string;
   category: string | null;
+  specs: Record<string, string> | null;
   photo_url: string | null;
   price: number | null;
   cost_of_goods: number | null;
@@ -50,6 +63,17 @@ export default function ItemDetailPage() {
   const [price, setPrice] = useState("");
   const [shipCost, setShipCost] = useState("");
   const [costBasis, setCostBasis] = useState("");
+  // eBay item specifics + the reserved __ebayCategoryId key — saved with the
+  // draft so republish/retry reuses them (no re-analyze, no credit).
+  const [specs, setSpecs] = useState<Record<string, string>>({});
+  // Required-aspect metadata from /aspects; null → unknown (don't gate here,
+  // the publish-time guard is the backstop).
+  const [aspectFields, setAspectFields] = useState<AspectField[] | null>(null);
+  // Condition ids the resolved category legally accepts; null → unknown
+  // (never constrain the dropdown on missing metadata).
+  const [allowedConditionIds, setAllowedConditionIds] = useState<
+    string[] | null
+  >(null);
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [outcome, setOutcome] = useState<PublishOutcome | null>(null);
@@ -59,8 +83,41 @@ export default function ItemDetailPage() {
     setTitle(it.title);
     setCondition(it.condition);
     setPrice(it.price !== null ? String(it.price) : "");
-    setShipCost(it.shipping_cost !== null ? String(it.shipping_cost) : "");
+    // MONEY RULE: a stored $0 shipping cost is never trusted as a default —
+    // it means free shipping the seller silently absorbs (the concrete-bag
+    // bug). Open the field EMPTY so publishing stays blocked until the
+    // seller deliberately types a cost (0 included — but typed, not
+    // defaulted).
+    setShipCost(
+      it.shipping_cost !== null && it.shipping_cost > 0
+        ? String(it.shipping_cost)
+        : ""
+    );
     setCostBasis(it.cost_of_goods !== null ? String(it.cost_of_goods) : "");
+    setSpecs(it.specs ?? {});
+  }, []);
+
+  const onAspectStatus = useCallback((status: ItemSpecificsStatus) => {
+    setAspectFields(status.aspects);
+    setAllowedConditionIds(status.allowedConditionIds);
+    // Mirror the ONE resolved category into the client specs (functional
+    // update — this fires from the card's fetch) so Save never wipes the
+    // server-side pin and the breadcrumb below shows the same answer as the
+    // dropdown and the publish step.
+    if (status.categoryId !== null) {
+      const id = status.categoryId;
+      const name = status.categoryName;
+      setSpecs((prev) =>
+        prev[EBAY_CATEGORY_SPEC_KEY] === id &&
+        (name === null || prev[EBAY_CATEGORY_NAME_SPEC_KEY] === name)
+          ? prev
+          : {
+              ...prev,
+              [EBAY_CATEGORY_SPEC_KEY]: id,
+              ...(name ? { [EBAY_CATEGORY_NAME_SPEC_KEY]: name } : {}),
+            }
+      );
+    }
   }, []);
 
   useEffect(() => {
@@ -90,6 +147,24 @@ export default function ItemDetailPage() {
   const shipValid = shipNum === null || (isFinite(shipNum) && shipNum >= 0);
   const costValid = costNum === null || (isFinite(costNum) && costNum >= 0);
   const priceValid = isFinite(priceNum) && priceNum > 0;
+  // eBay-required item specifics still empty (Brand/Model count via their
+  // own columns). Unknown requirements ([] when aspectFields is null) never
+  // block here — the server-side publish guard is the backstop.
+  const missingAspects =
+    aspectFields !== null && item?.status === "draft"
+      ? missingRequiredAspectValues(aspectFields, {
+          Brand: item?.brand ?? "",
+          Model: item?.model ?? "",
+          ...specs,
+        })
+      : [];
+  // Category condition policy (same layer as the publish step): the selected
+  // grade must map to a condition the category accepts. Unknown policy
+  // (null) never blocks — the server-side guard is the backstop.
+  const conditionIllegal =
+    allowedConditionIds !== null &&
+    nearestAllowedConditionId(condition as ConditionGrade, allowedConditionIds) ===
+      null;
 
   async function save(): Promise<boolean> {
     if (!item) return false;
@@ -112,6 +187,7 @@ export default function ItemDetailPage() {
           price: priceNum,
           shippingCost: shipNum,
           costOfGoods: costNum,
+          specs,
         }),
       });
       const data = (await res.json()) as { item?: ItemDetail; error?: string };
@@ -203,8 +279,13 @@ export default function ItemDetailPage() {
                   </div>
                 )}
                 <div className="min-w-0 flex-1">
-                  {item.category && (
-                    <p className="text-xs text-gray-400">{item.category}</p>
+                  {/* ONE category answer: the resolved eBay leaf (same as the
+                      specifics dropdown + what publish uses); the AI's guess
+                      only until resolution arrives. */}
+                  {(specs[EBAY_CATEGORY_NAME_SPEC_KEY] ?? item.category) && (
+                    <p className="text-xs text-gray-400">
+                      {specs[EBAY_CATEGORY_NAME_SPEC_KEY] ?? item.category}
+                    </p>
                   )}
                   <p className="text-sm text-gray-500 mt-1">
                     {editable
@@ -236,12 +317,32 @@ export default function ItemDetailPage() {
                 onChange={(e) => setCondition(e.target.value)}
                 disabled={!editable}
               >
-                {CONDITIONS.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
+                {/* Grades the resolved eBay category can't legally take are
+                    disabled (category condition policy) — the seller can
+                    never pick a condition eBay would 400. */}
+                {CONDITIONS.map((c) => {
+                  const illegal =
+                    allowedConditionIds !== null &&
+                    nearestAllowedConditionId(
+                      c as ConditionGrade,
+                      allowedConditionIds
+                    ) === null;
+                  return (
+                    <option key={c} value={c} disabled={illegal}>
+                      {c}
+                      {illegal ? " — not allowed in this eBay category" : ""}
+                    </option>
+                  );
+                })}
               </select>
+              {conditionIllegal && (
+                <p
+                  role="alert"
+                  className="text-xs text-warn bg-warn-surface border border-amber-200 rounded-lg px-3 py-2"
+                >
+                  {`This eBay category doesn't accept the "${condition}" condition — pick an allowed one (or change the category below). Publishing is blocked until then.`}
+                </p>
+              )}
 
               {/* Shipping — the money rule: no cost, no publish */}
               <label className="text-sm font-medium text-gray-700" htmlFor="ship">
@@ -321,6 +422,20 @@ export default function ItemDetailPage() {
               />
             </Card>
 
+            {/* eBay category + required/recommended item specifics — resolved
+                at DRAFT time so the seller never dead-ends at publish. */}
+            <Card className="flex flex-col gap-3">
+              <ItemSpecificsCard
+                itemId={item.id}
+                brand={item.brand}
+                model={item.model}
+                specs={specs}
+                onSpecsChange={setSpecs}
+                onStatus={onAspectStatus}
+                editable={editable}
+              />
+            </Card>
+
             {/* Why it's held (review items) */}
             {item.status === "review" && (
               <Card className="flex flex-col gap-2">
@@ -390,7 +505,13 @@ export default function ItemDetailPage() {
                   <Button
                     className="flex-1"
                     loading={publishing}
-                    disabled={!priceValid || shipNum === null || !shipValid}
+                    disabled={
+                      !priceValid ||
+                      shipNum === null ||
+                      !shipValid ||
+                      missingAspects.length > 0 ||
+                      conditionIllegal
+                    }
                     onClick={() => void publish()}
                   >
                     List it

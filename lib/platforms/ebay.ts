@@ -40,8 +40,17 @@ import {
   marketplaceForCountry,
   marketplaceById,
   sellerRegistrationUrl,
+  domesticShippingCandidates,
   DEFAULT_EBAY_MARKETPLACE,
 } from "@/lib/platforms/ebay-marketplaces";
+import { EBAY_CATEGORY_SPEC_KEY, isReservedSpecKey } from "@/lib/ebay-aspects";
+import type { AspectField, CategoryOption } from "@/lib/ebay-aspects";
+import {
+  nearestAllowedConditionId,
+  conditionEnumForId,
+  describeAllowedConditions,
+} from "@/lib/ebay-conditions";
+import { LRUCache } from "lru-cache";
 import type { EbayMarketplace } from "@/lib/platforms/ebay-marketplaces";
 
 // ─── Environment ──────────────────────────────────────────────────────────────
@@ -223,7 +232,7 @@ export async function ebayExchangeCode(code: string): Promise<UnownedConnection>
   };
 }
 
-async function freshConnection(conn: PlatformConnection): Promise<PlatformConnection> {
+export async function freshConnection(conn: PlatformConnection): Promise<PlatformConnection> {
   if (!isExpired(conn)) return conn;
   if (!conn.refreshToken) {
     throw new Error("eBay session expired — reconnect your eBay account.");
@@ -251,14 +260,21 @@ async function ebayFetch(
   path: string,
   init: { method?: string; body?: unknown; contentLanguage?: string } = {}
 ): Promise<Response> {
+  const language = init.contentLanguage ?? "en-US";
   return fetch(`${apiBase()}${path}`, {
     method: init.method ?? "GET",
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
-      // Required by Inventory API write calls; must match the seller's
-      // marketplace (de-DE for EBAY_DE, en-GB for EBAY_GB, …).
-      "Content-Language": init.contentLanguage ?? "en-US",
+      // Content-Language is required by Inventory API write calls and must
+      // match the seller's marketplace (de-DE for EBAY_DE, en-GB for
+      // EBAY_GB, …). Accept-Language is pinned to the SAME value: when it's
+      // absent, whatever ambient default the runtime/proxy injects reaches
+      // eBay and gets rejected with 400 errorId 25709 "Invalid value for
+      // header Accept-Language" (hit live in Sandbox at
+      // createOrReplaceInventoryItem). Never leave it implicit.
+      "Content-Language": language,
+      "Accept-Language": language,
       Accept: "application/json",
     },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
@@ -526,65 +542,221 @@ export interface ResolvedCategory {
   requiredAspects: string[];
   // Recommended / required-soon aspects — optimization prompts, not blockers.
   recommendedAspects: string[];
+  // Full aspect metadata (mode, closed-enum values, data type) — what the
+  // draft-time item-specifics form renders.
+  aspects: AspectField[];
 }
 
-// Resolve the title to a CURRENT LEAF category and its aspect requirements.
-// getItemAspectsForCategory doubles as the leaf check (eBay rejects non-leaf
-// ids), so a non-leaf suggestion falls through to the next candidate. There
-// is deliberately NO hardcoded fallback category — an unmappable item is the
-// seller's call, never a silent mislisting.
-async function resolveLeafCategory(
+// ── Aspect metadata (getItemAspectsForCategory) ──────────────────────────────
+
+interface RawAspect {
+  localizedAspectName?: string;
+  aspectConstraint?: {
+    aspectRequired?: boolean;
+    aspectUsage?: string;
+    aspectMode?: string;
+    aspectDataType?: string;
+  };
+  aspectValues?: Array<{ localizedValue?: string }>;
+}
+
+function parseAspectFields(raw: { aspects?: RawAspect[] }): AspectField[] {
+  const fields: AspectField[] = [];
+  for (const aspect of raw.aspects ?? []) {
+    const name = aspect.localizedAspectName;
+    if (!name) continue;
+    fields.push({
+      name,
+      required: aspect.aspectConstraint?.aspectRequired === true,
+      recommended: aspect.aspectConstraint?.aspectUsage === "RECOMMENDED",
+      mode:
+        aspect.aspectConstraint?.aspectMode === "SELECTION_ONLY"
+          ? "SELECTION_ONLY"
+          : "FREE_TEXT",
+      dataType: aspect.aspectConstraint?.aspectDataType ?? "STRING",
+      values: (aspect.aspectValues ?? [])
+        .map((v) => v.localizedValue)
+        .filter((v): v is string => Boolean(v))
+        // Closed enums can be huge (hundreds of brands); the form caps the
+        // select at a sane size and falls back to free text beyond it.
+        .slice(0, 200),
+    });
+  }
+  return fields;
+}
+
+// Taxonomy metadata is stable for months — cache it so the draft-edit view
+// (which refetches on category change) doesn't hammer eBay.
+const aspectCache = new LRUCache<string, { fields: AspectField[] | null }>({
+  max: 300,
+  ttl: 6 * 60 * 60 * 1000,
+});
+
+export function clearAspectCacheForTests(): void {
+  aspectCache.clear();
+}
+
+/**
+ * Aspect metadata for one category — doubles as the LEAF check: eBay 400s
+ * get_item_aspects_for_category for non-leaf/retired ids, which comes back
+ * as null (callers pick another candidate), never a throw.
+ */
+export async function getCategoryAspects(
+  accessToken: string,
+  categoryTreeId: string,
+  categoryId: string
+): Promise<AspectField[] | null> {
+  const key = `${categoryTreeId}|${categoryId}`;
+  const cached = aspectCache.get(key);
+  if (cached !== undefined) return cached.fields;
+  const res = await ebayFetch(
+    accessToken,
+    `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_item_aspects_for_category?category_id=${categoryId}`
+  );
+  if (!res.ok) {
+    // Non-leaf or retired id. Cache only clear 4xx verdicts — a 5xx/network
+    // blip must not stick a category as "invalid" for six hours.
+    if (res.status >= 400 && res.status < 500) {
+      aspectCache.set(key, { fields: null });
+    }
+    return null;
+  }
+  const fields = parseAspectFields(
+    (await res.json()) as { aspects?: RawAspect[] }
+  );
+  aspectCache.set(key, { fields });
+  return fields;
+}
+
+// ── Condition policies (Sell Metadata getItemConditionPolicies) ─────────────
+//
+// Same category-policy pattern as aspects: what a category legally accepts
+// is METADATA, fetched per leaf and cached — never hardcoded (the third
+// category-metadata bug in one sandbox run: aspects, shipping services, and
+// now condition ids).
+
+const conditionCache = new LRUCache<string, { ids: string[] | null }>({
+  max: 300,
+  ttl: 6 * 60 * 60 * 1000,
+});
+
+export function clearConditionCacheForTests(): void {
+  conditionCache.clear();
+}
+
+/**
+ * Condition ids the category accepts, or null when the policy can't be
+ * determined (metadata outage / unexpected shape) — callers then fall back
+ * to the static per-grade default and the publish-time guard keeps eBay's
+ * verbatim rejection as the backstop. Never throws.
+ */
+export async function getAllowedConditionIds(
+  accessToken: string,
+  marketplaceId: string,
+  categoryId: string
+): Promise<string[] | null> {
+  const key = `${marketplaceId}|${categoryId}`;
+  const cached = conditionCache.get(key);
+  if (cached !== undefined) return cached.ids;
+  try {
+    const res = await ebayFetch(
+      accessToken,
+      `/sell/metadata/v1/marketplace/${marketplaceId}/get_item_condition_policies?filter=${encodeURIComponent(`categoryIds:{${categoryId}}`)}`
+    );
+    if (!res.ok) {
+      console.warn(
+        `[ebay] condition-policy lookup failed (${res.status}) for ${key} — falling back to static mapping`
+      );
+      return null; // not cached: a transient failure must not stick
+    }
+    const data = (await res.json()) as {
+      itemConditionPolicies?: Array<{
+        categoryId?: string;
+        itemConditions?: Array<{ conditionId?: string }>;
+      }>;
+    };
+    const policy = (data.itemConditionPolicies ?? []).find(
+      (p) => p.categoryId === categoryId
+    );
+    const ids =
+      policy?.itemConditions
+        ?.map((c) => c.conditionId)
+        .filter((id): id is string => Boolean(id)) ?? null;
+    const result = ids !== null && ids.length > 0 ? ids : null;
+    conditionCache.set(key, { ids: result });
+    return result;
+  } catch (err) {
+    console.warn(`[ebay] condition-policy lookup errored for ${key}:`, err);
+    return null;
+  }
+}
+
+/** Category candidates for the seller-facing picker — id + display name. */
+export async function suggestEbayCategories(
   accessToken: string,
   title: string,
   categoryTreeId: string
-): Promise<ResolvedCategory> {
+): Promise<CategoryOption[]> {
   const res = await ebayFetch(
     accessToken,
     `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_category_suggestions?q=${encodeURIComponent(title)}`
   );
   if (!res.ok) throw await ebayError(res, "category lookup");
   const data = (await res.json()) as {
-    categorySuggestions?: Array<{ category: { categoryId: string } }>;
+    categorySuggestions?: Array<{
+      category: { categoryId?: string; categoryName?: string };
+    }>;
   };
-  const candidates = (data.categorySuggestions ?? [])
-    .map((sugg) => sugg.category.categoryId)
-    .filter(Boolean)
-    .slice(0, 3);
+  return (data.categorySuggestions ?? [])
+    .map((sugg) => ({
+      categoryId: sugg.category.categoryId ?? "",
+      categoryName: sugg.category.categoryName ?? "",
+    }))
+    .filter((c) => c.categoryId !== "")
+    .slice(0, 5);
+}
+
+function resolvedFromFields(
+  categoryId: string,
+  fields: AspectField[]
+): ResolvedCategory {
+  return {
+    categoryId,
+    requiredAspects: fields.filter((f) => f.required).map((f) => f.name),
+    recommendedAspects: fields
+      .filter((f) => !f.required && f.recommended)
+      .map((f) => f.name),
+    aspects: fields,
+  };
+}
+
+// Resolve the title to a CURRENT LEAF category and its aspect requirements.
+// getCategoryAspects doubles as the leaf check (eBay rejects non-leaf ids),
+// so a non-leaf suggestion falls through to the next candidate. There is
+// deliberately NO hardcoded fallback category — an unmappable item is the
+// seller's call, never a silent mislisting.
+async function resolveLeafCategory(
+  accessToken: string,
+  title: string,
+  categoryTreeId: string
+): Promise<ResolvedCategory> {
+  const candidates = (
+    await suggestEbayCategories(accessToken, title, categoryTreeId)
+  ).slice(0, 3);
   if (candidates.length === 0) {
     throw new Error(
       "eBay could not suggest a category for this title. Edit the title and retry."
     );
   }
 
-  for (const categoryId of candidates) {
-    const aspectsRes = await ebayFetch(
+  for (const candidate of candidates) {
+    const fields = await getCategoryAspects(
       accessToken,
-      `/commerce/taxonomy/v1/category_tree/${categoryTreeId}/get_item_aspects_for_category?category_id=${categoryId}`
+      categoryTreeId,
+      candidate.categoryId
     );
-    if (!aspectsRes.ok) {
-      // Non-leaf (or retired) category id — try the next suggestion.
-      continue;
-    }
-    const aspectData = (await aspectsRes.json()) as {
-      aspects?: Array<{
-        localizedAspectName?: string;
-        aspectConstraint?: {
-          aspectRequired?: boolean;
-          aspectUsage?: string;
-        };
-      }>;
-    };
-    const requiredAspects: string[] = [];
-    const recommendedAspects: string[] = [];
-    for (const aspect of aspectData.aspects ?? []) {
-      const name = aspect.localizedAspectName;
-      if (!name) continue;
-      if (aspect.aspectConstraint?.aspectRequired) requiredAspects.push(name);
-      else if (aspect.aspectConstraint?.aspectUsage === "RECOMMENDED") {
-        recommendedAspects.push(name);
-      }
-    }
-    return { categoryId, requiredAspects, recommendedAspects };
+    if (fields === null) continue; // non-leaf/retired — next suggestion
+    return resolvedFromFields(candidate.categoryId, fields);
   }
 
   throw new Error(
@@ -764,9 +936,18 @@ export interface EbayFulfillmentPolicyPayload {
       shippingCarrierCode: string;
       shippingServiceCode: string;
       freeShipping: boolean;
+      // REQUIRED by eBay for a buyer-paid (freeShipping:false) flat-rate
+      // service — omitting it triggers "Please select a valid shipping
+      // service" (20403). A positive placeholder; the offer's
+      // shippingCostOverrides sets the real per-listing amount.
+      shippingCost?: { value: string; currency: string };
     }>;
   }>;
 }
+
+// Never-silently-free placeholder when a marketplace defines a service but no
+// explicit baseline (money rule: a buyer-paid flat-rate service is never $0).
+const DEFAULT_SHIPPING_COST_BASELINE = 9.99;
 
 // Name doubles as the marker that a detected policy is OUR default — the
 // per-offer shipping-cost override only ever applies to this policy, never
@@ -774,8 +955,19 @@ export interface EbayFulfillmentPolicyPayload {
 export const DEFAULT_FULFILLMENT_POLICY_NAME = "Snap to List default shipping";
 
 export function buildDefaultFulfillmentPolicy(
-  marketplace: EbayMarketplace
+  marketplace: EbayMarketplace,
+  // Which domestic shipping service to write:
+  //   undefined → the marketplace's PRIMARY service (back-compat default),
+  //   a service → use exactly that candidate (fallback retries pass this),
+  //   null      → handling-time-only, NO shipping service (final degradation;
+  //               the seller picks a service on eBay).
+  service:
+    | { carrierCode: string; serviceCode: string }
+    | null
+    | undefined = undefined
 ): EbayFulfillmentPolicyPayload {
+  const chosen =
+    service === undefined ? marketplace.defaultShippingService ?? null : service;
   return {
     name: DEFAULT_FULFILLMENT_POLICY_NAME,
     marketplaceId: marketplace.id,
@@ -783,13 +975,14 @@ export function buildDefaultFulfillmentPolicy(
     handlingTime: { value: 3, unit: "DAY" },
     // Buyer-paid shipping, NEVER free by default: a silent free-shipping
     // policy written to a real seller's account makes the seller absorb an
-    // uncosted bill (the $6.50 concrete-bag bug). The per-listing amount the
-    // buyer pays comes from the offer's shippingCostOverrides (priority 1
-    // matches this service's sortOrder). Free shipping stays a deliberate
-    // opt-in on eBay's policy manager. Marketplaces without a vetted service
-    // code get a policy with handling time only — the seller picks a service
-    // on eBay.
-    ...(marketplace.defaultShippingService
+    // uncosted bill (the $6.50 concrete-bag bug). freeShipping stays false and
+    // a POSITIVE baseline shippingCost is required (eBay rejects a buyer-paid
+    // flat-rate service with no cost). The real per-listing amount the buyer
+    // pays comes from the offer's shippingCostOverrides (priority 1 matches
+    // this service's sortOrder). Free shipping stays a deliberate opt-in on
+    // eBay's policy manager. `chosen === null` → handling time only, and the
+    // seller picks a service on eBay.
+    ...(chosen
       ? {
           shippingOptions: [
             {
@@ -798,11 +991,16 @@ export function buildDefaultFulfillmentPolicy(
               shippingServices: [
                 {
                   sortOrder: 1,
-                  shippingCarrierCode:
-                    marketplace.defaultShippingService.carrierCode,
-                  shippingServiceCode:
-                    marketplace.defaultShippingService.serviceCode,
+                  shippingCarrierCode: chosen.carrierCode,
+                  shippingServiceCode: chosen.serviceCode,
                   freeShipping: false,
+                  shippingCost: {
+                    value: (
+                      marketplace.shippingCostBaseline ??
+                      DEFAULT_SHIPPING_COST_BASELINE
+                    ).toFixed(2),
+                    currency: marketplace.currency,
+                  },
                 },
               ],
             },
@@ -924,6 +1122,93 @@ async function createPolicy(
   throw err;
 }
 
+// eBay returns 400 "Please select a valid shipping service." (errorId 20403)
+// for BOTH a service code the marketplace/sandbox doesn't accept AND a
+// buyer-paid FLAT_RATE service missing its shippingCost — the text is
+// misleading, so match the service/cost signal broadly and retry the next
+// candidate code rather than trusting the wording.
+function isShippingServiceRejection(status: number, detail: string): boolean {
+  return (
+    status === 400 &&
+    /shipping\s+service|shipping\s+cost|20403/i.test(detail)
+  );
+}
+
+const FULFILLMENT_SPEC = POLICY_KINDS[0];
+
+/**
+ * Create the default fulfillment policy WITHOUT hardcoding a single shipping
+ * service. Tries the marketplace's vetted domestic services in order; on a
+ * shipping-service rejection it falls to the next code, and if none is
+ * accepted it degrades to a handling-time-only policy (valid — the seller
+ * then picks a service on eBay) rather than hard-failing the whole setup.
+ * `appDefault` is always true (it is our named default, service or not).
+ */
+export async function createFulfillmentPolicy(
+  accessToken: string,
+  marketplace: EbayMarketplace
+): Promise<{ id: string; appDefault: boolean }> {
+  const candidates = domesticShippingCandidates(marketplace);
+  // Each vetted service in order, then `null` = the handling-time-only
+  // degradation as the last resort.
+  const attempts: Array<{ carrierCode: string; serviceCode: string } | null> =
+    candidates.length > 0 ? [...candidates, null] : [null];
+
+  let lastErr: Error | null = null;
+  for (const service of attempts) {
+    const res = await ebayFetch(
+      accessToken,
+      "/sell/account/v1/fulfillment_policy",
+      {
+        method: "POST",
+        contentLanguage: marketplace.contentLanguage,
+        body: buildDefaultFulfillmentPolicy(marketplace, service),
+      }
+    );
+    if (res.ok) {
+      const data = (await res.json()) as Record<string, string | undefined>;
+      const id = data.fulfillmentPolicyId;
+      if (!id) {
+        throw new Error("eBay fulfillment_policy creation returned no policy id");
+      }
+      if (service === null && candidates.length > 0) {
+        console.warn(
+          `[ebay] no vetted domestic shipping service was accepted for ${marketplace.id}; created a handling-time-only default fulfillment policy — the seller must add a shipping service in eBay's Business Policies manager before the listing can go live.`
+        );
+      }
+      return { id, appDefault: true };
+    }
+
+    const detail = parseEbayErrorDetail(await res.text());
+    if (isNotEligibleDetail(res.status, detail)) {
+      throw new EbaySellerSetupError("not_registered");
+    }
+    lastErr = new Error(
+      `eBay fulfillment_policy creation failed (${res.status}): ${detail}`
+    );
+    // Only a shipping-service rejection is worth retrying with the next code;
+    // for the final (handling-time-only) attempt there is no next code.
+    if (isShippingServiceRejection(res.status, detail) && service !== null) {
+      continue;
+    }
+    // Not retryable (or the degraded attempt failed): a concurrent create may
+    // have won the race — adopt the existing policy before giving up.
+    const existing = await listFirstPolicy(
+      accessToken,
+      FULFILLMENT_SPEC,
+      marketplace.id
+    ).catch(() => null);
+    if (existing) {
+      return {
+        id: existing.id,
+        appDefault: existing.name === DEFAULT_FULFILLMENT_POLICY_NAME,
+      };
+    }
+    throw lastErr;
+  }
+  throw lastErr ?? new Error("eBay fulfillment_policy creation failed");
+}
+
 /**
  * Resolve the three business-policy ids for the seller's marketplace:
  * env overrides → connection meta → detect on eBay → remediate (opt into
@@ -988,12 +1273,21 @@ export async function ensureEbayPolicies(
           sellerRegistrationUrl(marketplace)
         );
       }
-      const id = existing?.id ?? (await createPolicy(token, spec, marketplace));
-      resolved[spec.idKey] = id;
-      if (spec.kind === "fulfillment_policy") {
-        fulfillmentIsAppDefault = existing
-          ? existing.name === DEFAULT_FULFILLMENT_POLICY_NAME
-          : true;
+      if (existing) {
+        resolved[spec.idKey] = existing.id;
+        if (spec.kind === "fulfillment_policy") {
+          fulfillmentIsAppDefault =
+            existing.name === DEFAULT_FULFILLMENT_POLICY_NAME;
+        }
+      } else if (spec.kind === "fulfillment_policy") {
+        // Never hardcode one service: try vetted codes in order, degrade to
+        // handling-time-only rather than hard-fail (fixes the 20403
+        // "valid shipping service" rejection).
+        const created = await createFulfillmentPolicy(token, marketplace);
+        resolved[spec.idKey] = created.id;
+        fulfillmentIsAppDefault = created.appDefault;
+      } else {
+        resolved[spec.idKey] = await createPolicy(token, spec, marketplace);
       }
     }
   } catch (err) {
@@ -1181,15 +1475,21 @@ export interface EbayInventoryItemPayload {
 
 export function buildEbayInventoryItemPayload(
   input: ListingInput,
-  imageUrls: string[]
+  imageUrls: string[],
+  // Category-policy-resolved condition enum (lib/ebay-conditions). Omitted →
+  // the static per-grade default (dry-run mode, no category policy known).
+  conditionEnum?: string
 ): EbayInventoryItemPayload {
   const composed = composeListing("ebay", input);
 
-  // Item specifics (aspects) from brand/model/specs. eBay expects string arrays.
+  // Item specifics (aspects) from brand/model/specs. eBay expects string
+  // arrays. Reserved __keys are app metadata (chosen category id) and empty
+  // values are unanswered form fields — neither is an aspect.
   const aspects: Record<string, string[]> = {};
   if (input.brand) aspects["Brand"] = [input.brand];
   if (input.model) aspects["Model"] = [input.model];
   for (const [key, value] of Object.entries(input.specs)) {
+    if (isReservedSpecKey(key) || value.trim() === "") continue;
     aspects[key] = [value];
   }
 
@@ -1205,7 +1505,7 @@ export function buildEbayInventoryItemPayload(
       imageUrls: imageUrls.slice(0, 24),
       ...(input.upc ? { upc: [input.upc] } : {}),
     },
-    condition: EBAY_CONDITION_MAP[input.condition],
+    condition: conditionEnum ?? EBAY_CONDITION_MAP[input.condition],
     availability: { shipToLocationAvailability: { quantity: 1 } },
   };
 }
@@ -1350,8 +1650,32 @@ export async function publishToEbay(
   // tree, currency, policies, and Content-Language) for everything below.
   const { merchantLocationKey, marketplace } = await ensureEbayLocation(conn);
 
+  // The seller's explicit category choice (draft-edit view) beats the title
+  // suggestion — a bad auto-picked leaf is what drags in irrelevant required
+  // aspects. An invalid/stale choice fails LOUDLY (re-pick in the app),
+  // never silently re-routes to a different category than the seller chose.
+  const chosenCategoryId =
+    input.specs[EBAY_CATEGORY_SPEC_KEY]?.trim() || null;
+
   const [resolvedCategory, policies] = await Promise.all([
-    resolveLeafCategory(conn.accessToken, composed.title, marketplace.categoryTreeId),
+    chosenCategoryId
+      ? getCategoryAspects(
+          conn.accessToken,
+          marketplace.categoryTreeId,
+          chosenCategoryId
+        ).then((fields) => {
+          if (fields === null) {
+            throw new Error(
+              "The eBay category picked for this item is no longer a valid leaf category. Open the item and pick a category again."
+            );
+          }
+          return resolvedFromFields(chosenCategoryId, fields);
+        })
+      : resolveLeafCategory(
+          conn.accessToken,
+          composed.title,
+          marketplace.categoryTreeId
+        ),
     // Seller-readiness ensure chain: cached ids, else detect / opt-in /
     // create defaults. Throws the typed onboarding error when the seller
     // hasn't finished eBay registration.
@@ -1359,7 +1683,32 @@ export async function publishToEbay(
   ]);
   const categoryId = resolvedCategory.categoryId;
 
-  const itemPayload = buildEbayInventoryItemPayload(input, imageUrls);
+  // Condition is CATEGORY POLICY, not a global map: Good → USED_GOOD (5000)
+  // is legal in media categories and a 400 everywhere else. Resolve the
+  // nearest condition the category accepts (honesty-ordered fallbacks, never
+  // a better claim); metadata unavailable → static default and eBay's
+  // verbatim rejection stays the backstop.
+  const allowedConditionIds = await getAllowedConditionIds(
+    conn.accessToken,
+    marketplace.id,
+    categoryId
+  );
+  const conditionId = nearestAllowedConditionId(
+    input.condition,
+    allowedConditionIds
+  );
+  if (conditionId === null) {
+    throw new Error(
+      `This eBay category doesn't accept the condition "${input.condition}" — it allows: ${describeAllowedConditions(allowedConditionIds ?? [])}. Change the item's condition (or its category) and publish again.`
+    );
+  }
+  const conditionEnum = conditionEnumForId(conditionId) ?? undefined;
+
+  const itemPayload = buildEbayInventoryItemPayload(
+    input,
+    imageUrls,
+    conditionEnum
+  );
   const missing = missingRequiredAspects(
     resolvedCategory.requiredAspects,
     itemPayload.product.aspects

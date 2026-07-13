@@ -12,6 +12,7 @@
 // Deps are injectable so the race semantics are tested without a database.
 
 import { getSupabaseAdmin } from "@/lib/connections";
+import { currentEbayEnvironment } from "@/lib/ebay-env";
 import { endOtherListings } from "@/lib/inventory";
 import type { EndResult } from "@/lib/inventory";
 import { recordAudit } from "@/lib/audit";
@@ -68,6 +69,9 @@ export async function recordSoldEvent(
       sale_price: evt.salePrice,
       source: evt.source,
       raw: evt.raw ?? {},
+      // Which eBay environment the signal came from — processing and the
+      // dedupe key are environment-scoped.
+      environment: currentEbayEnvironment(),
     })
     .select("id")
     .single<{ id: number }>();
@@ -86,11 +90,15 @@ export async function findListingOwner(
   sku: string | null
 ): Promise<{ userId: string; inventoryItemId: string } | null> {
   const supabase = getSupabaseAdmin();
+  // Environment-pinned: an order signal can only ever attribute to a
+  // listing THIS environment created.
+  const environment = currentEbayEnvironment();
   if (listingExternalId) {
     const { data } = await supabase
       .from("marketplace_listings")
       .select("user_id, inventory_item_id")
       .eq("platform", platform)
+      .eq("environment", environment)
       .eq("external_id", listingExternalId)
       .limit(1)
       .maybeSingle<{ user_id: string; inventory_item_id: string }>();
@@ -103,6 +111,7 @@ export async function findListingOwner(
       .from("marketplace_listings")
       .select("user_id, inventory_item_id")
       .eq("platform", platform)
+      .eq("environment", environment)
       .eq("meta->>sku", sku)
       .limit(1)
       .maybeSingle<{ user_id: string; inventory_item_id: string }>();
@@ -157,6 +166,9 @@ const defaultDeps: SoldEventDeps = {
         "id, user_id, platform, external_order_id, listing_external_id, sku, sale_price, status"
       )
       .eq("status", "pending")
+      // Each environment drains only its own queue — a sandbox sale must
+      // never delist a production listing.
+      .eq("environment", currentEbayEnvironment())
       .order("created_at", { ascending: true })
       .limit(limit);
     if (userId) query = query.eq("user_id", userId);
