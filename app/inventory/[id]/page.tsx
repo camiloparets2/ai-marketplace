@@ -427,6 +427,7 @@ export default function ItemDetailPage() {
             <Card className="flex flex-col gap-3">
               <ItemSpecificsCard
                 itemId={item.id}
+                title={title}
                 brand={item.brand}
                 model={item.model}
                 specs={specs}
