@@ -20,6 +20,14 @@ interface DashboardData {
   soldCount: number;
   endFailedCount: number;
   oversoldCount: number;
+  // Marketplace-reported sales the app couldn't match to any item — the
+  // sale happened, nothing was delisted. Double-sale risk until resolved.
+  unmatchedCount: number;
+  unmatchedEvents: Array<{
+    platform: string;
+    orderId: string;
+    createdAt: string;
+  }>;
 }
 
 function Tile({
@@ -53,13 +61,23 @@ function Tile({
 }
 
 // The single most valuable thing to do right now, given current state.
-function nextBestAction(d: DashboardData): { text: string; href: string } {
+// Exported for the priority-ordering test.
+export function nextBestAction(d: DashboardData): { text: string; href: string } {
   if (d.oversoldCount > 0) {
     // A buyer paid for an item that sold elsewhere first. The app never
     // auto-cancels orders — this needs the seller, urgently.
     return {
       text: `URGENT: ${d.oversoldCount} order${d.oversoldCount === 1 ? "" : "s"} sold after the item ran out — cancel/refund on the marketplace now`,
       href: "/inventory?filter=sold",
+    };
+  }
+  if (d.unmatchedCount > 0) {
+    // A marketplace reported a sale we couldn't match to an item: the sale
+    // is real, but NOTHING was delisted elsewhere — an undetected sale is
+    // how a double-sale happens. Needs the seller, urgently.
+    return {
+      text: `URGENT: ${d.unmatchedCount} sale${d.unmatchedCount === 1 ? "" : "s"} we couldn't match to an item — find it and mark it sold now`,
+      href: "/inventory",
     };
   }
   if (d.endFailedCount > 0) {
@@ -142,6 +160,31 @@ export default function DashboardPage() {
                 Cancel or refund the extra order on the marketplace — we never
                 cancel orders automatically.
               </p>
+            )}
+            {data.unmatchedCount > 0 && (
+              <div
+                role="alert"
+                className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 font-medium"
+              >
+                🚨 {data.unmatchedCount === 1 ? "A marketplace" : "Marketplaces"}{" "}
+                reported {data.unmatchedCount === 1 ? "a sale" : `${data.unmatchedCount} sales`}{" "}
+                we couldn&apos;t match to an item. The sale is real — a buyer
+                paid — but nothing was delisted elsewhere, so the item can
+                sell twice. Find the order below and{" "}
+                <Link href="/inventory" className="underline">
+                  mark the right item sold
+                </Link>{" "}
+                now.
+                <ul className="mt-1.5 font-normal text-red-600 list-disc pl-4 space-y-0.5">
+                  {data.unmatchedEvents.map((e) => (
+                    <li key={`${e.platform}:${e.orderId}`}>
+                      {e.platform} order{" "}
+                      <span className="font-mono">{e.orderId}</span> ·{" "}
+                      {new Date(e.createdAt).toLocaleString()}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
             {data.endFailedCount > 0 && (
               <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">

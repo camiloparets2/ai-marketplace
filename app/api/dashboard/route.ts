@@ -41,6 +41,12 @@ export async function GET(): Promise<NextResponse> {
   let items: ItemRow[] = [];
   let endFailedCount = 0;
   let oversoldCount = 0;
+  let unmatchedCount = 0;
+  let unmatchedEvents: Array<{
+    platform: string;
+    orderId: string;
+    createdAt: string;
+  }> = [];
   try {
     const supabase = getSupabaseAdmin();
     const { data } = await supabase
@@ -67,6 +73,33 @@ export async function GET(): Promise<NextResponse> {
       .eq("environment", currentEbayEnvironment())
       .eq("status", "oversold");
     oversoldCount = oversold ?? 0;
+
+    // A marketplace reported a sale we couldn't match to any item. The sale
+    // HAPPENED — a buyer paid — but the app doesn't know which item it was,
+    // so nothing was delisted anywhere else. That is exactly how a
+    // double-sale starts; it must be loud, never just a table row.
+    const { count: unmatched } = await supabase
+      .from("sold_events")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .eq("environment", currentEbayEnvironment())
+      .eq("status", "unmatched");
+    unmatchedCount = unmatched ?? 0;
+    if (unmatchedCount > 0) {
+      const { data: rows } = await supabase
+        .from("sold_events")
+        .select("platform, external_order_id, created_at")
+        .eq("user_id", user.id)
+        .eq("environment", currentEbayEnvironment())
+        .eq("status", "unmatched")
+        .order("created_at", { ascending: false })
+        .limit(5);
+      unmatchedEvents = (rows ?? []).map((e) => ({
+        platform: e.platform as string,
+        orderId: e.external_order_id as string,
+        createdAt: e.created_at as string,
+      }));
+    }
   } catch {
     // inventory tables absent → zeros below
   }
@@ -104,5 +137,7 @@ export async function GET(): Promise<NextResponse> {
     soldCount: byStatus.sold,
     endFailedCount,
     oversoldCount,
+    unmatchedCount,
+    unmatchedEvents,
   });
 }
