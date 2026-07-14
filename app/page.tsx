@@ -19,6 +19,15 @@ import {
 } from "@/lib/supabase/client";
 import { BrandWordmark } from "@/app/brand";
 import { ConfidenceMeter } from "@/app/ui/confidence-meter";
+import { ItemSpecificsCard } from "@/app/ui/item-specifics";
+import type { ItemSpecificsStatus } from "@/app/ui/item-specifics";
+import {
+  missingRequiredAspectValues,
+  EBAY_CATEGORY_SPEC_KEY,
+  EBAY_CATEGORY_NAME_SPEC_KEY,
+} from "@/lib/ebay-aspects";
+import type { AspectField } from "@/lib/ebay-aspects";
+import { nearestAllowedConditionId } from "@/lib/ebay-conditions";
 import { PricingPanel } from "@/app/ui/pricing-panel";
 import { overallConfidence } from "@/lib/ai/confidence";
 
@@ -189,9 +198,15 @@ export default function Page() {
     etsy: false,
     shopify: false,
   });
+  // "direct" (Stripe payment link) is deliberately NOT pre-checked: it only
+  // joins the default set once /api/connections confirms Stripe is
+  // configured. A channel that cannot succeed must never be on by default
+  // (live bug: every first publish showed a red "Failed" for it).
   const [targets, setTargets] = useState<Set<PublishTarget>>(
-    new Set(["facebook", "offerup", "direct"])
+    new Set(["facebook", "offerup"])
   );
+  // null → unknown (still loading); false → show disabled with the reason.
+  const [directAvailable, setDirectAvailable] = useState<boolean | null>(null);
   const [results, setResults] = useState<TargetResult[]>([]);
   const [banner, setBanner] = useState<{
     kind: "success" | "error";
@@ -222,6 +237,38 @@ export default function Page() {
   const [price, setPrice] = useState("");
   // One-line explanation of the AI's suggested price, shown by the price field.
   const [priceRationale, setPriceRationale] = useState<string | null>(null);
+  // Editable item specifics (seeded from extraction.specs) + the reserved
+  // __ebayCategoryId key — this is what publish sends, so the required-
+  // aspects form on THIS screen feeds the real listing.
+  const [specs, setSpecs] = useState<Record<string, string>>({});
+  // Required-aspect metadata + legal condition ids from /api/ebay/aspects;
+  // null → unknown (never gate on missing metadata — the publish-time guard
+  // is the backstop).
+  const [aspectFields, setAspectFields] = useState<AspectField[] | null>(null);
+  const [allowedConditionIds, setAllowedConditionIds] = useState<
+    string[] | null
+  >(null);
+
+  const onAspectStatus = useCallback((status: ItemSpecificsStatus) => {
+    setAspectFields(status.aspects);
+    setAllowedConditionIds(status.allowedConditionIds);
+    // Mirror the resolved category into specs so publish pins the SAME
+    // category the form showed (one resolver, one answer).
+    if (status.categoryId !== null) {
+      const id = status.categoryId;
+      const name = status.categoryName;
+      setSpecs((prev) =>
+        prev[EBAY_CATEGORY_SPEC_KEY] === id &&
+        (name === null || prev[EBAY_CATEGORY_NAME_SPEC_KEY] === name)
+          ? prev
+          : {
+              ...prev,
+              [EBAY_CATEGORY_SPEC_KEY]: id,
+              ...(name ? { [EBAY_CATEGORY_NAME_SPEC_KEY]: name } : {}),
+            }
+      );
+    }
+  }, []);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadingText = useLoadingStage(stage === "analyzing");
@@ -268,19 +315,29 @@ export default function Page() {
 
     void fetch("/api/connections")
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: { connections?: Record<ApiPlatform, boolean> } | null) => {
-        if (!data?.connections) return;
-        setConnections(data.connections);
-        // Pre-select connected marketplaces — the point of the product is
-        // "one tap, listed everywhere you can be".
-        setTargets((prev) => {
-          const next = new Set(prev);
-          if (data.connections?.ebay) next.add("ebay");
-          if (data.connections?.etsy) next.add("etsy");
-          if (data.connections?.shopify) next.add("shopify");
-          return next;
-        });
-      })
+      .then(
+        (
+          data: {
+            connections?: Record<ApiPlatform, boolean>;
+            directAvailable?: boolean;
+          } | null
+        ) => {
+          if (!data?.connections) return;
+          setConnections(data.connections);
+          setDirectAvailable(data.directAvailable ?? false);
+          // Pre-select connected marketplaces — the point of the product is
+          // "one tap, listed everywhere you can be". "direct" joins only
+          // when Stripe is actually configured (it would fail otherwise).
+          setTargets((prev) => {
+            const next = new Set(prev);
+            if (data.connections?.ebay) next.add("ebay");
+            if (data.connections?.etsy) next.add("etsy");
+            if (data.connections?.shopify) next.add("shopify");
+            if (data.directAvailable) next.add("direct");
+            return next;
+          });
+        }
+      )
       .catch(() => undefined);
   }, []);
 
@@ -372,6 +429,11 @@ export default function Page() {
           : ""
       );
       setPriceRationale(result.priceRationale ?? null);
+      // Editable item specifics start from the extraction; the required-
+      // aspects card (and the seller) edit THIS record, and publish sends it.
+      setSpecs(result.specs ?? {});
+      setAspectFields(null);
+      setAllowedConditionIds(null);
       setStage("review");
     } catch {
       setError("Connection failed. Please check your network and try again.");
@@ -407,6 +469,23 @@ export default function Page() {
         : null
       : getShippingRate(shippingService).cost;
 
+  // eBay category policy gating (same math as the edit view): required
+  // aspects still empty, and whether the selected grade is legal in the
+  // resolved category. Only gates when eBay is actually a target; unknown
+  // policy ([]/false) never blocks — the server-side guard is the backstop.
+  const missingAspects =
+    aspectFields !== null && targets.has("ebay")
+      ? missingRequiredAspectValues(aspectFields, {
+          Brand: brand,
+          Model: model,
+          ...specs,
+        })
+      : [];
+  const conditionIllegal =
+    targets.has("ebay") &&
+    allowedConditionIds !== null &&
+    nearestAllowedConditionId(condition, allowedConditionIds) === null;
+
   async function handlePublish() {
     if (!price || isNaN(parseFloat(price)) || parseFloat(price) <= 0) {
       setError("Please enter a valid price before publishing.");
@@ -420,6 +499,20 @@ export default function Page() {
     }
     if (targets.size === 0) {
       setError("Pick at least one place to list.");
+      return;
+    }
+    // A user must never reach eBay with a known-missing required aspect —
+    // the first-run dead end this screen used to allow.
+    if (missingAspects.length > 0) {
+      setError(
+        `eBay requires ${missingAspects.join(", ")} for this category — fill them in under "eBay item specifics" before publishing.`
+      );
+      return;
+    }
+    if (conditionIllegal) {
+      setError(
+        `This eBay category doesn't accept the "${condition}" condition — pick an allowed one before publishing.`
+      );
       return;
     }
     setError("");
@@ -437,7 +530,9 @@ export default function Page() {
             upc: upc || null,
             condition,
             category,
-            specs: extraction?.specs ?? {},
+            // The EDITED specifics (incl. the pinned __ebayCategoryId), not
+            // the raw extraction — what the form showed is what publishes.
+            specs,
             price: parseFloat(price),
             shippingCost: effectiveShippingCost,
           },
@@ -841,6 +936,23 @@ export default function Page() {
                   </div>
                 )}
 
+              {/* eBay required item specifics — SAME component as the edit
+                  view, resolved from the title (no draft row exists yet).
+                  Publish is gated on completeness below, so the first-run
+                  path can never dead-end at eBay's required-aspects error. */}
+              <div className="rounded-lg border border-gray-100 p-3">
+                <ItemSpecificsCard
+                  itemId={null}
+                  title={title}
+                  brand={brand || null}
+                  model={model || null}
+                  specs={specs}
+                  onSpecsChange={setSpecs}
+                  onStatus={onAspectStatus}
+                  editable
+                />
+              </div>
+
               <Field
                 label="Shipping"
                 indicator={
@@ -924,6 +1036,11 @@ export default function Page() {
               ).map((t) => {
                 const isApi = t === "ebay" || t === "etsy" || t === "shopify";
                 const needsConnect = isApi && !connections[t as ApiPlatform];
+                // Direct payment links need the app's Stripe config — a
+                // channel that cannot succeed renders disabled, never a
+                // silently failing checkbox.
+                const directUnavailable = t === "direct" && directAvailable !== true;
+                const disabled = needsConnect || directUnavailable;
                 return (
                   <label
                     key={t}
@@ -934,19 +1051,22 @@ export default function Page() {
                         type="checkbox"
                         className="w-4 h-4 accent-blue-600"
                         checked={targets.has(t)}
-                        disabled={needsConnect}
+                        disabled={disabled}
                         onChange={() => toggleTarget(t)}
                       />
                       <span
-                        className={
-                          needsConnect ? "text-gray-400" : "text-gray-700"
-                        }
+                        className={disabled ? "text-gray-400" : "text-gray-700"}
                       >
                         {TARGET_LABELS[t]}
                       </span>
                       {(t === "facebook" || t === "offerup") && (
                         <span className="text-xs bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded">
                           assisted
+                        </span>
+                      )}
+                      {directUnavailable && directAvailable === false && (
+                        <span className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">
+                          unavailable — payments not configured
                         </span>
                       )}
                     </span>
@@ -977,13 +1097,23 @@ export default function Page() {
               </p>
             )}
 
+            {missingAspects.length > 0 && (
+              <p
+                role="alert"
+                className="text-xs text-warn bg-warn-surface border border-amber-200 rounded-lg px-3 py-2"
+              >
+                {`eBay requires ${missingAspects.join(", ")} for this category — fill them in under "eBay item specifics" to publish.`}
+              </p>
+            )}
             <button
               onClick={() => void handlePublish()}
               disabled={
                 stage === "publishing" ||
                 !price ||
                 targets.size === 0 ||
-                effectiveShippingCost === null
+                effectiveShippingCost === null ||
+                missingAspects.length > 0 ||
+                conditionIllegal
               }
               className="w-full py-3 rounded-xl btn-primary font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >

@@ -1,15 +1,24 @@
 // Market comps for the pricing panel:
 //   GET /api/comps?q=<title>[&brand=..][&condition=..][&category=<leaf id>]
-// Returns { comps: CompsSummary | null } — null means "no data, price
-// conservatively" (no eBay connection, Insights not granted, lookup failed).
-// Same graceful-degrade contract as the pipeline's pricing step.
+// Returns { comps, environment, insights } — comps null means "no data,
+// price conservatively" (no eBay connection, Insights not granted, lookup
+// failed). `environment` lets the UI say HONESTLY that eBay's sandbox has
+// no market data (Browse returns zero results there by design — eBay's own
+// guidance is to test search against production), instead of implying the
+// market is empty. `insights` surfaces the Marketplace Insights grant as
+// observed at runtime (granted/denied/unknown) so the sold-comps access
+// status is visible without log-diving.
 
 export const maxDuration = 30;
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/guard";
 import { getConnection } from "@/lib/connections";
-import { fetchEbayCompsFor } from "@/lib/platforms/ebay-comps";
+import {
+  fetchEbayCompsFor,
+  marketplaceInsightsStatus,
+} from "@/lib/platforms/ebay-comps";
+import { currentEbayEnvironment } from "@/lib/ebay-env";
 import type { ListingInput } from "@/lib/platforms/types";
 import {
   checkRateLimit,
@@ -58,9 +67,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const condition =
     CONDITIONS.find((c) => c === rawCondition) ?? null;
 
+  const environment = currentEbayEnvironment();
   try {
     const conn = await getConnection(user.id, "ebay");
-    if (!conn) return NextResponse.json({ comps: null });
+    if (!conn) {
+      return NextResponse.json({
+        comps: null,
+        environment,
+        insights: marketplaceInsightsStatus(),
+      });
+    }
     const comps = await fetchEbayCompsFor({
       accessToken: conn.accessToken,
       brand,
@@ -68,9 +84,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       titleKeywords: q,
       condition,
     });
-    return NextResponse.json({ comps });
+    return NextResponse.json({
+      comps,
+      environment,
+      insights: marketplaceInsightsStatus(),
+    });
   } catch {
     // Comps are advisory — never fail the caller over them.
-    return NextResponse.json({ comps: null });
+    return NextResponse.json({
+      comps: null,
+      environment,
+      insights: marketplaceInsightsStatus(),
+    });
   }
 }

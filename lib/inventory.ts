@@ -466,7 +466,7 @@ export async function listInventory(userId: string): Promise<InventoryItemRow[]>
   const { data: items, error } = await supabase
     .from("inventory_items")
     .select(
-      "id, title, condition, photo_url, quantity, price, cost_of_goods, status, review_reasons, sold_at, sold_price, sold_platform, created_at"
+      "id, title, condition, photo_url, quantity, price, cost_of_goods, shipping_cost, status, review_reasons, sold_at, sold_price, sold_platform, created_at"
     )
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
@@ -635,40 +635,10 @@ async function getItemWithListings(
   return { status: item.status, listings: (listings ?? []) as unknown as ListingRow[] };
 }
 
-/**
- * Mark an item sold and end its listings everywhere else.
- * Idempotent: re-running retries any listing whose end previously failed.
- */
-export async function markItemSold(
-  userId: string,
-  itemId: string,
-  soldPlatform: string,
-  soldPrice: number | null
-): Promise<{ ok: boolean; endResults: EndResult[] } | null> {
-  const item = await getItemWithListings(userId, itemId);
-  if (!item) return null;
-
-  const supabase = getSupabaseAdmin();
-  // Only stamp sale facts on the first call — retries just re-run the ends.
-  if (item.status !== "sold") {
-    const { error } = await supabase
-      .from("inventory_items")
-      .update({
-        status: "sold",
-        quantity: 0,
-        sold_at: new Date().toISOString(),
-        sold_price: soldPrice,
-        sold_platform: soldPlatform,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", itemId)
-      .eq("user_id", userId);
-    if (error) throw new Error(`mark sold failed: ${error.message}`);
-  }
-
-  const endResults = await endListings(userId, itemId, item.listings, soldPlatform);
-  return { ok: endResults.every((r) => r.ok), endResults };
-}
+// NOTE: the old markItemSold (direct status stamp, no sold_events row) is
+// gone deliberately. Manual sales go through lib/sold-events.ts
+// handleManualSale — the SAME queue/processor as connector-detected sales —
+// so every sale, from every source, leaves an auditable sold_events row.
 
 /**
  * End every listing on channels other than the one that sold (P0-7's

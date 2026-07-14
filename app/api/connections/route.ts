@@ -24,6 +24,11 @@ export interface ConnectionsResponse {
   connections: Record<ApiPlatform, boolean>;
   // Richer per-platform token health for the settings screen.
   health: Record<ApiPlatform, ConnectionHealth>;
+  // Whether the "Direct payment link" channel can work at all: it needs the
+  // app's Stripe key. False → the snap screen must not pre-check (or even
+  // enable) the channel — a channel that cannot succeed is never on by
+  // default (live bug: every first publish showed a red "Failed").
+  directAvailable: boolean;
 }
 
 export async function GET(): Promise<NextResponse> {
@@ -56,5 +61,9 @@ export async function GET(): Promise<NextResponse> {
     };
   }
 
-  return NextResponse.json({ connections, health } satisfies ConnectionsResponse);
+  return NextResponse.json({
+    connections,
+    health,
+    directAvailable: Boolean(process.env.STRIPE_SECRET_KEY),
+  } satisfies ConnectionsResponse);
 }

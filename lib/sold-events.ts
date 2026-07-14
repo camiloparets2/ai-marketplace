@@ -28,6 +28,10 @@ export interface SoldEventInput {
   salePrice: number | null;
   source: "webhook" | "poll" | "manual";
   raw?: Record<string, unknown>;
+  // Pre-attributed inventory item (manual sales: the user clicked "Mark
+  // sold" ON the item, so there is nothing to match — and the channel may
+  // be an assist platform with no listing row to match against).
+  inventoryItemId?: string | null;
 }
 
 export interface SoldEventRow {
@@ -39,6 +43,9 @@ export interface SoldEventRow {
   sku: string | null;
   sale_price: number | null;
   status: "pending" | "processed" | "oversold" | "unmatched" | "error";
+  // Pre-attributed item (manual source) — the processor skips listing
+  // matching when present.
+  inventory_item_id?: string | null;
 }
 
 export interface ProcessSummary {
@@ -69,6 +76,7 @@ export async function recordSoldEvent(
       sale_price: evt.salePrice,
       source: evt.source,
       raw: evt.raw ?? {},
+      inventory_item_id: evt.inventoryItemId ?? null,
       // Which eBay environment the signal came from — processing and the
       // dedupe key are environment-scoped.
       environment: currentEbayEnvironment(),
@@ -163,7 +171,7 @@ const defaultDeps: SoldEventDeps = {
     let query = getSupabaseAdmin()
       .from("sold_events")
       .select(
-        "id, user_id, platform, external_order_id, listing_external_id, sku, sale_price, status"
+        "id, user_id, platform, external_order_id, listing_external_id, sku, sale_price, status, inventory_item_id"
       )
       .eq("status", "pending")
       // Each environment drains only its own queue — a sandbox sale must
@@ -227,12 +235,16 @@ export async function processSoldEvent(
   deps: SoldEventDeps = defaultDeps
 ): Promise<"processed" | "oversold" | "unmatched" | "error"> {
   try {
-    const match = await deps.matchListing(
-      evt.user_id,
-      evt.platform,
-      evt.listing_external_id,
-      evt.sku
-    );
+    // Pre-attributed events (manual "Mark sold") name their item directly —
+    // there may be no listing row to match (assist channels).
+    const match = evt.inventory_item_id
+      ? { inventoryItemId: evt.inventory_item_id }
+      : await deps.matchListing(
+          evt.user_id,
+          evt.platform,
+          evt.listing_external_id,
+          evt.sku
+        );
     if (!match) {
       await deps.markEvent(evt.id, { status: "unmatched" });
       return "unmatched";
@@ -328,6 +340,96 @@ export async function handleDirectSale(
     source: "webhook",
   });
   await io.process(owner.userId);
+}
+
+// ─── Manual "Mark sold" intake ────────────────────────────────────────────────
+//
+// The data-model rule: EVERY sale, from every source, normalizes into the
+// sold_events queue. The manual path used to bypass it (stamping the item
+// directly), leaving zero audit trail — no record of what sold, where, for
+// how much, or when, and nothing to reconstruct a double-sale from. Now it
+// enqueues like any connector and the SAME processor does claim + delist +
+// audit: one code path, always audited.
+
+export interface ManualSaleResult {
+  ok: boolean;
+  endResults: EndResult[];
+}
+
+export interface ManualSaleIO {
+  record: typeof recordSoldEvent;
+  process: (userId: string) => Promise<ProcessSummary>;
+  endOthers: typeof endOtherListings;
+}
+
+/** Deterministic dedupe key: ONE manual sale per item. Re-clicking "Mark
+ *  sold" replays into the dedupe unique index and is dropped. */
+export function manualOrderId(itemId: string): string {
+  return `manual:${itemId}`;
+}
+
+export async function handleManualSale(
+  userId: string,
+  itemId: string,
+  platform: string,
+  salePrice: number | null,
+  io: ManualSaleIO = {
+    record: recordSoldEvent,
+    process: (uid) => processPendingSoldEvents(uid),
+    endOthers: endOtherListings,
+  }
+): Promise<ManualSaleResult | null> {
+  const supabase = getSupabaseAdmin();
+
+  // Ownership check — callers 404 on null, same contract as the old path.
+  const { data: item, error } = await supabase
+    .from("inventory_items")
+    .select("id")
+    .eq("id", itemId)
+    .eq("user_id", userId)
+    .maybeSingle<{ id: string }>();
+  if (error) throw new Error(`item read failed: ${error.message}`);
+  if (!item) return null;
+
+  // Enrich the audit row with the sold channel's listing identifiers when a
+  // listing row exists. A manual sale may be on an assist channel (Facebook,
+  // OfferUp) with no row — the event still attributes via inventoryItemId.
+  const { data: listing } = await supabase
+    .from("marketplace_listings")
+    .select("external_id, meta")
+    .eq("inventory_item_id", itemId)
+    .eq("user_id", userId)
+    .eq("platform", platform)
+    .eq("environment", currentEbayEnvironment())
+    .limit(1)
+    .maybeSingle<{
+      external_id: string | null;
+      meta: Record<string, string> | null;
+    }>();
+
+  // Duplicate (re-click) → record() returns null via the dedupe index: the
+  // sale is already on the books; the passes below just retry any failed
+  // listing-ends.
+  await io.record({
+    userId,
+    platform,
+    externalOrderId: manualOrderId(itemId),
+    listingExternalId: listing?.external_id ?? null,
+    sku: listing?.meta?.sku ?? null,
+    salePrice,
+    source: "manual",
+    inventoryItemId: itemId,
+  });
+
+  // The ONE processor: atomic claim (stamps sold facts), cross-channel
+  // delist at quantity 0, audit rows, event marked processed.
+  await io.process(userId);
+
+  // Explicit final end-others pass: idempotent (already-ended listings are
+  // skipped), retries any end_failed row — the old markItemSold re-run
+  // semantics — and returns the per-channel results the UI renders.
+  const endResults = await io.endOthers(userId, itemId, platform);
+  return { ok: endResults.every((r) => r.ok), endResults };
 }
 
 /**

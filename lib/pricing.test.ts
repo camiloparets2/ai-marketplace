@@ -3,6 +3,7 @@ import {
   computeFloor,
   decidePrice,
   styleTo99,
+  realizedProfit,
   PRICING_DEFAULTS,
 } from "./pricing";
 
@@ -131,6 +132,29 @@ describe("decidePrice", () => {
     const d = decidePrice({ costBasis: null, shippingCost: null, targetPrice: null });
     expect(d.rationale).toContain("No cost basis");
     expect(d.inputs.costBasis).toBeNull();
+  });
+});
+
+describe("realizedProfit — the books are built on the REAL sale price", () => {
+  it("marketplace sale: sold − cost − fees on (price + shipping)", () => {
+    // $8 mug, $3 cost, $10.40 shipping, sold on eBay:
+    // fees = 0.136 * 18.40 + 0.40 = 2.9024 → profit ≈ 8 − 3 − 2.90
+    const profit = realizedProfit(8, 3, 10.4, "ebay");
+    expect(profit).toBeCloseTo(8 - 3 - (0.136 * 18.4 + 0.4), 2);
+  });
+
+  it("local/assisted sale (OfferUp): no marketplace fees, no shipping term", () => {
+    expect(realizedProfit(8, 3, 10.4, "offerup")).toBe(5);
+    expect(realizedProfit(8, 3, null, "facebook")).toBe(5);
+  });
+
+  it("a haggled-below-cost sale reports a LOSS, never clamped", () => {
+    expect(realizedProfit(2, 3, null, "offerup")).toBe(-1);
+  });
+
+  it("unknown platform is treated fee-free (never invents fees)", () => {
+    expect(realizedProfit(10, 4, null, "other")).toBe(6);
+    expect(realizedProfit(10, 4, null, null)).toBe(6);
   });
 });
 

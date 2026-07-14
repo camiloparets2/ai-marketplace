@@ -11,7 +11,7 @@
 // The component owns fetching; the PARENT owns the specs record (it is also
 // the save payload) and the publish gating, fed through onStatus.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   EBAY_CATEGORY_SPEC_KEY,
   EBAY_CATEGORY_NAME_SPEC_KEY,
@@ -45,7 +45,13 @@ export interface ItemSpecificsStatus {
 }
 
 export interface ItemSpecificsCardProps {
-  itemId: string;
+  // Saved draft → /api/inventory/[id]/aspects (resolution pinned on the
+  // row). null → the SNAP screen, where no draft exists yet: requirements
+  // resolve from the title via /api/ebay/aspects, and the chosen category
+  // rides to publish inside specs (__ebayCategoryId).
+  itemId: string | null;
+  // Listing title — the resolution query for the title-only path.
+  title: string;
   // Brand/Model live in their own columns and become aspects at publish
   // time — the form counts them as present without duplicating them here.
   brand: string | null;
@@ -131,6 +137,7 @@ function AspectInput({
 
 export function ItemSpecificsCard({
   itemId,
+  title,
   brand,
   model,
   specs,
@@ -140,13 +147,25 @@ export function ItemSpecificsCard({
 }: ItemSpecificsCardProps) {
   const [data, setData] = useState<AspectsPayload | null>(null);
   const [state, setState] = useState<"loading" | "done" | "error">("loading");
+  // Latest title without retriggering the mount fetch on every keystroke —
+  // explicit refetches (category change) use the current value.
+  const titleRef = useRef(title);
+  titleRef.current = title;
 
   const load = useCallback(
     async (categoryId?: string) => {
       setState("loading");
       try {
-        const qs = categoryId ? `?category=${encodeURIComponent(categoryId)}` : "";
-        const res = await fetch(`/api/inventory/${itemId}/aspects${qs}`);
+        const params = new URLSearchParams();
+        if (categoryId) params.set("category", categoryId);
+        let url: string;
+        if (itemId !== null) {
+          url = `/api/inventory/${itemId}/aspects${params.size > 0 ? `?${params}` : ""}`;
+        } else {
+          params.set("title", titleRef.current);
+          url = `/api/ebay/aspects?${params}`;
+        }
+        const res = await fetch(url);
         if (!res.ok) throw new Error(String(res.status));
         const payload = (await res.json()) as AspectsPayload;
         setData(payload);

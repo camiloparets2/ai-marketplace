@@ -155,6 +155,42 @@ export function computeFloor(
   return roundUpCent(Math.max(flatBranch, pctBranch));
 }
 
+// Marketplaces whose final-value fees the profit estimate models (with the
+// eBay-style defaults). Local/assisted channels (Facebook, OfferUp, "other")
+// charge no marketplace fee, and — buyer-paid-shipping model — with no fee
+// there is no shipping term either (the buyer's shipping payment cancels
+// the label).
+const FEE_PLATFORMS: ReadonlySet<string> = new Set([
+  "ebay",
+  "etsy",
+  "shopify",
+  "direct",
+]);
+
+/**
+ * Realized profit on a completed sale — same cash-flow model as
+ * computeFloor: the buyer pays shipping (cancels the label), and the
+ * marketplace fee applies to the TOTAL the buyer paid (price + shipping).
+ *
+ *   profit = soldPrice - costBasis - feeRate*(soldPrice + ship) - feeFlat
+ *
+ * Fee-free channels (local/assisted): profit = soldPrice - costBasis.
+ * An ESTIMATE (fee schedules vary by category) — labeled as such in the UI.
+ */
+export function realizedProfit(
+  soldPrice: number,
+  costBasis: number,
+  shippingCost: number | null,
+  soldPlatform: string | null,
+  d: PricingDefaults = PRICING_DEFAULTS
+): number {
+  const fees =
+    soldPlatform !== null && FEE_PLATFORMS.has(soldPlatform)
+      ? d.feeRate * (soldPrice + (shippingCost ?? 0)) + d.feeFlat
+      : 0;
+  return round2(soldPrice - costBasis - fees);
+}
+
 export function decidePrice(
   req: PriceRequest,
   d: PricingDefaults = PRICING_DEFAULTS
